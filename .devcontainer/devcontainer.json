@@ -1,0 +1,30 @@
+{
+  "name": "C++ Dev Container",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "args": {
+      "USERNAME": "devuser"
+    }
+  },
+  "workspaceFolder": "/workspace/${localWorkspaceFolderBasename}",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace/${localWorkspaceFolderBasename},type=bind,consistency=cached",
+  "customizations": {
+    "clion": {
+      "container": {
+        "remoteUser": "devuser"
+      },
+      "plugins": [
+        "org.jetbrains.junie",
+        "com.anthropic.code.plugin",
+        "com.intellij.ml.llm"
+      ]
+    },
+  },
+  "features": {
+    "ghcr.io/devcontainers/features/common-utils:1": {
+      "installZsh": true,
+      "configureZshAsDefaultShell": true
+    }
+  },
+  "remoteUser": "devuser"
+}
