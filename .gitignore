@@ -4,3 +4,6 @@
 
 # Build dirs
 cmake-build-debug
+
+# vcpkg binary cache
+.vcpkg-cache

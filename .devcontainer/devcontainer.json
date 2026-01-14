@@ -2,16 +2,26 @@
   "name": "C++ Dev Container",
   "build": {
     "dockerfile": "Dockerfile",
+    "context": "..",
     "args": {
       "USERNAME": "devuser"
     }
   },
   "workspaceFolder": "/workspace/${localWorkspaceFolderBasename}",
   "workspaceMount": "source=${localWorkspaceFolder},target=/workspace/${localWorkspaceFolderBasename},type=bind,consistency=cached",
+  "mounts": [
+    "source=${localWorkspaceFolder}/.vcpkg-cache,target=/home/devuser/.cache/vcpkg,type=bind,consistency=cached",
+    "source=${localEnv:HOME}/.claude,target=/home/devuser/.claude,type=bind",
+    "source=${localEnv:HOME}/.claude.json,target=/home/devuser/.claude.json,type=bind",
+    "source=${localEnv:HOME}/.codex,target=/home/devuser/.codex,type=bind"
+  ],
   "customizations": {
-    "clion": {
-      "container": {
-        "remoteUser": "devuser"
+    "jetbrains": {
+      "settings": {
+        "com.intellij:app:DateTimeFormatter.overrideSystemDateFormat": true,
+        "com.intellij:app:HttpConfigurable.use_proxy_pac": true,
+        "com.intellij:app:Vcs-Log-App-Settings.show_changes_from_parents": true,
+        "com.intellij:app:Vcs-Log-App-Settings.show_tag_names": true
       },
       "plugins": [
         "org.jetbrains.junie",
@@ -19,8 +29,24 @@
         "com.intellij.ml.llm"
       ]
     },
+    "clion": {
+      "container": {
+        "remoteUser": "devuser"
+      }
+    }
   },
+  "remoteEnv": {
+    "CC": "/usr/bin/gcc",
+    "CXX": "/usr/bin/g++",
+    "CMAKE_TOOLCHAIN_FILE": "/usr/local/vcpkg/scripts/buildsystems/vcpkg.cmake",
+    "VCPKG_DEFAULT_BINARY_CACHE": "/home/devuser/.cache/vcpkg/archives",
+    "VCPKG_BINARY_SOURCES": "clear;files,/home/devuser/.cache/vcpkg/archives,readwrite"
+  },
+  "postCreateCommand": "set -e; mkdir -p /home/devuser/.cache/vcpkg/archives /home/devuser/.cache/vcpkg/downloads; npm install -g @openai/codex;",
   "features": {
+    "ghcr.io/devcontainers/features/node:1": {
+      "version": "lts"
+    },
     "ghcr.io/devcontainers/features/common-utils:1": {
       "installZsh": true,
       "configureZshAsDefaultShell": true
