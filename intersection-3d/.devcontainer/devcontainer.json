@@ -1,0 +1,49 @@
+// For format details, see https://aka.ms/devcontainer.json. For config options, see the
+// README at: https://github.com/devcontainers/templates/tree/main/src/cpp
+{
+  "name": "C++",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "workspaceFolder": "/workspace/${localWorkspaceFolderBasename}",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace/${localWorkspaceFolderBasename},type=bind,consistency=cached",
+  "mounts": [
+    "source=${localEnv:HOME}/.claude,target=/home/vscode/.claude,type=bind",
+    "source=${localEnv:HOME}/.claude.json,target=/home/vscode/.claude.json,type=bind",
+    "source=${localEnv:HOME}/.codex,target=/home/vscode/.codex,type=bind"
+  ],
+  // Use 'postCreateCommand' to run commands after the container is created.
+  "postCreateCommand": "bash /workspace/${localWorkspaceFolderBasename}/.devcontainer/postCreateCommand.sh 2>&1 | tee /workspace/${localWorkspaceFolderBasename}/.devcontainer/postCreateCommand.log",
+  // Features to add to the dev container. More info: https://containers.dev/features.
+  "features": {
+    "ghcr.io/devcontainers/features/node:1": {
+      "version": "lts"
+    },
+    "ghcr.io/devcontainers/features/common-utils:2": {},
+  },
+  // Use 'forwardPorts' to make a list of ports inside the container available locally.
+  // "forwardPorts": [],
+
+  // Configure tool-specific properties.
+  "customizations": {
+    "jetbrains": {
+      "settings": {
+        "com.intellij:app:DateTimeFormatter.overrideSystemDateFormat": true,
+        "com.intellij:app:HttpConfigurable.use_proxy_pac": true,
+        "com.intellij:app:Vcs-Log-App-Settings.show_changes_from_parents": true,
+        "com.intellij:app:Vcs-Log-App-Settings.show_tag_names": true
+      },
+      "plugins": [
+        "org.jetbrains.junie",
+        "com.anthropic.code.plugin",
+        "com.intellij.ml.llm"
+      ],
+      "backend": "CLion"
+    }
+  },
+  "containerEnv": {
+    "CMAKE_TOOLCHAIN_FILE": "/usr/local/vcpkg/scripts/buildsystems/vcpkg.cmake"
+  },
+  // Uncomment to connect as root instead. More info: https://aka.ms/dev-containers-non-root.
+  // "remoteUser": "root"
+}

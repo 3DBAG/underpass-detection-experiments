@@ -1,0 +1,21 @@
+{
+  "name": "test-3d-intersection",
+  "version-string": "0.1.0",
+  "dependencies": [
+    "manifold",
+    "cgal",
+    "geogram",
+    "nlohmann-json",
+    {
+      "name": "gdal",
+      "default-features": false,
+      "features": [
+        "sqlite3",
+        "postgresql",
+        "geos"
+      ]
+    },
+    "geos",
+    "eigen3"
+  ]
+}

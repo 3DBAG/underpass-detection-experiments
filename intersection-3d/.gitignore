@@ -1,0 +1,13 @@
+# IDE
+.idea
+.run
+
+# Build dirs and artifacts
+cmake-build-debug
+.devcontainer/*.log
+
+# vcpkg directories
+vcpkg/installed
+vcpkg/cache
+vcpkg_installed
+!vcpkg/.gitkeep
