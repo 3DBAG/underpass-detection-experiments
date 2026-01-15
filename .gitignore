@@ -2,8 +2,12 @@
 .idea
 .run
 
-# Build dirs
+# Build dirs and artifacts
 cmake-build-debug
+.devcontainer/*.log
 
-# vcpkg binary cache
-.vcpkg-cache
+# vcpkg directories
+vcpkg/installed
+vcpkg/cache
+vcpkg_installed
+!vcpkg/.gitkeep
