@@ -2,7 +2,23 @@
 
 This project is configured for container-based development using CLion and Dev Containers.
 
-## Getting Started with Dev Containers in CLion
+## Getting Started
+
+### Option 1: Nix Development (Recommended)
+
+1.  **Prerequisites**:
+    *   [Nix](https://nixos.org/download.html) installed with flakes enabled.
+
+2.  **Development Shell**:
+    *   Run `nix develop` to enter the development environment with all dependencies.
+    *   The shell will display the cmake command with proper paths for configuration.
+    *   After configuration, build with: `cmake --build build`
+
+3.  **Building with Nix**:
+    *   To build the project directly: `nix build`
+    *   The executable will be available at `./result/bin/test-3d-intersection`
+
+### Option 2: Dev Containers in CLion
 
 1.  **Prerequisites**:
     *   Docker installed and running.

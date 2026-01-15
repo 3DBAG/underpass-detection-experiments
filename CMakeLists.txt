@@ -10,3 +10,5 @@ find_package(manifold REQUIRED)
 find_package(GDAL REQUIRED)
 
 add_executable(test_3d_intersection main.cpp)
+
+install(TARGETS test_3d_intersection DESTINATION bin)
