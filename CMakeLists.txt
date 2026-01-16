@@ -10,5 +10,6 @@ find_package(manifold REQUIRED)
 find_package(GDAL REQUIRED)
 
 add_executable(test_3d_intersection main.cpp)
+target_link_libraries(test_3d_intersection PRIVATE manifold::manifold)
 
 install(TARGETS test_3d_intersection DESTINATION bin)

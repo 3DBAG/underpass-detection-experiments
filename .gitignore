@@ -1,9 +1,12 @@
 # IDE
 .idea
 .run
+.zed
 
 # Build dirs and artifacts
 cmake-build-debug
+build
+result
 .devcontainer/*.log
 
 # vcpkg directories

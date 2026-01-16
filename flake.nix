@@ -4,12 +4,14 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
+    manifold.url = "github:elalish/manifold";
   };
 
-  outputs = { self, nixpkgs, flake-utils }:
+  outputs = { self, nixpkgs, flake-utils, manifold }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
+        manifoldPkg = manifold.packages.${system}.manifold-tbb;
 
         # Development dependencies matching vcpkg.json
         buildTools = with pkgs; [
@@ -17,8 +19,10 @@
           pkg-config
         ];
         cppDeps = with pkgs; [
-          # manifold - geometry processing library
-          manifold
+          # manifold - geometry processing library (from upstream flake)
+          manifoldPkg
+          tbb  # required by manifold-tbb
+          assimp
           clipper2
 
           # CGAL - Computational Geometry Algorithms Library
@@ -50,7 +54,7 @@
           GDAL_DATA = "${pkgs.gdal}/share/gdal";
           PROJ_LIB = "${pkgs.proj}/share/proj";
           # CMAKE_MODULE_PATH="${pkgs.geogram.dev}/lib/cmake";
-          CMAKE_PREFIX_PATH="${pkgs.manifold}/lib/cmake;${pkgs.clipper2}/lib/cmake";
+          CMAKE_PREFIX_PATH="${manifoldPkg}/lib/cmake;${pkgs.clipper2}/lib/cmake";
 
           shellHook = ''
             echo "Entering development environment for test-3d-intersection"
@@ -80,7 +84,7 @@
           cmakeFlags = [
             "-DCMAKE_BUILD_TYPE=Release"
             "-DCMAKE_MODULE_PATH=${pkgs.geogram.dev}/lib/cmake"
-            "-DCMAKE_PREFIX_PATH=${pkgs.manifold}/lib/cmake;${pkgs.clipper2}/lib/cmake"
+            "-DCMAKE_PREFIX_PATH=${manifoldPkg}/lib/cmake;${pkgs.clipper2}/lib/cmake"
           ];
 
           meta = with pkgs.lib; {
