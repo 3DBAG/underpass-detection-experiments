@@ -13,6 +13,21 @@
         pkgs = nixpkgs.legacyPackages.${system};
         manifoldPkg = manifold.packages.${system}.manifold-tbb;
 
+        # Rerun SDK derivation
+        rerunSdk = pkgs.stdenv.mkDerivation {
+          pname = "rerun-sdk";
+          version = "0.28.2";
+          src = pkgs.fetchurl {
+            url = "https://github.com/rerun-io/rerun/releases/download/0.28.2/rerun_cpp_sdk.zip";
+            sha256 = "c69d639257eb00e6385e74729f811378abb68c06ab2fad7dba355cedfff1c31b";
+          };
+          nativeBuildInputs = [ pkgs.unzip pkgs.cmake ];
+          buildInputs = [ pkgs.arrow-cpp ];
+          cmakeFlags = [
+            "-DRERUN_DOWNLOAD_AND_BUILD_ARROW=OFF"
+          ];
+        };
+
         # Development dependencies matching vcpkg.json
         buildTools = with pkgs; [
           cmake
@@ -42,6 +57,10 @@
 
           # eigen3 - linear algebra library
           eigen
+
+          # Rerun SDK - visualization library
+          rerunSdk
+          arrow-cpp
         ];
 
       in
