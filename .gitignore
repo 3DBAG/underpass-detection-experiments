@@ -4,13 +4,12 @@
 .zed
 
 # Build dirs and artifacts
-cmake-build-debug
-build
-result
-.devcontainer/*.log
+.zig-cache/
+zig-out/
+/result/bin/test_3d_intersection
 
-# vcpkg directories
-vcpkg/installed
-vcpkg/cache
-vcpkg_installed
-!vcpkg/.gitkeep
+# OSX
+.DS_Store
+
+# claude
+.claude

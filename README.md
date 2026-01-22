@@ -1,42 +1,67 @@
 # Test 3D Intersection
 
-This project is configured for container-based development using CLion and Dev Containers.
+A project for 3D geometry intersection testing using Manifold and optional Rerun visualization.
 
 ## Getting Started
 
-### Option 1: Nix Development (Recommended)
+### Prerequisites
 
-1.  **Prerequisites**:
-    *   [Nix](https://nixos.org/download.html) installed with flakes enabled.
+- [Nix](https://nixos.org/download.html) with flakes enabled
 
-2.  **Development Shell**:
-    *   Run `nix develop` to enter the development environment with all dependencies.
-    *   The shell will display the cmake command with proper paths for configuration.
-    *   After configuration, build with: `cmake --build build`
+### Quick Build
 
-3.  **Building with Nix**:
-    *   To build the project directly: `nix build`
-    *   The executable will be available at `./result/bin/test-3d-intersection`
+Build directly with Nix:
+```bash
+nix build
+```
+The executable will be at `./result/bin/test_3d_intersection`
 
-### Option 2: Dev Containers in CLion
+### Development Build
 
-1.  **Prerequisites**:
-    *   Docker installed and running.
-    *   CLion 2023.2 or later (Support for Dev Containers).
+1. Enter the development environment:
+   ```bash
+   nix develop
+   ```
 
-2.  **Open in Dev Container**:
-    *   Open this project in CLion.
-    *   CLion should automatically detect the `.devcontainer` folder and prompt you to "Create Dev Container and Mount Project".
-    *   Alternatively, you can go to `Settings | Build, Execution, Deployment | Dev Containers` to manage your containers.
+2. Build with Zig:
+   ```bash
+   zig build
+   ```
+   The executable will be at `./zig-out/bin/test_3d_intersection`
 
-3.  **Building and Running**:
-    *   Once the container is initialized, CLion will use the toolchain from within the container.
-    *   You can build and run the `test_3d_intersection` target as usual.
+### Build Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `-Drerun=true/false` | `false` | Enable Rerun visualization support |
+| `-Doptimize=Debug/ReleaseFast/ReleaseSafe/ReleaseSmall` | `Debug` | Optimization level |
+
+Example with Rerun enabled:
+```bash
+zig build -Drerun=true
+```
+
+Release build:
+```bash
+zig build -Doptimize=ReleaseFast
+```
 
 ## Project Structure
 
-*   `.devcontainer/`: Configuration for the development container.
-    *   `Dockerfile`: Defines the environment (Ubuntu 24.04, CMake, GCC, etc.).
-    *   `devcontainer.json`: Configuration for CLion to use the container.
-*   `CMakeLists.txt`: Build configuration.
-*   `main.cpp`: Main entry point.
+```
+.
+├── build.zig          # Zig build configuration
+├── flake.nix          # Nix flake for dependencies
+├── main.cpp           # Main entry point
+├── zityjson/          # CityJSON parsing library (Zig)
+│   ├── src/
+│   └── include/
+└── sample_data/       # Sample mesh files
+```
+
+## Dependencies
+
+Managed via Nix flake:
+- **manifold** - 3D geometry processing
+- **rerun** - Visualization (optional)
+- **zityjson** - CityJSON parser (built-in)

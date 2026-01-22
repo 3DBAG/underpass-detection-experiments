@@ -32,9 +32,9 @@
         buildTools = with pkgs; [
           cmake
           pkg-config
+          zig
         ];
         cppDeps = with pkgs; [
-          # manifold - geometry processing library (from upstream flake)
           manifoldPkg
           tbb  # required by manifold-tbb
           assimp
@@ -73,18 +73,14 @@
           GDAL_DATA = "${pkgs.gdal}/share/gdal";
           PROJ_LIB = "${pkgs.proj}/share/proj";
           # CMAKE_MODULE_PATH="${pkgs.geogram.dev}/lib/cmake";
-          CMAKE_PREFIX_PATH="${manifoldPkg}/lib/cmake;${pkgs.clipper2}/lib/cmake";
+          # CMAKE_PREFIX_PATH="${manifoldPkg}/lib/cmake;${pkgs.clipper2}/lib/cmake";
 
           shellHook = ''
+            export NIX_CFLAGS_COMPILE=$(echo "$NIX_CFLAGS_COMPILE" | sed 's/-fmacro-prefix-map=[^ ]*//g')
             echo "Entering development environment for test-3d-intersection"
             echo ""
-            echo "Use these cmake flags for configuration:"
-            echo "  cmake -DCMAKE_BUILD_TYPE=Release \\"
-            echo "        -DCMAKE_MODULE_PATH=${pkgs.geogram.dev}/lib/cmake \\"
-            echo "        -B build -S ."
-            echo ""
-            echo "And then to build the project:"
-            echo "  cmake --build build"
+            echo "To build the project run:"
+            echo "  zig build"
           '';
         };
 
@@ -95,16 +91,29 @@
 
           src = ./.;
 
-          nativeBuildInputs = buildTools;
+          nativeBuildInputs = [ pkgs.zig ];
 
           buildInputs = cppDeps;
 
-          # CMake configuration
-          cmakeFlags = [
-            "-DCMAKE_BUILD_TYPE=Release"
-            "-DCMAKE_MODULE_PATH=${pkgs.geogram.dev}/lib/cmake"
-            "-DCMAKE_PREFIX_PATH=${manifoldPkg}/lib/cmake;${pkgs.clipper2}/lib/cmake"
-          ];
+          # Don't run cmake configure
+          dontConfigure = true;
+
+          buildPhase = ''
+            runHook preBuild
+            # Filter out unsupported flags for Zig
+            export NIX_CFLAGS_COMPILE=$(echo "$NIX_CFLAGS_COMPILE" | sed 's/-fmacro-prefix-map=[^ ]*//g')
+            export HOME=$TMPDIR
+            export XDG_CACHE_HOME=$TMPDIR/.cache
+            zig build -Doptimize=ReleaseFast
+            runHook postBuild
+          '';
+
+          installPhase = ''
+            runHook preInstall
+            mkdir -p $out/bin
+            cp zig-out/bin/test_3d_intersection $out/bin/
+            runHook postInstall
+          '';
 
           meta = with pkgs.lib; {
             description = "A C++ project for 3D intersection testing";

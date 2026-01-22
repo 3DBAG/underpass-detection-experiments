@@ -2,8 +2,14 @@
 #include <manifold/manifold.h>
 #include <manifold/meshIO.h>
 #include <format>
-#include <rerun.hpp>
 
+#ifdef ENABLE_RERUN
+#include <rerun.hpp>
+#endif
+
+#include "zityjson.h"
+
+#ifdef ENABLE_RERUN
 // Custom collection adapter for Manifold vertex properties to Rerun Position3D
 namespace rerun {
   template <>
@@ -31,10 +37,29 @@ namespace rerun {
     }
   };
 }
+#endif
 
 int main() {
+    CityJSONHandle cj = cityjson_create();
+    if (cityjson_load(cj, "../zityjson/twobuildings.city.json") == 0) {
+        size_t count = cityjson_object_count(cj);
+        for (size_t i = 0; i < count; i++) {
+            const char* name = cityjson_get_object_name(cj, i);
+            const double* verts = cityjson_get_vertices(cj, i);
+            size_t vert_count = cityjson_get_vertex_count(cj, i);
+            std::cout << std::format("Object name: {}", name) << std::endl;
+        }
+        size_t start, end;
+        uint8_t type;
+        cityjson_get_face_info(cj, 0, 0, &start, &end, &type);
+        std::cout << std::format("Face info: start={}, end={}, type={}", start, end, type) << std::endl;
+    }
+    cityjson_destroy(cj);
+
+#ifdef ENABLE_RERUN
     const auto rec = rerun::RecordingStream("test_3d_intersection");
     rec.spawn().exit_on_failure();
+#endif
 
     auto house_ = manifold::ImportMesh("sample_data/house.ply");
     auto underpass_ = manifold::ImportMesh("sample_data/underpass.ply");
@@ -44,6 +69,7 @@ int main() {
     auto house = manifold::Manifold(house_);
     auto underpass = manifold::Manifold(underpass_);
 
+#ifdef ENABLE_RERUN
     // Visualize house mesh
     auto houseMeshGL = house.GetMeshGL();
     rec.log(
@@ -61,8 +87,11 @@ int main() {
             .with_triangle_indices(underpassMeshGL)
             .with_albedo_factor(rerun::Rgba32(100, 100, 200, 255))
     );
+#endif
 
     auto house_with_underpass = house - underpass;
+
+#ifdef ENABLE_RERUN
     // Visualize result mesh
     auto resultMeshGL = house_with_underpass.GetMeshGL();
     rec.log(
@@ -71,6 +100,7 @@ int main() {
             .with_triangle_indices(resultMeshGL)
             .with_albedo_factor(rerun::Rgba32(100, 200, 100, 255))
     );
+#endif
 
     manifold::ExportMesh("house_with_underpass.ply", house_with_underpass.GetMeshGL(), {});
 
