@@ -83,11 +83,22 @@ pub const PolygonalMesh = struct {
     }
 };
 
-const CityJSONFile = struct {
+pub const CJGeometry = struct {
+    type: CJGeometryType,
+    lod: []const u8,
+    boundaries: std.json.Value,
+};
+
+pub const CityObject = struct {
+    type: CJObjectType,
+    geometry: []const CJGeometry,
+};
+
+const CJFile = struct {
     version: []const u8,
     type: []const u8,
-    vertices: []const [3]usize,
-    CityObjects: std.json.Value,
+    vertices: []const [3]i64,
+    CityObjects: std.json.ArrayHashMap(CityObject),
     transform: struct {
         scale: [3]f64,
         translate: [3]f64,
@@ -111,19 +122,17 @@ const CityJSONFile = struct {
 const CJMultiSurfaceBounds = []const []const []usize;
 const CJSolidBounds = []const []const []const []usize;
 
-const GeomHandler = enum { multi_surface, solid };
+const CJGeometryType = enum { MultiSurface, Solid };
+const CJObjectType = enum { Building, BuildingPart };
 
-const geom_types = std.StaticStringMap(GeomHandler).initComptime(.{
-    .{ "MultiSurface", .multi_surface },
-    .{ "Solid", .solid },
+const geom_types_lookup = std.StaticStringMap(CJGeometryType).initComptime(.{
+    .{ "MultiSurface", .MultiSurface },
+    .{ "Solid", .Solid },
 });
-
-// C API opaque handle
-pub const CityJSONHandle = *CityJSON;
 
 pub const CityJSON = struct {
     allocator: std.mem.Allocator,
-    // file: CityJSONFile,
+    // file: CJFile,
     objects: std.StringArrayHashMap(PolygonalMesh),
 
     pub fn init(allocator: std.mem.Allocator) !CityJSON {
@@ -137,7 +146,8 @@ pub const CityJSON = struct {
     pub fn deinit(self: *CityJSON) void {
         for (self.objects.keys(), self.objects.values()) |key, *mesh| {
             mesh.deinit();
-            self.allocator.free(key);
+            // need to add 1 to account for null terminator (needed for C api)
+            self.allocator.free(key.ptr[0..key.len + 1]);
         }
         self.objects.deinit();
         // self.file.CityObjects.deinit();
@@ -149,7 +159,10 @@ pub const CityJSON = struct {
     }
 
     pub fn load(self: *CityJSON, path: []const u8) !void {
-      const file = try std.fs.cwd().openFile(path, .{ .mode = .read_only });
+      const file = if (std.fs.path.isAbsolute(path))
+          try std.fs.openFileAbsolute(path, .{ .mode = .read_only })
+      else
+          try std.fs.cwd().openFile(path, .{ .mode = .read_only });
       defer file.close();
       var read_buf: [2048]u8 = undefined;
       var f_reader: std.fs.File.Reader = file.reader(&read_buf);
@@ -158,7 +171,7 @@ pub const CityJSON = struct {
       defer j_reader.deinit();
 
       // Parse into the struct
-      const parsed = try std.json.parseFromTokenSource(CityJSONFile, self.allocator, &j_reader, .{
+      const parsed = try std.json.parseFromTokenSource(CJFile, self.allocator, &j_reader, .{
           .ignore_unknown_fields = true,
       });
       defer parsed.deinit();
@@ -180,37 +193,62 @@ pub const CityJSON = struct {
       std.debug.print("Translate: {d}, {d}, {d}\n", .{ cj.transform.translate[0], cj.transform.translate[1], cj.transform.translate[2] });
 
       // Accessing the dynamic part:
-      const city_objs = parsed.value.CityObjects.object; // It's a StringHashMap
-      for (city_objs.keys(), city_objs.values()) |key, obj| {
-          std.debug.print("Key: {s}\n", .{key});
-          const geom = obj.object.get("geometry").?;
-          // geom.dump();
-          const geom_objs = geom.array;
-          for (geom_objs.items) |geom_obj| {
-              if (geom_obj.object.get("lod")) |lod_value| {
-                  std.debug.print("LOD: {s}\n", .{lod_value.string});
-              }
+      const city_objs = parsed.value.CityObjects; // It's an ArrayHashMap
+      for (city_objs.map.keys(), city_objs.map.values()) |key, obj| {
+          std.debug.print("\nID: {s}\n", .{key});
+          const cjtype = obj.type;
+          // const cjtype_str = cjtype.string;
+          std.debug.print("Type: {d}\n", .{cjtype});
+
+          for (obj.geometry) |g| {
+              std.debug.print("Geometry Type: {d}\n", .{g.type});
+              std.debug.print("LOD: {s}\n", .{g.lod});
 
               var mesh = PolygonalMesh.init(self.allocator);
 
-              const geomtype = geom_obj.object.get("type").?.string;
-              if (geom_types.get(geomtype)) |handler| {
-                  switch (handler) {
-                      .multi_surface => {
-                        std.debug.print("MultiSurface type\n", .{});
-                        const parsed_ = std.json.parseFromValue(CJMultiSurfaceBounds, self.allocator, geom_obj.object.get("boundaries").?, .{}) catch |err| {
-                            std.debug.print("Error parsing bounds: {any}\n", .{err});
-                            return;
-                        };
-                        defer parsed_.deinit();
-                        const bounds = parsed_.value;
-                        for (bounds) |polygon| {
+              switch (g.type) {
+                  .MultiSurface => {
+                    std.debug.print("MultiSurface type\n", .{});
+                    const parsed_ = std.json.parseFromValue(CJMultiSurfaceBounds, self.allocator, g.boundaries, .{}) catch |err| {
+                        std.debug.print("Error parsing bounds: {any}\n", .{err});
+                        return;
+                    };
+                    defer parsed_.deinit();
+                    const bounds = parsed_.value;
+                    for (bounds) |polygon| {
+                        for (polygon) |ring| {
+                            // Collect vertex indices for this ring
+                            var ring_indices = try std.ArrayList(usize).initCapacity(self.allocator, ring.len);
+                            defer ring_indices.deinit(self.allocator);
+
+                            // TODO: handle holes better
+                            for (ring) |vi| {
+                                const vertex_idx = try mesh.addVertex(cj.getTransformedVertex(vi));
+                                try ring_indices.append(self.allocator, vertex_idx);
+                            }
+
+                            // Add the face for this ring
+                            try mesh.addFace(ring_indices.items, .wall);  // or appropriate FaceType
+                        }
+                    }
+                  },
+                  .Solid => {
+                    std.debug.print("Solid type\n", .{});
+                    const parsed_ = std.json.parseFromValue(CJSolidBounds, self.allocator, g.boundaries, .{}) catch |err| {
+                        std.debug.print("Error parsing bounds: {any}\n", .{err});
+                        return;
+                    };
+                    defer parsed_.deinit();
+                    const bounds = parsed_.value;
+                    // todo handle interiot vs exterior shells
+                    for (bounds) |shell| {
+                        for (shell) |polygon| {
                             for (polygon) |ring| {
                                 // Collect vertex indices for this ring
                                 var ring_indices = try std.ArrayList(usize).initCapacity(self.allocator, ring.len);
                                 defer ring_indices.deinit(self.allocator);
 
-                                // TODO: handle holes better
+                                // TODO: handle holes better vs exterior ring
                                 for (ring) |vi| {
                                     const vertex_idx = try mesh.addVertex(cj.getTransformedVertex(vi));
                                     try ring_indices.append(self.allocator, vertex_idx);
@@ -220,157 +258,134 @@ pub const CityJSON = struct {
                                 try mesh.addFace(ring_indices.items, .wall);  // or appropriate FaceType
                             }
                         }
-                      },
-                      .solid => {
-                        std.debug.print("Solid type\n", .{});
-                        const parsed_ = std.json.parseFromValue(CJSolidBounds, self.allocator, geom_obj.object.get("boundaries").?, .{}) catch |err| {
-                            std.debug.print("Error parsing bounds: {any}\n", .{err});
-                            return;
-                        };
-                        defer parsed_.deinit();
-                        const bounds = parsed_.value;
-                        // todo handle interiot vs exterior shells
-                        for (bounds) |shell| {
-                            for (shell) |polygon| {
-                                for (polygon) |ring| {
-                                    // Collect vertex indices for this ring
-                                    var ring_indices = try std.ArrayList(usize).initCapacity(self.allocator, ring.len);
-                                    defer ring_indices.deinit(self.allocator);
-
-                                    // TODO: handle holes better vs exterior ring
-                                    for (ring) |vi| {
-                                        const vertex_idx = try mesh.addVertex(cj.getTransformedVertex(vi));
-                                        try ring_indices.append(self.allocator, vertex_idx);
-                                    }
-
-                                    // Add the face for this ring
-                                    try mesh.addFace(ring_indices.items, .wall);  // or appropriate FaceType
-                                }
-                            }
-                        }
-                      },
-                  }
-              } else {
-                  std.debug.print("Unknown type\n", .{});
+                    }
+                  },
               }
 
               std.debug.print("Mesh has {d} faces\n", .{mesh.faces.items.len});
               std.debug.print("Mesh has {d} vertices\n", .{mesh.vertices.items.len/3});
-              if (self.objects.getPtr(key)) |existing_mesh| {
-                  existing_mesh.deinit();
+              if (self.objects.getPtr(key) == null) {
+                  // dupeZ null terminates the string (for C compatibility)
+                  const owned_key = try self.allocator.dupeZ(u8, key);
+                  try self.objects.put(owned_key, mesh);
+                  std.debug.print("Added mesh for {s}\n", .{owned_key});
               }
-              const owned_key = try self.allocator.dupe(u8, key);
-              try self.objects.put(owned_key, mesh);
-
           }
       }
     }
 
 };
 
-// =============================================================================
-// C API exports
-// =============================================================================
+// // =============================================================================
+// // C API exports
+// // =============================================================================
 
-var c_allocator: std.mem.Allocator = std.heap.c_allocator;
+// var c_allocator: std.mem.Allocator = std.heap.c_allocator;
 
-/// Create a new CityJSON instance. Returns null on failure.
-export fn cityjson_create() callconv(.c) ?CityJSONHandle {
-    const cj = c_allocator.create(CityJSON) catch return null;
-    cj.* = CityJSON.init(c_allocator) catch {
-        c_allocator.destroy(cj);
-        return null;
-    };
-    return cj;
-}
+// // C API opaque handle
+// pub const CityJSONHandle = *CityJSON;
 
-/// Destroy a CityJSON instance and free all associated memory.
-export fn cityjson_destroy(handle: ?CityJSONHandle) callconv(.c) void {
-    if (handle) |cj| {
-        cj.deinit();
-        c_allocator.destroy(cj);
-    }
-}
+// /// Create a new CityJSON instance. Returns null on failure.
+// export fn cityjson_create() callconv(.c) ?CityJSONHandle {
+//     const cj = c_allocator.create(CityJSON) catch return null;
+//     cj.* = CityJSON.init(c_allocator) catch {
+//         c_allocator.destroy(cj);
+//         return null;
+//     };
+//     return cj;
+// }
 
-/// Load a CityJSON file. Returns 0 on success, non-zero on failure.
-export fn cityjson_load(handle: ?CityJSONHandle, path: [*c]const u8) callconv(.c) c_int {
-    const cj = handle orelse return -1;
-    const path_slice = std.mem.span(path);
-    cj.load(path_slice) catch return -1;
-    return 0;
-}
+// /// Destroy a CityJSON instance and free all associated memory.
+// export fn cityjson_destroy(handle: ?CityJSONHandle) callconv(.c) void {
+//     if (handle) |cj| {
+//         cj.deinit();
+//         c_allocator.destroy(cj);
+//     }
+// }
 
-/// Get the number of objects in the CityJSON.
-export fn cityjson_object_count(handle: ?CityJSONHandle) callconv(.c) usize {
-    const cj = handle orelse return 0;
-    return cj.objects.count();
-}
+// /// Load a CityJSON file. Returns 0 on success, non-zero on failure.
+// export fn cityjson_load(handle: ?CityJSONHandle, path: [*c]const u8) callconv(.c) c_int {
+//     const cj = handle orelse return -1;
+//     const path_slice = std.mem.span(path);
+//     std.debug.print("Loading CityJSON: {s}\n", .{path});
+//     cj.load(path_slice) catch |err| {
+//         std.debug.print("Error loading CityJSON: {}\n", .{err});
+//         return -1;
+//     };
+//     return 0;
+// }
 
-/// Get the name of an object by index. Returns null if index is out of bounds.
-export fn cityjson_get_object_name(handle: ?CityJSONHandle, index: usize) callconv(.c) [*c]const u8 {
-    const cj = handle orelse return null;
-    const keys = cj.objects.keys();
-    if (index >= keys.len) return null;
-    return keys[index].ptr;
-}
+// /// Get the number of objects in the CityJSON.
+// export fn cityjson_object_count(handle: ?CityJSONHandle) callconv(.c) usize {
+//     const cj = handle orelse return 0;
+//     return cj.objects.count();
+// }
 
-/// Get the vertex count for an object by index.
-export fn cityjson_get_vertex_count(handle: ?CityJSONHandle, index: usize) callconv(.c) usize {
-    const cj = handle orelse return 0;
-    const values = cj.objects.values();
-    if (index >= values.len) return 0;
-    return values[index].vertices.items.len / 3;
-}
+// /// Get the name of an object by index. Returns null if index is out of bounds.
+// export fn cityjson_get_object_name(handle: ?CityJSONHandle, index: usize) callconv(.c) [*c]const u8 {
+//     const cj = handle orelse return null;
+//     const keys = cj.objects.keys();
+//     if (index >= keys.len) return null;
+//     return keys[index].ptr;
+// }
 
-/// Get the face count for an object by index.
-export fn cityjson_get_face_count(handle: ?CityJSONHandle, index: usize) callconv(.c) usize {
-    const cj = handle orelse return 0;
-    const values = cj.objects.values();
-    if (index >= values.len) return 0;
-    return values[index].faces.items.len;
-}
+// /// Get the vertex count for an object by index.
+// export fn cityjson_get_vertex_count(handle: ?CityJSONHandle, index: usize) callconv(.c) usize {
+//     const cj = handle orelse return 0;
+//     const values = cj.objects.values();
+//     if (index >= values.len) return 0;
+//     return values[index].vertices.items.len / 3;
+// }
 
-/// Get pointer to vertex data (x, y, z triplets as f64) for an object by index.
-export fn cityjson_get_vertices(handle: ?CityJSONHandle, index: usize) callconv(.c) [*c]const f64 {
-    const cj = handle orelse return null;
-    const values = cj.objects.values();
-    if (index >= values.len) return null;
-    return values[index].vertices.items.ptr;
-}
+// /// Get the face count for an object by index.
+// export fn cityjson_get_face_count(handle: ?CityJSONHandle, index: usize) callconv(.c) usize {
+//     const cj = handle orelse return 0;
+//     const values = cj.objects.values();
+//     if (index >= values.len) return 0;
+//     return values[index].faces.items.len;
+// }
 
-/// Get pointer to index data for an object by index.
-export fn cityjson_get_indices(handle: ?CityJSONHandle, index: usize) callconv(.c) [*c]const usize {
-    const cj = handle orelse return null;
-    const values = cj.objects.values();
-    if (index >= values.len) return null;
-    return values[index].indices.items.ptr;
-}
+// /// Get pointer to vertex data (x, y, z triplets as f64) for an object by index.
+// export fn cityjson_get_vertices(handle: ?CityJSONHandle, index: usize) callconv(.c) [*c]const f64 {
+//     const cj = handle orelse return null;
+//     const values = cj.objects.values();
+//     if (index >= values.len) return null;
+//     return values[index].vertices.items.ptr;
+// }
 
-/// Get the index count for an object by index.
-export fn cityjson_get_index_count(handle: ?CityJSONHandle, index: usize) callconv(.c) usize {
-    const cj = handle orelse return 0;
-    const values = cj.objects.values();
-    if (index >= values.len) return 0;
-    return values[index].indices.items.len;
-}
+// /// Get pointer to index data for an object by index.
+// export fn cityjson_get_indices(handle: ?CityJSONHandle, index: usize) callconv(.c) [*c]const usize {
+//     const cj = handle orelse return null;
+//     const values = cj.objects.values();
+//     if (index >= values.len) return null;
+//     return values[index].indices.items.ptr;
+// }
 
-/// Get face info: start index and vertex count. Returns 0 on success, -1 on failure.
-export fn cityjson_get_face_info(
-    handle: ?CityJSONHandle,
-    object_index: usize,
-    face_index: usize,
-    out_start: *usize,
-    out_count: *usize,
-    out_face_type: *u8,
-) callconv(.c) c_int {
-    const cj = handle orelse return -1;
-    const values = cj.objects.values();
-    if (object_index >= values.len) return -1;
-    const mesh = values[object_index];
-    if (face_index >= mesh.faces.items.len) return -1;
-    const face = mesh.faces.items[face_index];
-    out_start.* = face.start;
-    out_count.* = face.count;
-    out_face_type.* = @intFromEnum(face.face_type);
-    return 0;
-}
+// /// Get the index count for an object by index.
+// export fn cityjson_get_index_count(handle: ?CityJSONHandle, index: usize) callconv(.c) usize {
+//     const cj = handle orelse return 0;
+//     const values = cj.objects.values();
+//     if (index >= values.len) return 0;
+//     return values[index].indices.items.len;
+// }
+
+// /// Get face info: start index and vertex count. Returns 0 on success, -1 on failure.
+// export fn cityjson_get_face_info(
+//     handle: ?CityJSONHandle,
+//     object_index: usize,
+//     face_index: usize,
+//     out_start: *usize,
+//     out_count: *usize,
+//     out_face_type: *u8,
+// ) callconv(.c) c_int {
+//     const cj = handle orelse return -1;
+//     const values = cj.objects.values();
+//     if (object_index >= values.len) return -1;
+//     const mesh = values[object_index];
+//     if (face_index >= mesh.faces.items.len) return -1;
+//     const face = mesh.faces.items[face_index];
+//     out_start.* = face.start;
+//     out_count.* = face.count;
+//     out_face_type.* = @intFromEnum(face.face_type);
+//     return 0;
+// }
