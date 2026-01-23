@@ -39,28 +39,32 @@ size_t cityjson_object_count(CityJSONHandle handle);
 // Returns NULL if index is out of bounds.
 const char* cityjson_get_object_name(CityJSONHandle handle, size_t index);
 
-// Get the vertex count for an object by index.
-size_t cityjson_get_vertex_count(CityJSONHandle handle, size_t index);
+// Get the geometry count for an object by index.
+size_t cityjson_get_geometry_count(CityJSONHandle handle, size_t object_index);
 
-// Get the face count for an object by index.
-size_t cityjson_get_face_count(CityJSONHandle handle, size_t index);
+// Get the vertex count for a geometry by object and geometry index.
+size_t cityjson_get_vertex_count(CityJSONHandle handle, size_t object_index, size_t geometry_index);
 
-// Get pointer to vertex data (x, y, z triplets as double) for an object by index.
+// Get the face count for a geometry by object and geometry index.
+size_t cityjson_get_face_count(CityJSONHandle handle, size_t object_index, size_t geometry_index);
+
+// Get pointer to vertex data (x, y, z triplets as double) for a geometry by object and geometry index.
 // Returns NULL if index is out of bounds.
-const double* cityjson_get_vertices(CityJSONHandle handle, size_t index);
+const double* cityjson_get_vertices(CityJSONHandle handle, size_t object_index, size_t geometry_index);
 
-// Get pointer to index data for an object by index.
+// Get pointer to index data for a geometry by object and geometry index.
 // Returns NULL if index is out of bounds.
-const size_t* cityjson_get_indices(CityJSONHandle handle, size_t index);
+const size_t* cityjson_get_indices(CityJSONHandle handle, size_t object_index, size_t geometry_index);
 
-// Get the index count for an object by index.
-size_t cityjson_get_index_count(CityJSONHandle handle, size_t index);
+// Get the index count for a geometry by object and geometry index.
+size_t cityjson_get_index_count(CityJSONHandle handle, size_t object_index, size_t geometry_index);
 
 // Get face info: start index, vertex count, and face type.
 // Returns 0 on success, -1 on failure.
 int cityjson_get_face_info(
     CityJSONHandle handle,
     size_t object_index,
+    size_t geometry_index,
     size_t face_index,
     size_t* out_start,
     size_t* out_count,

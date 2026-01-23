@@ -54,13 +54,16 @@ int main(int argc, char* argv[]) {
         size_t count = cityjson_object_count(cj);
         for (size_t i = 0; i < count; i++) {
             const char* name = cityjson_get_object_name(cj, i);
-            const double* verts = cityjson_get_vertices(cj, i);
-            size_t vert_count = cityjson_get_vertex_count(cj, i);
-            // std::cout << std::format("Object name: {}", name) << std::endl;
+            size_t geom_count = cityjson_get_geometry_count(cj, i);
+            for (size_t g = 0; g < geom_count; g++) {
+                const double* verts = cityjson_get_vertices(cj, i, g);
+                size_t vert_count = cityjson_get_vertex_count(cj, i, g);
+                // std::cout << std::format("Object name: {}, geometry: {}", name, g) << std::endl;
+            }
         }
         size_t start, end;
         uint8_t type;
-        cityjson_get_face_info(cj, 0, 0, &start, &end, &type);
+        cityjson_get_face_info(cj, 0, 0, 0, &start, &end, &type);
         std::cout << std::format("Face info: start={}, end={}, type={}", start, end, type) << std::endl;
     }
     cityjson_destroy(cj);

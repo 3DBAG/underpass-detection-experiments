@@ -89,7 +89,7 @@ pub const CJGeometry = struct {
     boundaries: std.json.Value,
 };
 
-pub const CityObject = struct {
+pub const CJObject = struct {
     type: CJObjectType,
     geometry: []const CJGeometry,
 };
@@ -98,7 +98,7 @@ const CJFile = struct {
     version: []const u8,
     type: []const u8,
     vertices: []const [3]i64,
-    CityObjects: std.json.ArrayHashMap(CityObject),
+    CityObjects: std.json.ArrayHashMap(CJObject),
     transform: struct {
         scale: [3]f64,
         translate: [3]f64,
@@ -125,15 +125,49 @@ const CJSolidBounds = []const []const []const []usize;
 const CJGeometryType = enum { MultiSurface, Solid };
 const CJObjectType = enum { Building, BuildingPart };
 
-const geom_types_lookup = std.StaticStringMap(CJGeometryType).initComptime(.{
-    .{ "MultiSurface", .MultiSurface },
-    .{ "Solid", .Solid },
-});
-
 pub const CityJSON = struct {
+
+    pub const StoredCityObject = struct {
+        type: CJObjectType,
+        geometries: [] StoredGeometry,
+
+        pub fn init(allocator: std.mem.Allocator, object_type: CJObjectType, num_geometries: usize) !StoredCityObject {
+            return StoredCityObject{
+                .type = object_type,
+                .geometries = try allocator.alloc(StoredGeometry, num_geometries),
+            };
+        }
+
+        pub fn deinit(self: *StoredCityObject, allocator: std.mem.Allocator) void {
+          for (self.geometries) |*geometry| {
+            geometry.deinit(allocator);
+          }
+          allocator.free(self.geometries);
+        }
+    };
+
+    pub const StoredGeometry = struct {
+        type: CJGeometryType,
+        lod: []const u8,
+        polygonal_mesh: PolygonalMesh,
+
+        pub fn init(allocator: std.mem.Allocator, geometry_type: CJGeometryType, lod: []const u8) !StoredGeometry {
+            return StoredGeometry{
+                .type = geometry_type,
+                .lod = try allocator.dupe(u8, lod),
+                .polygonal_mesh = PolygonalMesh.init(allocator),
+            };
+        }
+
+        pub fn deinit(self: *StoredGeometry, allocator: std.mem.Allocator) void {
+          allocator.free(self.lod);
+          self.polygonal_mesh.deinit();
+        }
+    };
+
     allocator: std.mem.Allocator,
     // file: CJFile,
-    objects: std.StringArrayHashMap(PolygonalMesh),
+    objects: std.StringArrayHashMap(StoredCityObject),
 
     pub fn init(allocator: std.mem.Allocator) !CityJSON {
         return CityJSON{
@@ -144,8 +178,8 @@ pub const CityJSON = struct {
     }
 
     pub fn deinit(self: *CityJSON) void {
-        for (self.objects.keys(), self.objects.values()) |key, *mesh| {
-            mesh.deinit();
+        for (self.objects.keys(), self.objects.values()) |key, *object| {
+            object.deinit(self.allocator);
             // need to add 1 to account for null terminator (needed for C api)
             self.allocator.free(key.ptr[0..key.len + 1]);
         }
@@ -196,19 +230,21 @@ pub const CityJSON = struct {
       const city_objs = parsed.value.CityObjects; // It's an ArrayHashMap
       for (city_objs.map.keys(), city_objs.map.values()) |key, obj| {
           std.debug.print("\nID: {s}\n", .{key});
-          const cjtype = obj.type;
-          // const cjtype_str = cjtype.string;
-          std.debug.print("Type: {d}\n", .{cjtype});
+          std.debug.print("Type: {s}\n", .{@tagName(obj.type)});
 
-          for (obj.geometry) |g| {
-              std.debug.print("Geometry Type: {d}\n", .{g.type});
+          const owned_key = try self.allocator.dupeZ(u8, key);
+          try self.objects.put(owned_key, try StoredCityObject.init(self.allocator, obj.type, obj.geometry.len));
+          const stored_city_object = self.objects.getPtr(key).?;
+
+          for (obj.geometry, 0..) |g, i| {
+              std.debug.print("Geometry Type: {s}\n", .{@tagName(g.type)});
               std.debug.print("LOD: {s}\n", .{g.lod});
 
-              var mesh = PolygonalMesh.init(self.allocator);
+              const geom = &stored_city_object.geometries[i];
+              geom.* = try StoredGeometry.init(self.allocator, g.type, g.lod);
 
               switch (g.type) {
                   .MultiSurface => {
-                    std.debug.print("MultiSurface type\n", .{});
                     const parsed_ = std.json.parseFromValue(CJMultiSurfaceBounds, self.allocator, g.boundaries, .{}) catch |err| {
                         std.debug.print("Error parsing bounds: {any}\n", .{err});
                         return;
@@ -223,12 +259,12 @@ pub const CityJSON = struct {
 
                             // TODO: handle holes better
                             for (ring) |vi| {
-                                const vertex_idx = try mesh.addVertex(cj.getTransformedVertex(vi));
+                                const vertex_idx = try geom.polygonal_mesh.addVertex(cj.getTransformedVertex(vi));
                                 try ring_indices.append(self.allocator, vertex_idx);
                             }
 
                             // Add the face for this ring
-                            try mesh.addFace(ring_indices.items, .wall);  // or appropriate FaceType
+                            try geom.polygonal_mesh.addFace(ring_indices.items, .wall);  // or appropriate FaceType
                         }
                     }
                   },
@@ -250,26 +286,20 @@ pub const CityJSON = struct {
 
                                 // TODO: handle holes better vs exterior ring
                                 for (ring) |vi| {
-                                    const vertex_idx = try mesh.addVertex(cj.getTransformedVertex(vi));
+                                    const vertex_idx = try geom.polygonal_mesh.addVertex(cj.getTransformedVertex(vi));
                                     try ring_indices.append(self.allocator, vertex_idx);
                                 }
 
                                 // Add the face for this ring
-                                try mesh.addFace(ring_indices.items, .wall);  // or appropriate FaceType
+                                try geom.polygonal_mesh.addFace(ring_indices.items, .wall);  // or appropriate FaceType
                             }
                         }
                     }
                   },
               }
 
-              std.debug.print("Mesh has {d} faces\n", .{mesh.faces.items.len});
-              std.debug.print("Mesh has {d} vertices\n", .{mesh.vertices.items.len/3});
-              if (self.objects.getPtr(key) == null) {
-                  // dupeZ null terminates the string (for C compatibility)
-                  const owned_key = try self.allocator.dupeZ(u8, key);
-                  try self.objects.put(owned_key, mesh);
-                  std.debug.print("Added mesh for {s}\n", .{owned_key});
-              }
+              std.debug.print("Mesh has {d} faces\n", .{geom.polygonal_mesh.faces.items.len});
+              std.debug.print("Mesh has {d} vertices\n", .{geom.polygonal_mesh.vertices.items.len/3});
           }
       }
     }
@@ -329,50 +359,69 @@ export fn cityjson_get_object_name(handle: ?CityJSONHandle, index: usize) callco
     return keys[index].ptr;
 }
 
-/// Get the vertex count for an object by index.
-export fn cityjson_get_vertex_count(handle: ?CityJSONHandle, index: usize) callconv(.c) usize {
+/// Get the geometry count for an object by index.
+export fn cityjson_get_geometry_count(handle: ?CityJSONHandle, object_index: usize) callconv(.c) usize {
     const cj = handle orelse return 0;
     const values = cj.objects.values();
-    if (index >= values.len) return 0;
-    return values[index].vertices.items.len / 3;
+    if (object_index >= values.len) return 0;
+    return values[object_index].geometries.len;
 }
 
-/// Get the face count for an object by index.
-export fn cityjson_get_face_count(handle: ?CityJSONHandle, index: usize) callconv(.c) usize {
+/// Get the vertex count for a geometry by object and geometry index.
+export fn cityjson_get_vertex_count(handle: ?CityJSONHandle, object_index: usize, geometry_index: usize) callconv(.c) usize {
     const cj = handle orelse return 0;
     const values = cj.objects.values();
-    if (index >= values.len) return 0;
-    return values[index].faces.items.len;
+    if (object_index >= values.len) return 0;
+    const geometries = values[object_index].geometries;
+    if (geometry_index >= geometries.len) return 0;
+    return geometries[geometry_index].polygonal_mesh.vertices.items.len / 3;
 }
 
-/// Get pointer to vertex data (x, y, z triplets as f64) for an object by index.
-export fn cityjson_get_vertices(handle: ?CityJSONHandle, index: usize) callconv(.c) [*c]const f64 {
+/// Get the face count for a geometry by object and geometry index.
+export fn cityjson_get_face_count(handle: ?CityJSONHandle, object_index: usize, geometry_index: usize) callconv(.c) usize {
+    const cj = handle orelse return 0;
+    const values = cj.objects.values();
+    if (object_index >= values.len) return 0;
+    const geometries = values[object_index].geometries;
+    if (geometry_index >= geometries.len) return 0;
+    return geometries[geometry_index].polygonal_mesh.faces.items.len;
+}
+
+/// Get pointer to vertex data (x, y, z triplets as f64) for a geometry by object and geometry index.
+export fn cityjson_get_vertices(handle: ?CityJSONHandle, object_index: usize, geometry_index: usize) callconv(.c) [*c]const f64 {
     const cj = handle orelse return null;
     const values = cj.objects.values();
-    if (index >= values.len) return null;
-    return values[index].vertices.items.ptr;
+    if (object_index >= values.len) return null;
+    const geometries = values[object_index].geometries;
+    if (geometry_index >= geometries.len) return null;
+    return geometries[geometry_index].polygonal_mesh.vertices.items.ptr;
 }
 
-/// Get pointer to index data for an object by index.
-export fn cityjson_get_indices(handle: ?CityJSONHandle, index: usize) callconv(.c) [*c]const usize {
+/// Get pointer to index data for a geometry by object and geometry index.
+export fn cityjson_get_indices(handle: ?CityJSONHandle, object_index: usize, geometry_index: usize) callconv(.c) [*c]const usize {
     const cj = handle orelse return null;
     const values = cj.objects.values();
-    if (index >= values.len) return null;
-    return values[index].indices.items.ptr;
+    if (object_index >= values.len) return null;
+    const geometries = values[object_index].geometries;
+    if (geometry_index >= geometries.len) return null;
+    return geometries[geometry_index].polygonal_mesh.indices.items.ptr;
 }
 
-/// Get the index count for an object by index.
-export fn cityjson_get_index_count(handle: ?CityJSONHandle, index: usize) callconv(.c) usize {
+/// Get the index count for a geometry by object and geometry index.
+export fn cityjson_get_index_count(handle: ?CityJSONHandle, object_index: usize, geometry_index: usize) callconv(.c) usize {
     const cj = handle orelse return 0;
     const values = cj.objects.values();
-    if (index >= values.len) return 0;
-    return values[index].indices.items.len;
+    if (object_index >= values.len) return 0;
+    const geometries = values[object_index].geometries;
+    if (geometry_index >= geometries.len) return 0;
+    return geometries[geometry_index].polygonal_mesh.indices.items.len;
 }
 
 /// Get face info: start index and vertex count. Returns 0 on success, -1 on failure.
 export fn cityjson_get_face_info(
     handle: ?CityJSONHandle,
     object_index: usize,
+    geometry_index: usize,
     face_index: usize,
     out_start: *usize,
     out_count: *usize,
@@ -381,7 +430,9 @@ export fn cityjson_get_face_info(
     const cj = handle orelse return -1;
     const values = cj.objects.values();
     if (object_index >= values.len) return -1;
-    const mesh = values[object_index];
+    const geometries = values[object_index].geometries;
+    if (geometry_index >= geometries.len) return -1;
+    const mesh = &geometries[geometry_index].polygonal_mesh;
     if (face_index >= mesh.faces.items.len) return -1;
     const face = mesh.faces.items[face_index];
     out_start.* = face.start;
