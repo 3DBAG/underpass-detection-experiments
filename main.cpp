@@ -1,7 +1,11 @@
 #include <iostream>
+#include <format>
+
 #include <manifold/manifold.h>
 #include <manifold/meshIO.h>
-#include <format>
+
+#include <CGAL/Simple_cartesian.h>
+#include <CGAL/Surface_mesh.h>
 
 #ifdef ENABLE_RERUN
 #include <rerun.hpp>
@@ -39,15 +43,20 @@ namespace rerun {
 }
 #endif
 
-int main() {
+int main(int argc, char* argv[]) {
+    if (argc < 2) {
+        std::cerr << "Usage: " << argv[0] << " <cityjson_file>" << std::endl;
+        return 1;
+    }
+
     CityJSONHandle cj = cityjson_create();
-    if (cityjson_load(cj, "../zityjson/twobuildings.city.json") == 0) {
+    if (cityjson_load(cj, argv[1]) == 0) {
         size_t count = cityjson_object_count(cj);
         for (size_t i = 0; i < count; i++) {
             const char* name = cityjson_get_object_name(cj, i);
             const double* verts = cityjson_get_vertices(cj, i);
             size_t vert_count = cityjson_get_vertex_count(cj, i);
-            std::cout << std::format("Object name: {}", name) << std::endl;
+            // std::cout << std::format("Object name: {}", name) << std::endl;
         }
         size_t start, end;
         uint8_t type;

@@ -280,112 +280,112 @@ pub const CityJSON = struct {
 // // C API exports
 // // =============================================================================
 
-// var c_allocator: std.mem.Allocator = std.heap.c_allocator;
+var c_allocator: std.mem.Allocator = std.heap.c_allocator;
 
-// // C API opaque handle
-// pub const CityJSONHandle = *CityJSON;
+// C API opaque handle
+pub const CityJSONHandle = *CityJSON;
 
-// /// Create a new CityJSON instance. Returns null on failure.
-// export fn cityjson_create() callconv(.c) ?CityJSONHandle {
-//     const cj = c_allocator.create(CityJSON) catch return null;
-//     cj.* = CityJSON.init(c_allocator) catch {
-//         c_allocator.destroy(cj);
-//         return null;
-//     };
-//     return cj;
-// }
+/// Create a new CityJSON instance. Returns null on failure.
+export fn cityjson_create() callconv(.c) ?CityJSONHandle {
+    const cj = c_allocator.create(CityJSON) catch return null;
+    cj.* = CityJSON.init(c_allocator) catch {
+        c_allocator.destroy(cj);
+        return null;
+    };
+    return cj;
+}
 
-// /// Destroy a CityJSON instance and free all associated memory.
-// export fn cityjson_destroy(handle: ?CityJSONHandle) callconv(.c) void {
-//     if (handle) |cj| {
-//         cj.deinit();
-//         c_allocator.destroy(cj);
-//     }
-// }
+/// Destroy a CityJSON instance and free all associated memory.
+export fn cityjson_destroy(handle: ?CityJSONHandle) callconv(.c) void {
+    if (handle) |cj| {
+        cj.deinit();
+        c_allocator.destroy(cj);
+    }
+}
 
-// /// Load a CityJSON file. Returns 0 on success, non-zero on failure.
-// export fn cityjson_load(handle: ?CityJSONHandle, path: [*c]const u8) callconv(.c) c_int {
-//     const cj = handle orelse return -1;
-//     const path_slice = std.mem.span(path);
-//     std.debug.print("Loading CityJSON: {s}\n", .{path});
-//     cj.load(path_slice) catch |err| {
-//         std.debug.print("Error loading CityJSON: {}\n", .{err});
-//         return -1;
-//     };
-//     return 0;
-// }
+/// Load a CityJSON file. Returns 0 on success, non-zero on failure.
+export fn cityjson_load(handle: ?CityJSONHandle, path: [*c]const u8) callconv(.c) c_int {
+    const cj = handle orelse return -1;
+    const path_slice = std.mem.span(path);
+    std.debug.print("Loading CityJSON: {s}\n", .{path});
+    cj.load(path_slice) catch |err| {
+        std.debug.print("Error loading CityJSON: {}\n", .{err});
+        return -1;
+    };
+    return 0;
+}
 
-// /// Get the number of objects in the CityJSON.
-// export fn cityjson_object_count(handle: ?CityJSONHandle) callconv(.c) usize {
-//     const cj = handle orelse return 0;
-//     return cj.objects.count();
-// }
+/// Get the number of objects in the CityJSON.
+export fn cityjson_object_count(handle: ?CityJSONHandle) callconv(.c) usize {
+    const cj = handle orelse return 0;
+    return cj.objects.count();
+}
 
-// /// Get the name of an object by index. Returns null if index is out of bounds.
-// export fn cityjson_get_object_name(handle: ?CityJSONHandle, index: usize) callconv(.c) [*c]const u8 {
-//     const cj = handle orelse return null;
-//     const keys = cj.objects.keys();
-//     if (index >= keys.len) return null;
-//     return keys[index].ptr;
-// }
+/// Get the name of an object by index. Returns null if index is out of bounds.
+export fn cityjson_get_object_name(handle: ?CityJSONHandle, index: usize) callconv(.c) [*c]const u8 {
+    const cj = handle orelse return null;
+    const keys = cj.objects.keys();
+    if (index >= keys.len) return null;
+    return keys[index].ptr;
+}
 
-// /// Get the vertex count for an object by index.
-// export fn cityjson_get_vertex_count(handle: ?CityJSONHandle, index: usize) callconv(.c) usize {
-//     const cj = handle orelse return 0;
-//     const values = cj.objects.values();
-//     if (index >= values.len) return 0;
-//     return values[index].vertices.items.len / 3;
-// }
+/// Get the vertex count for an object by index.
+export fn cityjson_get_vertex_count(handle: ?CityJSONHandle, index: usize) callconv(.c) usize {
+    const cj = handle orelse return 0;
+    const values = cj.objects.values();
+    if (index >= values.len) return 0;
+    return values[index].vertices.items.len / 3;
+}
 
-// /// Get the face count for an object by index.
-// export fn cityjson_get_face_count(handle: ?CityJSONHandle, index: usize) callconv(.c) usize {
-//     const cj = handle orelse return 0;
-//     const values = cj.objects.values();
-//     if (index >= values.len) return 0;
-//     return values[index].faces.items.len;
-// }
+/// Get the face count for an object by index.
+export fn cityjson_get_face_count(handle: ?CityJSONHandle, index: usize) callconv(.c) usize {
+    const cj = handle orelse return 0;
+    const values = cj.objects.values();
+    if (index >= values.len) return 0;
+    return values[index].faces.items.len;
+}
 
-// /// Get pointer to vertex data (x, y, z triplets as f64) for an object by index.
-// export fn cityjson_get_vertices(handle: ?CityJSONHandle, index: usize) callconv(.c) [*c]const f64 {
-//     const cj = handle orelse return null;
-//     const values = cj.objects.values();
-//     if (index >= values.len) return null;
-//     return values[index].vertices.items.ptr;
-// }
+/// Get pointer to vertex data (x, y, z triplets as f64) for an object by index.
+export fn cityjson_get_vertices(handle: ?CityJSONHandle, index: usize) callconv(.c) [*c]const f64 {
+    const cj = handle orelse return null;
+    const values = cj.objects.values();
+    if (index >= values.len) return null;
+    return values[index].vertices.items.ptr;
+}
 
-// /// Get pointer to index data for an object by index.
-// export fn cityjson_get_indices(handle: ?CityJSONHandle, index: usize) callconv(.c) [*c]const usize {
-//     const cj = handle orelse return null;
-//     const values = cj.objects.values();
-//     if (index >= values.len) return null;
-//     return values[index].indices.items.ptr;
-// }
+/// Get pointer to index data for an object by index.
+export fn cityjson_get_indices(handle: ?CityJSONHandle, index: usize) callconv(.c) [*c]const usize {
+    const cj = handle orelse return null;
+    const values = cj.objects.values();
+    if (index >= values.len) return null;
+    return values[index].indices.items.ptr;
+}
 
-// /// Get the index count for an object by index.
-// export fn cityjson_get_index_count(handle: ?CityJSONHandle, index: usize) callconv(.c) usize {
-//     const cj = handle orelse return 0;
-//     const values = cj.objects.values();
-//     if (index >= values.len) return 0;
-//     return values[index].indices.items.len;
-// }
+/// Get the index count for an object by index.
+export fn cityjson_get_index_count(handle: ?CityJSONHandle, index: usize) callconv(.c) usize {
+    const cj = handle orelse return 0;
+    const values = cj.objects.values();
+    if (index >= values.len) return 0;
+    return values[index].indices.items.len;
+}
 
-// /// Get face info: start index and vertex count. Returns 0 on success, -1 on failure.
-// export fn cityjson_get_face_info(
-//     handle: ?CityJSONHandle,
-//     object_index: usize,
-//     face_index: usize,
-//     out_start: *usize,
-//     out_count: *usize,
-//     out_face_type: *u8,
-// ) callconv(.c) c_int {
-//     const cj = handle orelse return -1;
-//     const values = cj.objects.values();
-//     if (object_index >= values.len) return -1;
-//     const mesh = values[object_index];
-//     if (face_index >= mesh.faces.items.len) return -1;
-//     const face = mesh.faces.items[face_index];
-//     out_start.* = face.start;
-//     out_count.* = face.count;
-//     out_face_type.* = @intFromEnum(face.face_type);
-//     return 0;
-// }
+/// Get face info: start index and vertex count. Returns 0 on success, -1 on failure.
+export fn cityjson_get_face_info(
+    handle: ?CityJSONHandle,
+    object_index: usize,
+    face_index: usize,
+    out_start: *usize,
+    out_count: *usize,
+    out_face_type: *u8,
+) callconv(.c) c_int {
+    const cj = handle orelse return -1;
+    const values = cj.objects.values();
+    if (object_index >= values.len) return -1;
+    const mesh = values[object_index];
+    if (face_index >= mesh.faces.items.len) return -1;
+    const face = mesh.faces.items[face_index];
+    out_start.* = face.start;
+    out_count.* = face.count;
+    out_face_type.* = @intFromEnum(face.face_type);
+    return 0;
+}
