@@ -42,6 +42,9 @@
 
           # CGAL - Computational Geometry Algorithms Library
           cgal
+          gmp
+          mpfr
+          boost
 
           # geogram - geometry processing library
           geogram

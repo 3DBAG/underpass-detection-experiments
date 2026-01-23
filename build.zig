@@ -47,6 +47,10 @@ pub fn build(b: *std.Build) void {
     // Note: Zig automatically picks up NIX_CFLAGS_COMPILE and NIX_LDFLAGS from the environment
     exe.root_module.linkSystemLibrary("manifold", .{});
 
+    // CGAL dependencies
+    exe.root_module.linkSystemLibrary("gmp", .{});
+    exe.root_module.linkSystemLibrary("mpfr", .{});
+
     // 3. Rerun dependencies (optional)
     if (enable_rerun) {
         const resolved_target = target.result;
