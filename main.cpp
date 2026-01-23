@@ -7,6 +7,7 @@
 #include <CGAL/Simple_cartesian.h>
 #include <CGAL/Surface_mesh.h>
 #include <CGAL/Polygon_mesh_processing/triangulate_faces.h>
+#include <CGAL/Polygon_mesh_processing/compute_normal.h>
 
 #ifdef ENABLE_RERUN
 #include <rerun.hpp>
@@ -124,6 +125,11 @@ int main(int argc, char* argv[]) {
             CGAL::Polygon_mesh_processing::triangulate_faces(sm);
             std::cout << std::format("After triangulation: {} vertices, {} faces",
                 sm.number_of_vertices(), sm.number_of_faces()) << std::endl;
+
+            // Compute vertex normals
+            auto vnormals = sm.add_property_map<Surface_mesh::Vertex_index, K::Vector_3>(
+                "v:normals", CGAL::NULL_VECTOR).first;
+            CGAL::Polygon_mesh_processing::compute_vertex_normals(sm, vnormals);
         }
     }
     cityjson_destroy(cj);
@@ -136,11 +142,18 @@ int main(int argc, char* argv[]) {
     if (sm.number_of_faces() > 0) {
         std::vector<rerun::Position3D> positions;
         std::vector<rerun::TriangleIndices> triangles;
+        std::vector<rerun::Vector3D> normals;
+
+        // Get the vertex normals property map
+        auto vnormals = sm.property_map<Surface_mesh::Vertex_index, K::Vector_3>("v:normals").value();
 
         positions.reserve(sm.number_of_vertices());
+        normals.reserve(sm.number_of_vertices());
         for (auto v : sm.vertices()) {
             const auto& pt = sm.point(v);
             positions.push_back(rerun::Position3D(pt.x(), pt.y(), pt.z()));
+            const auto& n = vnormals[v];
+            normals.push_back(rerun::Vector3D(n.x(), n.y(), n.z()));
         }
 
         triangles.reserve(sm.number_of_faces());
@@ -162,6 +175,7 @@ int main(int argc, char* argv[]) {
             "cityjson_building",
             rerun::Mesh3D(positions)
                 .with_triangle_indices(triangles)
+                .with_vertex_normals(normals)
                 .with_albedo_factor(rerun::Rgba32(200, 200, 100, 255))
         );
     }
