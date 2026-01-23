@@ -359,6 +359,17 @@ export fn cityjson_get_object_name(handle: ?CityJSONHandle, index: usize) callco
     return keys[index].ptr;
 }
 
+/// Get the index of an object by its key (name). Returns -1 if not found.
+export fn cityjson_get_object_index(handle: ?CityJSONHandle, key: [*c]const u8) callconv(.c) isize {
+    const cj = handle orelse return -1;
+    const key_slice = std.mem.span(key);
+    const index = cj.objects.getIndex(key_slice);
+    if (index) |idx| {
+        return @intCast(idx);
+    }
+    return -1;
+}
+
 /// Get the geometry count for an object by index.
 export fn cityjson_get_geometry_count(handle: ?CityJSONHandle, object_index: usize) callconv(.c) usize {
     const cj = handle orelse return 0;

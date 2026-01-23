@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <sys/types.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -38,6 +39,10 @@ size_t cityjson_object_count(CityJSONHandle handle);
 // Get the name of an object by index.
 // Returns NULL if index is out of bounds.
 const char* cityjson_get_object_name(CityJSONHandle handle, size_t index);
+
+// Get the index of an object by its key (name).
+// Returns -1 if not found.
+ssize_t cityjson_get_object_index(CityJSONHandle handle, const char* key);
 
 // Get the geometry count for an object by index.
 size_t cityjson_get_geometry_count(CityJSONHandle handle, size_t object_index);
