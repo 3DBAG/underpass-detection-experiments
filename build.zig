@@ -42,6 +42,14 @@ pub fn build(b: *std.Build) void {
         .file = b.path("main.cpp"),
         .flags = cpp_flags,
     });
+    exe.root_module.addCSourceFile(.{
+        .file = b.path("OGRVectorReader.cpp"),
+        .flags = cpp_flags,
+    });
+    exe.root_module.addCSourceFile(.{
+        .file = b.path("PolygonExtruder.cpp"),
+        .flags = cpp_flags,
+    });
 
     // 2. Linking System Libraries
     // Note: Zig automatically picks up NIX_CFLAGS_COMPILE and NIX_LDFLAGS from the environment
@@ -50,6 +58,9 @@ pub fn build(b: *std.Build) void {
     // CGAL dependencies
     exe.root_module.linkSystemLibrary("gmp", .{});
     exe.root_module.linkSystemLibrary("mpfr", .{});
+
+    // GDAL
+    exe.root_module.linkSystemLibrary("gdal", .{});
 
     // 3. Rerun dependencies (optional)
     if (enable_rerun) {

@@ -14,6 +14,8 @@
 #endif
 
 #include "zityjson.h"
+#include "OGRVectorReader.h"
+#include "PolygonExtruder.h"
 
 #ifdef ENABLE_RERUN
 // Custom collection adapter for Manifold vertex properties to Rerun Position3D
@@ -74,23 +76,28 @@ int main(int argc, char* argv[]) {
 
     Surface_mesh sm;
 
-    ssize_t idx = cityjson_get_object_index(cj, "NL.IMBAG.Pand.1783100000021598-0");
+    // Offset to bring coordinates near origin (set from first vertex)
+    double offset_x = 0.0;
+    double offset_y = 0.0;
+    double offset_z = 0.0;
+
+    ssize_t idx = cityjson_get_object_index(cj, "NL.IMBAG.Pand.0599100100004120-1");
     if (idx >= 0) {
         size_t obj_idx = static_cast<size_t>(idx);
         size_t geom_count = cityjson_get_geometry_count(cj, obj_idx);
         std::cout << std::format("Geometry count: {}", geom_count) << std::endl;
 
         if (geom_count > 0) {
-            size_t last_geom = geom_count - 1;
+            size_t last_geom = geom_count - 2;
             const double* verts = cityjson_get_vertices(cj, obj_idx, last_geom);
             size_t vert_count = cityjson_get_vertex_count(cj, obj_idx, last_geom);
             size_t face_count = cityjson_get_face_count(cj, obj_idx, last_geom);
             const size_t* indices = cityjson_get_indices(cj, obj_idx, last_geom);
 
             // Get the first vertex as offset (to bring coordinates near origin)
-            double offset_x = verts[0];
-            double offset_y = verts[1];
-            double offset_z = verts[2];
+            offset_x = verts[0];
+            offset_y = verts[1];
+            offset_z = verts[2];
 
             // Add vertices to surface mesh with offset applied
             std::vector<Surface_mesh::Vertex_index> vertex_handles;
@@ -133,6 +140,35 @@ int main(int argc, char* argv[]) {
         }
     }
     cityjson_destroy(cj);
+
+    ogr::VectorReader reader;
+    reader.open("sample_data/rotterdam_gelderseplein_50.shp");
+    auto polygons = reader.read_polygons();
+
+    std::vector<extrusion::Surface_mesh> extruded_meshes;
+    extruded_meshes.reserve(polygons.size());
+
+    for (const auto& polygon : polygons) {
+        // Apply offset to polygon coordinates
+        ogr::LinearRing offset_polygon;
+        offset_polygon.reserve(polygon.size());
+        for (const auto& pt : polygon) {
+            offset_polygon.push_back({pt[0] - offset_x, pt[1] - offset_y, pt[2] - offset_z});
+        }
+        for (const auto& hole : polygon.interior_rings()) {
+            std::vector<std::array<double, 3>> offset_hole;
+            offset_hole.reserve(hole.size());
+            for (const auto& pt : hole) {
+                offset_hole.push_back({pt[0] - offset_x, pt[1] - offset_y, pt[2] - offset_z});
+            }
+            offset_polygon.interior_rings().push_back(std::move(offset_hole));
+        }
+
+        auto extruded_mesh = extrusion::extrude_polygon(offset_polygon, 0.0, 10.0);
+        CGAL::Polygon_mesh_processing::triangulate_faces(extruded_mesh);
+        extruded_meshes.push_back(std::move(extruded_mesh));
+        std::cout << "polygon has " << polygon.size() << " vertices and " << polygon.interior_rings().size() << " holes" << std::endl;
+    }
 
 #ifdef ENABLE_RERUN
     const auto rec = rerun::RecordingStream("test_3d_intersection");
@@ -177,6 +213,43 @@ int main(int argc, char* argv[]) {
                 .with_triangle_indices(triangles)
                 .with_vertex_normals(normals)
                 .with_albedo_factor(rerun::Rgba32(200, 200, 100, 255))
+        );
+    }
+
+    // Visualize extruded polygons
+    for (size_t i = 0; i < extruded_meshes.size(); ++i) {
+        const auto& mesh = extruded_meshes[i];
+        if (mesh.number_of_faces() == 0) continue;
+
+        std::vector<rerun::Position3D> positions;
+        std::vector<rerun::TriangleIndices> triangles;
+
+        positions.reserve(mesh.number_of_vertices());
+        for (auto v : mesh.vertices()) {
+            const auto& pt = mesh.point(v);
+            positions.push_back(rerun::Position3D(pt.x(), pt.y(), pt.z()));
+        }
+
+        triangles.reserve(mesh.number_of_faces());
+        for (auto f : mesh.faces()) {
+            auto h = mesh.halfedge(f);
+            auto v0 = mesh.target(h);
+            h = mesh.next(h);
+            auto v1 = mesh.target(h);
+            h = mesh.next(h);
+            auto v2 = mesh.target(h);
+            triangles.push_back(rerun::TriangleIndices(
+                static_cast<uint32_t>(v0),
+                static_cast<uint32_t>(v1),
+                static_cast<uint32_t>(v2)
+            ));
+        }
+
+        rec.log(
+            std::format("extruded_polygons/{}", i),
+            rerun::Mesh3D(positions)
+                .with_triangle_indices(triangles)
+                .with_albedo_factor(rerun::Rgba32(100, 180, 220, 255))
         );
     }
 #endif
