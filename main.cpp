@@ -8,6 +8,11 @@
 #include <CGAL/Surface_mesh.h>
 #include <CGAL/Polygon_mesh_processing/triangulate_faces.h>
 #include <CGAL/Polygon_mesh_processing/compute_normal.h>
+#include <CGAL/Exact_predicates_exact_constructions_kernel.h>
+#include <CGAL/Nef_polyhedron_3.h>
+#include <CGAL/Polyhedron_3.h>
+#include <CGAL/boost/graph/convert_nef_polyhedron_to_polygon_mesh.h>
+#include <CGAL/Polygon_mesh_processing/polygon_soup_to_polygon_mesh.h>
 
 #ifdef ENABLE_RERUN
 #include <rerun.hpp>
@@ -17,33 +22,243 @@
 #include "OGRVectorReader.h"
 #include "PolygonExtruder.h"
 
-#ifdef ENABLE_RERUN
-// Custom collection adapter for Manifold vertex properties to Rerun Position3D
-namespace rerun {
-  template <>
-  struct CollectionAdapter<Position3D, manifold::MeshGL> {
-    Collection<Position3D> operator()(const manifold::MeshGL& mesh) {
-      // Reinterpret the interleaved vertex properties as Position3D
-      // vertProperties has stride numProp (default 3), first 3 values are x,y,z
-      return Collection<Position3D>::borrow(
-          reinterpret_cast<const Position3D*>(mesh.vertProperties.data()),
-          mesh.NumVert()
-      );
-    }
-  };
+// Enum to select boolean operation method
+enum class BooleanMethod {
+    Manifold,   // Use Manifold library (faster, floating-point)
+    CgalNef     // Use CGAL Nef polyhedra (slower, exact arithmetic)
+};
 
-  // Custom collection adapter for Manifold triangle indices to Rerun TriangleIndices
-  template <>
-  struct CollectionAdapter<TriangleIndices, manifold::MeshGL> {
-    Collection<TriangleIndices> operator()(const manifold::MeshGL& mesh) {
-      // Reinterpret the flat triangle indices as TriangleIndices
-      // triVerts has 3 indices per triangle
-      return Collection<TriangleIndices>::borrow(
-          reinterpret_cast<const TriangleIndices*>(mesh.triVerts.data()),
-          mesh.NumTri()
-      );
+// Type aliases for CGAL
+using K = CGAL::Simple_cartesian<double>;
+using Surface_mesh = CGAL::Surface_mesh<K::Point_3>;
+
+// Exact kernel types for Nef polyhedra
+using Exact_kernel = CGAL::Exact_predicates_exact_constructions_kernel;
+using Nef_polyhedron = CGAL::Nef_polyhedron_3<Exact_kernel>;
+using Exact_polyhedron = CGAL::Polyhedron_3<Exact_kernel>;
+using Exact_surface_mesh = CGAL::Surface_mesh<Exact_kernel::Point_3>;
+
+// Convert CGAL Surface_mesh to Manifold MeshGL
+// The mesh must be triangulated before calling this function.
+// If compute_normals is true, uses flat shading (face normals) by duplicating vertices per face.
+manifold::MeshGL surface_mesh_to_meshgl(Surface_mesh& sm, bool compute_normals = true) {
+    manifold::MeshGL meshgl;
+
+    if (sm.number_of_faces() == 0) {
+        return meshgl;
     }
-  };
+
+    // Set up vertex properties: 3 for position, optionally 3 more for normals
+    meshgl.numProp = compute_normals ? 6 : 3;
+
+    if (compute_normals) {
+        // Flat shading: duplicate vertices per face, each with the face normal
+        meshgl.vertProperties.reserve(sm.number_of_faces() * 3 * meshgl.numProp);
+        meshgl.triVerts.reserve(sm.number_of_faces() * 3);
+
+        // Compute all face normals using CGAL
+        using face_descriptor = Surface_mesh::Face_index;
+        auto fnormals = sm.add_property_map<face_descriptor, K::Vector_3>("f:normals", CGAL::NULL_VECTOR).first;
+        CGAL::Polygon_mesh_processing::compute_face_normals(sm, fnormals);
+
+        uint32_t vert_idx = 0;
+        for (auto f : sm.faces()) {
+            K::Vector_3 normal = fnormals[f];
+
+            // Get the three vertices of the face
+            auto h = sm.halfedge(f);
+            const auto& p0 = sm.point(sm.target(h));
+            h = sm.next(h);
+            const auto& p1 = sm.point(sm.target(h));
+            h = sm.next(h);
+            const auto& p2 = sm.point(sm.target(h));
+
+            // Add three vertices with the same face normal
+            for (const auto& pt : {p0, p1, p2}) {
+                meshgl.vertProperties.push_back(static_cast<float>(pt.x()));
+                meshgl.vertProperties.push_back(static_cast<float>(pt.y()));
+                meshgl.vertProperties.push_back(static_cast<float>(pt.z()));
+                meshgl.vertProperties.push_back(static_cast<float>(normal.x()));
+                meshgl.vertProperties.push_back(static_cast<float>(normal.y()));
+                meshgl.vertProperties.push_back(static_cast<float>(normal.z()));
+            }
+
+            // Add triangle indices
+            meshgl.triVerts.push_back(vert_idx);
+            meshgl.triVerts.push_back(vert_idx + 1);
+            meshgl.triVerts.push_back(vert_idx + 2);
+            vert_idx += 3;
+        }
+    } else {
+        // No normals: share vertices
+        meshgl.vertProperties.reserve(sm.number_of_vertices() * meshgl.numProp);
+        meshgl.triVerts.reserve(sm.number_of_faces() * 3);
+
+        // Copy vertices without normals
+        for (auto v : sm.vertices()) {
+            const auto& pt = sm.point(v);
+            meshgl.vertProperties.push_back(static_cast<float>(pt.x()));
+            meshgl.vertProperties.push_back(static_cast<float>(pt.y()));
+            meshgl.vertProperties.push_back(static_cast<float>(pt.z()));
+        }
+
+        // Copy triangles
+        for (auto f : sm.faces()) {
+            auto h = sm.halfedge(f);
+            meshgl.triVerts.push_back(static_cast<uint32_t>(sm.target(h)));
+            h = sm.next(h);
+            meshgl.triVerts.push_back(static_cast<uint32_t>(sm.target(h)));
+            h = sm.next(h);
+            meshgl.triVerts.push_back(static_cast<uint32_t>(sm.target(h)));
+        }
+    }
+
+    return meshgl;
+}
+
+// Convert Surface_mesh (Simple_cartesian) to Exact_surface_mesh (Exact kernel)
+Exact_surface_mesh surface_mesh_to_exact(const Surface_mesh& sm) {
+    Exact_surface_mesh esm;
+
+    // Map from original vertex indices to new vertex indices
+    std::vector<Exact_surface_mesh::Vertex_index> vertex_map;
+    vertex_map.reserve(sm.number_of_vertices());
+
+    // Copy vertices with exact coordinates
+    for (auto v : sm.vertices()) {
+        const auto& pt = sm.point(v);
+        Exact_kernel::Point_3 exact_pt(pt.x(), pt.y(), pt.z());
+        vertex_map.push_back(esm.add_vertex(exact_pt));
+    }
+
+    // Copy faces
+    for (auto f : sm.faces()) {
+        std::vector<Exact_surface_mesh::Vertex_index> face_vertices;
+        for (auto v : sm.vertices_around_face(sm.halfedge(f))) {
+            face_vertices.push_back(vertex_map[v]);
+        }
+        esm.add_face(face_vertices);
+    }
+
+    return esm;
+}
+
+// Convert Exact_surface_mesh back to Surface_mesh (Simple_cartesian)
+Surface_mesh exact_to_surface_mesh(const Exact_surface_mesh& esm) {
+    Surface_mesh sm;
+
+    std::vector<Surface_mesh::Vertex_index> vertex_map;
+    vertex_map.reserve(esm.number_of_vertices());
+
+    for (auto v : esm.vertices()) {
+        const auto& pt = esm.point(v);
+        K::Point_3 approx_pt(
+            CGAL::to_double(pt.x()),
+            CGAL::to_double(pt.y()),
+            CGAL::to_double(pt.z())
+        );
+        vertex_map.push_back(sm.add_vertex(approx_pt));
+    }
+
+    for (auto f : esm.faces()) {
+        std::vector<Surface_mesh::Vertex_index> face_vertices;
+        for (auto v : esm.vertices_around_face(esm.halfedge(f))) {
+            face_vertices.push_back(vertex_map[v]);
+        }
+        sm.add_face(face_vertices);
+    }
+
+    return sm;
+}
+
+// Boolean difference using CGAL Nef polyhedra
+// Takes two Surface_mesh objects and returns their difference (mesh_a - mesh_b)
+Surface_mesh nef_boolean_difference(const Surface_mesh& mesh_a, const Surface_mesh& mesh_b) {
+    // Convert to exact kernel surface meshes
+    auto exact_a = surface_mesh_to_exact(mesh_a);
+    auto exact_b = surface_mesh_to_exact(mesh_b);
+
+    // Convert to Nef polyhedra
+    Nef_polyhedron nef_a(exact_a);
+    Nef_polyhedron nef_b(exact_b);
+
+    // Perform boolean difference
+    Nef_polyhedron nef_result = nef_a - nef_b;
+
+    // Convert result back to surface mesh
+    Exact_surface_mesh exact_result;
+    CGAL::convert_nef_polyhedron_to_polygon_mesh(nef_result, exact_result);
+
+    // Convert back to simple cartesian kernel
+    return exact_to_surface_mesh(exact_result);
+}
+
+// Boolean difference using CGAL Nef polyhedra (overload for multiple meshes to subtract)
+Surface_mesh nef_boolean_difference(const Surface_mesh& mesh_a, const std::vector<Surface_mesh>& meshes_b) {
+    // Convert mesh_a to exact kernel
+    auto exact_a = surface_mesh_to_exact(mesh_a);
+    Nef_polyhedron nef_result(exact_a);
+
+    // Subtract each mesh in meshes_b
+    for (const auto& mesh_b : meshes_b) {
+        auto exact_b = surface_mesh_to_exact(mesh_b);
+        Nef_polyhedron nef_b(exact_b);
+        nef_result = nef_result - nef_b;
+    }
+
+    // Convert result back to surface mesh
+    Exact_surface_mesh exact_result;
+    CGAL::convert_nef_polyhedron_to_polygon_mesh(nef_result, exact_result);
+
+    return exact_to_surface_mesh(exact_result);
+}
+
+#ifdef ENABLE_RERUN
+// Helper to extract positions from MeshGL (handles variable numProp stride)
+std::vector<rerun::Position3D> meshgl_positions(const manifold::MeshGL& mesh) {
+    std::vector<rerun::Position3D> positions;
+    positions.reserve(mesh.NumVert());
+    for (size_t i = 0; i < mesh.NumVert(); ++i) {
+        size_t offset = i * mesh.numProp;
+        positions.push_back(rerun::Position3D(
+            mesh.vertProperties[offset],
+            mesh.vertProperties[offset + 1],
+            mesh.vertProperties[offset + 2]
+        ));
+    }
+    return positions;
+}
+
+// Helper to extract triangle indices from MeshGL
+std::vector<rerun::TriangleIndices> meshgl_triangles(const manifold::MeshGL& mesh) {
+    std::vector<rerun::TriangleIndices> triangles;
+    triangles.reserve(mesh.NumTri());
+    for (size_t i = 0; i < mesh.NumTri(); ++i) {
+        triangles.push_back(rerun::TriangleIndices(
+            mesh.triVerts[i * 3],
+            mesh.triVerts[i * 3 + 1],
+            mesh.triVerts[i * 3 + 2]
+        ));
+    }
+    return triangles;
+}
+
+// Helper to extract vertex normals from MeshGL (assumes numProp >= 6 with normals at indices 3,4,5)
+std::vector<rerun::Vector3D> meshgl_normals(const manifold::MeshGL& mesh) {
+    std::vector<rerun::Vector3D> normals;
+    if (mesh.numProp < 6) {
+        return normals;  // No normals stored
+    }
+    normals.reserve(mesh.NumVert());
+    for (size_t i = 0; i < mesh.NumVert(); ++i) {
+        size_t offset = i * mesh.numProp;
+        normals.push_back(rerun::Vector3D(
+            mesh.vertProperties[offset + 3],
+            mesh.vertProperties[offset + 4],
+            mesh.vertProperties[offset + 5]
+        ));
+    }
+    return normals;
 }
 #endif
 
@@ -71,9 +286,6 @@ int main(int argc, char* argv[]) {
         std::cout << std::format("Face info: start={}, end={}, type={}", start, end, type) << std::endl;
     }
 
-    typedef CGAL::Simple_cartesian<double> K;
-    typedef CGAL::Surface_mesh<K::Point_3> Surface_mesh;
-
     Surface_mesh sm;
 
     // Offset to bring coordinates near origin (set from first vertex)
@@ -88,7 +300,7 @@ int main(int argc, char* argv[]) {
         std::cout << std::format("Geometry count: {}", geom_count) << std::endl;
 
         if (geom_count > 0) {
-            size_t last_geom = geom_count - 2;
+            size_t last_geom = geom_count - 3;
             const double* verts = cityjson_get_vertices(cj, obj_idx, last_geom);
             size_t vert_count = cityjson_get_vertex_count(cj, obj_idx, last_geom);
             size_t face_count = cityjson_get_face_count(cj, obj_idx, last_geom);
@@ -132,11 +344,6 @@ int main(int argc, char* argv[]) {
             CGAL::Polygon_mesh_processing::triangulate_faces(sm);
             std::cout << std::format("After triangulation: {} vertices, {} faces",
                 sm.number_of_vertices(), sm.number_of_faces()) << std::endl;
-
-            // Compute vertex normals
-            auto vnormals = sm.add_property_map<Surface_mesh::Vertex_index, K::Vector_3>(
-                "v:normals", CGAL::NULL_VECTOR).first;
-            CGAL::Polygon_mesh_processing::compute_vertex_normals(sm, vnormals);
         }
     }
     cityjson_destroy(cj);
@@ -170,132 +377,126 @@ int main(int argc, char* argv[]) {
         std::cout << "polygon has " << polygon.size() << " vertices and " << polygon.interior_rings().size() << " holes" << std::endl;
     }
 
+    // Convert CityJSON mesh (house) to MeshGL with normals
+    auto house_meshgl = surface_mesh_to_meshgl(sm, true);
+    std::cout << std::format("House MeshGL - triangles: {}, vertices: {}, numProp: {}",
+        house_meshgl.NumTri(), house_meshgl.NumVert(), house_meshgl.numProp) << std::endl;
+
+    // Convert extruded meshes to MeshGL with normals
+    std::vector<manifold::MeshGL> underpass_meshgls;
+    for (size_t i = 0; i < extruded_meshes.size(); ++i) {
+        auto& extruded_mesh = extruded_meshes[i];
+        std::cout << std::format("Extruded mesh {} - CGAL faces: {}, vertices: {}",
+            i, extruded_mesh.number_of_faces(), extruded_mesh.number_of_vertices()) << std::endl;
+        auto meshgl = surface_mesh_to_meshgl(extruded_mesh, true);
+        std::cout << std::format("  MeshGL triangles: {}, vertices: {}",
+            meshgl.NumTri(), meshgl.NumVert()) << std::endl;
+        if (meshgl.NumTri() > 0) {
+            underpass_meshgls.push_back(meshgl);
+        }
+    }
+    std::cout << std::format("Underpass MeshGLs count: {}", underpass_meshgls.size()) << std::endl;
+
 #ifdef ENABLE_RERUN
     const auto rec = rerun::RecordingStream("test_3d_intersection");
     rec.spawn().exit_on_failure();
 
-    // Visualize the triangulated CityJSON mesh
-    if (sm.number_of_faces() > 0) {
-        std::vector<rerun::Position3D> positions;
-        std::vector<rerun::TriangleIndices> triangles;
-        std::vector<rerun::Vector3D> normals;
+    // Visualize house mesh (CityJSON building) - original MeshGL
+    rec.log(
+        "house",
+        rerun::Mesh3D(meshgl_positions(house_meshgl))
+            .with_triangle_indices(meshgl_triangles(house_meshgl))
+            .with_vertex_normals(meshgl_normals(house_meshgl))
+            .with_albedo_factor(rerun::Rgba32(200, 200, 100, 255))
+    );
 
-        // Get the vertex normals property map
-        auto vnormals = sm.property_map<Surface_mesh::Vertex_index, K::Vector_3>("v:normals").value();
-
-        positions.reserve(sm.number_of_vertices());
-        normals.reserve(sm.number_of_vertices());
-        for (auto v : sm.vertices()) {
-            const auto& pt = sm.point(v);
-            positions.push_back(rerun::Position3D(pt.x(), pt.y(), pt.z()));
-            const auto& n = vnormals[v];
-            normals.push_back(rerun::Vector3D(n.x(), n.y(), n.z()));
-        }
-
-        triangles.reserve(sm.number_of_faces());
-        for (auto f : sm.faces()) {
-            auto h = sm.halfedge(f);
-            auto v0 = sm.target(h);
-            h = sm.next(h);
-            auto v1 = sm.target(h);
-            h = sm.next(h);
-            auto v2 = sm.target(h);
-            triangles.push_back(rerun::TriangleIndices(
-                static_cast<uint32_t>(v0),
-                static_cast<uint32_t>(v1),
-                static_cast<uint32_t>(v2)
-            ));
-        }
-
+    // Visualize underpass meshes (extruded polygons)
+    for (size_t i = 0; i < underpass_meshgls.size(); ++i) {
         rec.log(
-            "cityjson_building",
-            rerun::Mesh3D(positions)
-                .with_triangle_indices(triangles)
-                .with_vertex_normals(normals)
-                .with_albedo_factor(rerun::Rgba32(200, 200, 100, 255))
-        );
-    }
-
-    // Visualize extruded polygons
-    for (size_t i = 0; i < extruded_meshes.size(); ++i) {
-        const auto& mesh = extruded_meshes[i];
-        if (mesh.number_of_faces() == 0) continue;
-
-        std::vector<rerun::Position3D> positions;
-        std::vector<rerun::TriangleIndices> triangles;
-
-        positions.reserve(mesh.number_of_vertices());
-        for (auto v : mesh.vertices()) {
-            const auto& pt = mesh.point(v);
-            positions.push_back(rerun::Position3D(pt.x(), pt.y(), pt.z()));
-        }
-
-        triangles.reserve(mesh.number_of_faces());
-        for (auto f : mesh.faces()) {
-            auto h = mesh.halfedge(f);
-            auto v0 = mesh.target(h);
-            h = mesh.next(h);
-            auto v1 = mesh.target(h);
-            h = mesh.next(h);
-            auto v2 = mesh.target(h);
-            triangles.push_back(rerun::TriangleIndices(
-                static_cast<uint32_t>(v0),
-                static_cast<uint32_t>(v1),
-                static_cast<uint32_t>(v2)
-            ));
-        }
-
-        rec.log(
-            std::format("extruded_polygons/{}", i),
-            rerun::Mesh3D(positions)
-                .with_triangle_indices(triangles)
+            std::format("underpass/{}", i),
+            rerun::Mesh3D(meshgl_positions(underpass_meshgls[i]))
+                .with_triangle_indices(meshgl_triangles(underpass_meshgls[i]))
+                .with_vertex_normals(meshgl_normals(underpass_meshgls[i]))
                 .with_albedo_factor(rerun::Rgba32(100, 180, 220, 255))
         );
     }
 #endif
 
-    auto house_ = manifold::ImportMesh("sample_data/house.ply");
-    auto underpass_ = manifold::ImportMesh("sample_data/underpass.ply");
-    std::cout << std::format("Number of triangles: {}", house_.NumTri()) << std::endl;
-    std::cout << std::format("Number of vertices: {}", house_.NumVert()) << std::endl;
+    // Select boolean operation method
+    BooleanMethod method = BooleanMethod::CgalNef;
 
-    auto house = manifold::Manifold(house_);
-    auto underpass = manifold::Manifold(underpass_);
+    manifold::MeshGL result_meshgl;
+
+    if (method == BooleanMethod::Manifold) {
+        std::cout << "Using Manifold for boolean operations" << std::endl;
+
+        // Convert to Manifold for boolean operations
+        auto house = manifold::Manifold(house_meshgl);
+        std::cout << std::format("House Manifold - status: {}, triangles: {}",
+            static_cast<int>(house.Status()), house.NumTri()) << std::endl;
+
+        manifold::Manifold underpass;
+        for (const auto& meshgl : underpass_meshgls) {
+            auto m = manifold::Manifold(meshgl);
+            std::cout << std::format("  Underpass part - status: {}, triangles: {}",
+                static_cast<int>(m.Status()), m.NumTri()) << std::endl;
+            if (m.Status() == manifold::Manifold::Error::NoError) {
+                underpass += m;
+            }
+        }
+        std::cout << std::format("Underpass Manifold - triangles: {}", underpass.NumTri()) << std::endl;
+
+        auto house_with_underpass = house - underpass;
+        std::cout << std::format("Result Manifold - status: {}, triangles: {}",
+            static_cast<int>(house_with_underpass.Status()), house_with_underpass.NumTri()) << std::endl;
+
+        // Get the mesh and recompute with flat normals
+        auto result_meshgl = house_with_underpass.GetMeshGL();
+
+    } else if (method == BooleanMethod::CgalNef) {
+        std::cout << "Using CGAL Nef polyhedra for boolean operations" << std::endl;
+
+        // Collect underpass meshes as Surface_mesh
+        std::vector<Surface_mesh> underpass_surfaces;
+        underpass_surfaces.reserve(extruded_meshes.size());
+        for (const auto& extruded_mesh : extruded_meshes) {
+            underpass_surfaces.push_back(extruded_mesh);
+        }
+
+        std::cout << std::format("House Surface_mesh - faces: {}, vertices: {}",
+            sm.number_of_faces(), sm.number_of_vertices()) << std::endl;
+        std::cout << std::format("Underpass meshes count: {}", underpass_surfaces.size()) << std::endl;
+
+        // Perform boolean difference using Nef polyhedra
+        Surface_mesh result_sm = nef_boolean_difference(sm, underpass_surfaces);
+
+        // Triangulate the result (Nef conversion may produce non-triangular faces)
+        CGAL::Polygon_mesh_processing::triangulate_faces(result_sm);
+
+        std::cout << std::format("Result Surface_mesh - faces: {}, vertices: {}",
+            result_sm.number_of_faces(), result_sm.number_of_vertices()) << std::endl;
+
+        // Convert to MeshGL for visualization and export (flip normals - Nef output has reversed winding)
+        result_meshgl = surface_mesh_to_meshgl(result_sm, true);
+    }
+
+    std::cout << std::format("Result MeshGL - triangles: {}, vertices: {}, numProp: {}",
+        result_meshgl.NumTri(), result_meshgl.NumVert(), result_meshgl.numProp) << std::endl;
 
 #ifdef ENABLE_RERUN
-    // Visualize house mesh
-    auto houseMeshGL = house.GetMeshGL();
-    rec.log(
-        "house",
-        rerun::Mesh3D(houseMeshGL)
-            .with_triangle_indices(houseMeshGL)
-            .with_albedo_factor(rerun::Rgba32(200, 100, 100, 255))
-    );
-
-    // Visualize underpass mesh
-    auto underpassMeshGL = underpass.GetMeshGL();
-    rec.log(
-        "underpass",
-        rerun::Mesh3D(underpassMeshGL)
-            .with_triangle_indices(underpassMeshGL)
-            .with_albedo_factor(rerun::Rgba32(100, 100, 200, 255))
-    );
+    // Visualize result mesh (boolean difference)
+    if (result_meshgl.NumTri() > 0) {
+        rec.log(
+            "result",
+            rerun::Mesh3D(meshgl_positions(result_meshgl))
+                .with_triangle_indices(meshgl_triangles(result_meshgl))
+                .with_vertex_normals(meshgl_normals(result_meshgl))
+                .with_albedo_factor(rerun::Rgba32(100, 200, 100, 255))
+        );
+    }
 #endif
 
-    auto house_with_underpass = house - underpass;
-
-#ifdef ENABLE_RERUN
-    // Visualize result mesh
-    auto resultMeshGL = house_with_underpass.GetMeshGL();
-    rec.log(
-        "result",
-        rerun::Mesh3D(resultMeshGL)
-            .with_triangle_indices(resultMeshGL)
-            .with_albedo_factor(rerun::Rgba32(100, 200, 100, 255))
-    );
-#endif
-
-    manifold::ExportMesh("house_with_underpass.ply", house_with_underpass.GetMeshGL(), {});
+    manifold::ExportMesh("house_with_underpass.ply", result_meshgl, {});
 
     return 0;
 }
