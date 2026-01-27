@@ -73,14 +73,16 @@ manifold::MeshGL surface_mesh_to_meshgl(Surface_mesh& sm, bool compute_normals =
             h = sm.next(h);
             const auto& p2 = sm.point(sm.target(h));
 
-            // Add three vertices with the same face normal
-            for (const auto& pt : {p0, p1, p2}) {
+            // Add three vertices with the same face normal (reversed for Manifold/PLY compatibility)
+            // Reverse winding: use p0, p2, p1 instead of p0, p1, p2
+            // Also negate the normal since we're flipping the face
+            for (const auto& pt : {p0, p2, p1}) {
                 meshgl.vertProperties.push_back(static_cast<float>(pt.x()));
                 meshgl.vertProperties.push_back(static_cast<float>(pt.y()));
                 meshgl.vertProperties.push_back(static_cast<float>(pt.z()));
-                meshgl.vertProperties.push_back(static_cast<float>(normal.x()));
-                meshgl.vertProperties.push_back(static_cast<float>(normal.y()));
-                meshgl.vertProperties.push_back(static_cast<float>(normal.z()));
+                meshgl.vertProperties.push_back(static_cast<float>(-normal.x()));
+                meshgl.vertProperties.push_back(static_cast<float>(-normal.y()));
+                meshgl.vertProperties.push_back(static_cast<float>(-normal.z()));
             }
 
             // Add triangle indices
@@ -102,14 +104,18 @@ manifold::MeshGL surface_mesh_to_meshgl(Surface_mesh& sm, bool compute_normals =
             meshgl.vertProperties.push_back(static_cast<float>(pt.z()));
         }
 
-        // Copy triangles
+        // Copy triangles (reverse winding order for Manifold/PLY compatibility)
         for (auto f : sm.faces()) {
             auto h = sm.halfedge(f);
-            meshgl.triVerts.push_back(static_cast<uint32_t>(sm.target(h)));
+            uint32_t v0 = static_cast<uint32_t>(sm.target(h));
             h = sm.next(h);
-            meshgl.triVerts.push_back(static_cast<uint32_t>(sm.target(h)));
+            uint32_t v1 = static_cast<uint32_t>(sm.target(h));
             h = sm.next(h);
-            meshgl.triVerts.push_back(static_cast<uint32_t>(sm.target(h)));
+            uint32_t v2 = static_cast<uint32_t>(sm.target(h));
+            // Swap v1 and v2 to reverse winding
+            meshgl.triVerts.push_back(v0);
+            meshgl.triVerts.push_back(v2);
+            meshgl.triVerts.push_back(v1);
         }
     }
 
@@ -375,14 +381,14 @@ int main(int argc, char* argv[]) {
             offset_polygon.interior_rings().push_back(std::move(offset_hole));
         }
 
-        auto extruded_mesh = extrusion::extrude_polygon(offset_polygon, 0.0, extrusion_height);
+        auto extruded_mesh = extrusion::extrude_polygon(offset_polygon, -1.0, extrusion_height);
         CGAL::Polygon_mesh_processing::triangulate_faces(extruded_mesh);
         extruded_meshes.push_back(std::move(extruded_mesh));
         std::cout << "polygon has " << polygon.size() << " vertices and " << polygon.interior_rings().size() << " holes" << std::endl;
     }
 
     // Convert CityJSON mesh (house) to MeshGL with normals
-    auto house_meshgl = surface_mesh_to_meshgl(sm, false);
+    auto house_meshgl = surface_mesh_to_meshgl(sm, true);
     std::cout << std::format("House MeshGL - triangles: {}, vertices: {}, numProp: {}",
         house_meshgl.NumTri(), house_meshgl.NumVert(), house_meshgl.numProp) << std::endl;
 
@@ -392,7 +398,7 @@ int main(int argc, char* argv[]) {
         auto& extruded_mesh = extruded_meshes[i];
         std::cout << std::format("Extruded mesh {} - CGAL faces: {}, vertices: {}",
             i, extruded_mesh.number_of_faces(), extruded_mesh.number_of_vertices()) << std::endl;
-        auto meshgl = surface_mesh_to_meshgl(extruded_mesh, false);
+        auto meshgl = surface_mesh_to_meshgl(extruded_mesh, true);
         std::cout << std::format("  MeshGL triangles: {}, vertices: {}",
             meshgl.NumTri(), meshgl.NumVert()) << std::endl;
         if (meshgl.NumTri() > 0) {
@@ -427,7 +433,7 @@ int main(int argc, char* argv[]) {
 #endif
 
     // Select boolean operation method
-    BooleanMethod method = BooleanMethod::CgalNef;
+    BooleanMethod method = BooleanMethod::Manifold;
 
     manifold::MeshGL result_meshgl;
 
@@ -481,7 +487,7 @@ int main(int argc, char* argv[]) {
             result_sm.number_of_faces(), result_sm.number_of_vertices()) << std::endl;
 
         // Convert to MeshGL for visualization and export (flip normals - Nef output has reversed winding)
-        result_meshgl = surface_mesh_to_meshgl(result_sm, false);
+        result_meshgl = surface_mesh_to_meshgl(result_sm, true);
     }
 
     std::cout << std::format("Result MeshGL - triangles: {}, vertices: {}, numProp: {}",
@@ -499,7 +505,8 @@ int main(int argc, char* argv[]) {
         );
     }
 #endif
-
+    manifold::ExportMesh("house.ply", house_meshgl, {});
+    manifold::ExportMesh("underpass.ply", underpass_meshgls.front(), {});
     manifold::ExportMesh("house_with_underpass.ply", result_meshgl, {});
 
     return 0;
