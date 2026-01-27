@@ -61,14 +61,14 @@ Surface_mesh extrude_polygon(const ogr::LinearRing& ring, double floor_height,
 
   // For outward-facing normals on all faces:
   // - Roof: CW (reversed) -> normal points up when viewed from outside
-  // - Floor: CCW (as-is) -> normal points down when viewed from outside  
+  // - Floor: CCW (as-is) -> normal points down when viewed from outside
   // - Walls: can then have outward normals
-  
+
   // Add roof face (reversed to CW for outward normal pointing up)
   std::vector<Surface_mesh::Vertex_index> roof_reversed(roof_verts.rbegin(),
                                                         roof_verts.rend());
   auto roof_face = mesh.add_face(roof_reversed);
-  std::cerr << "Roof face: " << (roof_face.is_valid() ? "OK" : "FAILED") << std::endl;
+  // std::cerr << "Roof face: " << (roof_face.is_valid() ? "OK" : "FAILED") << std::endl;
 
   // Add wall faces for exterior ring
   // Roof edge (reversed) goes j->i. Wall must use that edge in reverse: i->j
@@ -76,7 +76,7 @@ Surface_mesh extrude_polygon(const ogr::LinearRing& ring, double floor_height,
   for (size_t i = 0; i < n; ++i) {
     size_t j = (i + 1) % n;
     auto wall_face = mesh.add_face(roof_verts[i], roof_verts[j], floor_verts[j], floor_verts[i]);
-    std::cerr << "Wall face " << i << ": " << (wall_face.is_valid() ? "OK" : "FAILED") << std::endl;
+    // std::cerr << "Wall face " << i << ": " << (wall_face.is_valid() ? "OK" : "FAILED") << std::endl;
   }
 
   // Add wall faces for holes
@@ -88,13 +88,13 @@ Surface_mesh extrude_polygon(const ogr::LinearRing& ring, double floor_height,
     for (size_t i = 0; i < hn; ++i) {
       size_t j = (i + 1) % hn;
       auto hole_wall_face = mesh.add_face(hf[j], hr[j], hr[i], hf[i]);
-      std::cerr << "Hole " << h << " wall " << i << ": " << (hole_wall_face.is_valid() ? "OK" : "FAILED") << std::endl;
+      // std::cerr << "Hole " << h << " wall " << i << ": " << (hole_wall_face.is_valid() ? "OK" : "FAILED") << std::endl;
     }
   }
 
   // Add floor face (CCW as-is, normal points down)
   auto floor_face = mesh.add_face(floor_verts);
-  std::cerr << "Floor face: " << (floor_face.is_valid() ? "OK" : "FAILED") << std::endl;
+  // std::cerr << "Floor face: " << (floor_face.is_valid() ? "OK" : "FAILED") << std::endl;
 
   return mesh;
 }

@@ -211,34 +211,34 @@ pub const CityJSON = struct {
       defer parsed.deinit();
 
       const cj = parsed.value;
-      std.debug.print("File version: {s}, type: {s}, Nr of vertices: {d}\n", .{
-          cj.version, cj.type, cj.vertices.len
-      });
+      // std.debug.print("File version: {s}, type: {s}, Nr of vertices: {d}\n", .{
+          // cj.version, cj.type, cj.vertices.len
+      // });
       // print first 5 vertices
-      for (cj.vertices[0..5]) |vertex| {
-          std.debug.print("{d}, {d}, {d}\n",
-            .{  @as(f64, @floatFromInt(vertex[0]))*cj.transform.scale[0] + cj.transform.translate[0],
-                @as(f64, @floatFromInt(vertex[1]))*cj.transform.scale[1] + cj.transform.translate[1],
-                @as(f64, @floatFromInt(vertex[2]))*cj.transform.scale[2] + cj.transform.translate[2]
-            });
-      }
+      // for (cj.vertices[0..5]) |vertex| {
+      //     std.debug.print("{d}, {d}, {d}\n",
+      //       .{  @as(f64, @floatFromInt(vertex[0]))*cj.transform.scale[0] + cj.transform.translate[0],
+      //           @as(f64, @floatFromInt(vertex[1]))*cj.transform.scale[1] + cj.transform.translate[1],
+      //           @as(f64, @floatFromInt(vertex[2]))*cj.transform.scale[2] + cj.transform.translate[2]
+      //       });
+      // }
       // print transform
-      std.debug.print("Scale: {d}, {d}, {d}\n", .{ cj.transform.scale[0], cj.transform.scale[1], cj.transform.scale[2] });
-      std.debug.print("Translate: {d}, {d}, {d}\n", .{ cj.transform.translate[0], cj.transform.translate[1], cj.transform.translate[2] });
+      // std.debug.print("Scale: {d}, {d}, {d}\n", .{ cj.transform.scale[0], cj.transform.scale[1], cj.transform.scale[2] });
+      // std.debug.print("Translate: {d}, {d}, {d}\n", .{ cj.transform.translate[0], cj.transform.translate[1], cj.transform.translate[2] });
 
       // Accessing the dynamic part:
       const city_objs = parsed.value.CityObjects; // It's an ArrayHashMap
       for (city_objs.map.keys(), city_objs.map.values()) |key, obj| {
-          std.debug.print("\nID: {s}\n", .{key});
-          std.debug.print("Type: {s}\n", .{@tagName(obj.type)});
+          // std.debug.print("\nID: {s}\n", .{key});
+          // std.debug.print("Type: {s}\n", .{@tagName(obj.type)});
 
           const owned_key = try self.allocator.dupeZ(u8, key);
           try self.objects.put(owned_key, try StoredCityObject.init(self.allocator, obj.type, obj.geometry.len));
           const stored_city_object = self.objects.getPtr(key).?;
 
           for (obj.geometry, 0..) |g, i| {
-              std.debug.print("Geometry Type: {s}\n", .{@tagName(g.type)});
-              std.debug.print("LOD: {s}\n", .{g.lod});
+              // std.debug.print("Geometry Type: {s}\n", .{@tagName(g.type)});
+              // std.debug.print("LOD: {s}\n", .{g.lod});
 
               const geom = &stored_city_object.geometries[i];
               geom.* = try StoredGeometry.init(self.allocator, g.type, g.lod);
@@ -269,7 +269,7 @@ pub const CityJSON = struct {
                     }
                   },
                   .Solid => {
-                    std.debug.print("Solid type\n", .{});
+                    // std.debug.print("Solid type\n", .{});
                     const parsed_ = std.json.parseFromValue(CJSolidBounds, self.allocator, g.boundaries, .{}) catch |err| {
                         std.debug.print("Error parsing bounds: {any}\n", .{err});
                         return;
@@ -298,8 +298,8 @@ pub const CityJSON = struct {
                   },
               }
 
-              std.debug.print("Mesh has {d} faces\n", .{geom.polygonal_mesh.faces.items.len});
-              std.debug.print("Mesh has {d} vertices\n", .{geom.polygonal_mesh.vertices.items.len/3});
+              // std.debug.print("Mesh has {d} faces\n", .{geom.polygonal_mesh.faces.items.len});
+              // std.debug.print("Mesh has {d} vertices\n", .{geom.polygonal_mesh.vertices.items.len/3});
           }
       }
     }
@@ -337,7 +337,7 @@ export fn cityjson_destroy(handle: ?CityJSONHandle) callconv(.c) void {
 export fn cityjson_load(handle: ?CityJSONHandle, path: [*c]const u8) callconv(.c) c_int {
     const cj = handle orelse return -1;
     const path_slice = std.mem.span(path);
-    std.debug.print("Loading CityJSON: {s}\n", .{path});
+    // std.debug.print("Loading CityJSON: {s}\n", .{path});
     cj.load(path_slice) catch |err| {
         std.debug.print("Error loading CityJSON: {}\n", .{err});
         return -1;
