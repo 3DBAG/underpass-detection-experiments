@@ -183,7 +183,7 @@ Surface_mesh nef_boolean_difference(const Surface_mesh& mesh_a, const Surface_me
     Nef_polyhedron nef_b(exact_b);
 
     // Perform boolean difference
-    Nef_polyhedron nef_result = nef_a - nef_b;
+    Nef_polyhedron nef_result = nef_b - nef_a;
 
     // Convert result back to surface mesh
     Exact_surface_mesh exact_result;
@@ -263,10 +263,14 @@ std::vector<rerun::Vector3D> meshgl_normals(const manifold::MeshGL& mesh) {
 #endif
 
 int main(int argc, char* argv[]) {
-    if (argc < 2) {
-        std::cerr << "Usage: " << argv[0] << " <cityjson_file>" << std::endl;
+    if (argc < 5) {
+        std::cerr << "Usage: " << argv[0] << " <cityjson_file> <cityjson_id> <shapefile> <extrusion_height>" << std::endl;
         return 1;
     }
+
+    const char* cityjson_id = argv[2];
+    const char* shapefile_path = argv[3];
+    double extrusion_height = std::stod(argv[4]);
 
     CityJSONHandle cj = cityjson_create();
     if (cityjson_load(cj, argv[1]) == 0) {
@@ -293,14 +297,14 @@ int main(int argc, char* argv[]) {
     double offset_y = 0.0;
     double offset_z = 0.0;
 
-    ssize_t idx = cityjson_get_object_index(cj, "NL.IMBAG.Pand.0599100100004120-1");
+    ssize_t idx = cityjson_get_object_index(cj, cityjson_id);
     if (idx >= 0) {
         size_t obj_idx = static_cast<size_t>(idx);
         size_t geom_count = cityjson_get_geometry_count(cj, obj_idx);
         std::cout << std::format("Geometry count: {}", geom_count) << std::endl;
 
         if (geom_count > 0) {
-            size_t last_geom = geom_count - 3;
+            size_t last_geom = geom_count - 1;
             const double* verts = cityjson_get_vertices(cj, obj_idx, last_geom);
             size_t vert_count = cityjson_get_vertex_count(cj, obj_idx, last_geom);
             size_t face_count = cityjson_get_face_count(cj, obj_idx, last_geom);
@@ -349,7 +353,7 @@ int main(int argc, char* argv[]) {
     cityjson_destroy(cj);
 
     ogr::VectorReader reader;
-    reader.open("sample_data/rotterdam_gelderseplein_50.shp");
+    reader.open(shapefile_path);
     auto polygons = reader.read_polygons();
 
     std::vector<extrusion::Surface_mesh> extruded_meshes;
@@ -371,14 +375,14 @@ int main(int argc, char* argv[]) {
             offset_polygon.interior_rings().push_back(std::move(offset_hole));
         }
 
-        auto extruded_mesh = extrusion::extrude_polygon(offset_polygon, 0.0, 10.0);
+        auto extruded_mesh = extrusion::extrude_polygon(offset_polygon, 0.0, extrusion_height);
         CGAL::Polygon_mesh_processing::triangulate_faces(extruded_mesh);
         extruded_meshes.push_back(std::move(extruded_mesh));
         std::cout << "polygon has " << polygon.size() << " vertices and " << polygon.interior_rings().size() << " holes" << std::endl;
     }
 
     // Convert CityJSON mesh (house) to MeshGL with normals
-    auto house_meshgl = surface_mesh_to_meshgl(sm, true);
+    auto house_meshgl = surface_mesh_to_meshgl(sm, false);
     std::cout << std::format("House MeshGL - triangles: {}, vertices: {}, numProp: {}",
         house_meshgl.NumTri(), house_meshgl.NumVert(), house_meshgl.numProp) << std::endl;
 
@@ -388,7 +392,7 @@ int main(int argc, char* argv[]) {
         auto& extruded_mesh = extruded_meshes[i];
         std::cout << std::format("Extruded mesh {} - CGAL faces: {}, vertices: {}",
             i, extruded_mesh.number_of_faces(), extruded_mesh.number_of_vertices()) << std::endl;
-        auto meshgl = surface_mesh_to_meshgl(extruded_mesh, true);
+        auto meshgl = surface_mesh_to_meshgl(extruded_mesh, false);
         std::cout << std::format("  MeshGL triangles: {}, vertices: {}",
             meshgl.NumTri(), meshgl.NumVert()) << std::endl;
         if (meshgl.NumTri() > 0) {
@@ -477,7 +481,7 @@ int main(int argc, char* argv[]) {
             result_sm.number_of_faces(), result_sm.number_of_vertices()) << std::endl;
 
         // Convert to MeshGL for visualization and export (flip normals - Nef output has reversed winding)
-        result_meshgl = surface_mesh_to_meshgl(result_sm, true);
+        result_meshgl = surface_mesh_to_meshgl(result_sm, false);
     }
 
     std::cout << std::format("Result MeshGL - triangles: {}, vertices: {}, numProp: {}",
