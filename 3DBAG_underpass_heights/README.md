@@ -21,6 +21,6 @@ Create the following structure:
 ```
 
 ## 2. Run code
-Run stage1_registration.py
+Run `stage1_registration.py`
 
 
