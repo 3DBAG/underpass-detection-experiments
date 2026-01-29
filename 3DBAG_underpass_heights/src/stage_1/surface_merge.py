@@ -250,7 +250,7 @@ def surface_filter_byarea(faces, colors, vertices):
 if __name__ == '__main__':
     start_time = time.time()
 
-    off_path = f"../../visualization/almere_wall.off"
+    off_path = f"output/gelderseplein_lod2_planes.off"
 
     vertices = read_mesh_vertex(off_path)
     faces, colors = read_mesh_faces_1(off_path)
@@ -270,7 +270,7 @@ if __name__ == '__main__':
         for each in group:
             count+=1
 
-    fo = open("../../visualization/almere_walls.off", "w")
+    fo = open("output/gelderseplein_lod2_planes_cleaned.off", "w")
 
     fo.write("{}{}".format("COFF","\n"))
     fo.write("{} {} {}{}".format(len(vertices), count,0,"\n"))
