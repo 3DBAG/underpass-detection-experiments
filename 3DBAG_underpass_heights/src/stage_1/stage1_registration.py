@@ -1581,7 +1581,7 @@ if __name__ == '__main__':
     for rectangle in rectangles:
         rect = rectangle.copy()
         # Project 3D rectangle corners to 2D image coordinates
-        new_facede_2d = projection(img_id, rect)
+new_facede_2d = projection(img_id, rect)
         print(new_facede_2d)
         pts = np.array(new_facede_2d, np.int32)
         # Store projected points for visualization and later use
