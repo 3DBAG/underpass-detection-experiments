@@ -218,10 +218,10 @@ Surface_mesh extrude_polygon(const ogr::LinearRing& ring, double floor_height,
     // Hole rings are CW, walls should face into the hole (outward from solid)
     for (size_t i = 0; i < hn; ++i) {
       size_t j = (i + 1) % hn;
-      auto& v_floor_a = floor_vertex_map[hole_handles[i]];
-      auto& v_floor_b = floor_vertex_map[hole_handles[j]];
-      auto& v_roof_a = roof_vertex_map[hole_handles[i]];
-      auto& v_roof_b = roof_vertex_map[hole_handles[j]];
+      auto& v_floor_a = floor_vertex_map.at(hole_handles[i]);
+      auto& v_floor_b = floor_vertex_map.at(hole_handles[j]);
+      auto& v_roof_a = roof_vertex_map.at(hole_handles[i]);
+      auto& v_roof_b = roof_vertex_map.at(hole_handles[j]);
       mesh.add_face(v_floor_a, v_floor_b, v_roof_b);
       mesh.add_face(v_roof_a, v_floor_a, v_roof_b);
     }

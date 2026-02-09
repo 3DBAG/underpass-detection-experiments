@@ -71,15 +71,13 @@ manifold::MeshGL surface_mesh_to_meshgl(Surface_mesh& sm, bool compute_normals =
             const auto& p2 = sm.point(sm.target(h));
 
             // Add three vertices with the same face normal (reversed for Manifold/PLY compatibility)
-            // Reverse winding: use p0, p2, p1 instead of p0, p1, p2
-            // Also negate the normal since we're flipping the face
-            for (const auto& pt : {p0, p2, p1}) {
+            for (const auto& pt : {p0, p1, p2}) {
                 meshgl.vertProperties.push_back(static_cast<float>(pt.x()));
                 meshgl.vertProperties.push_back(static_cast<float>(pt.y()));
                 meshgl.vertProperties.push_back(static_cast<float>(pt.z()));
-                meshgl.vertProperties.push_back(static_cast<float>(-normal.x()));
-                meshgl.vertProperties.push_back(static_cast<float>(-normal.y()));
-                meshgl.vertProperties.push_back(static_cast<float>(-normal.z()));
+                meshgl.vertProperties.push_back(static_cast<float>(normal.x()));
+                meshgl.vertProperties.push_back(static_cast<float>(normal.y()));
+                meshgl.vertProperties.push_back(static_cast<float>(normal.z()));
             }
 
             // Add triangle indices
@@ -109,10 +107,10 @@ manifold::MeshGL surface_mesh_to_meshgl(Surface_mesh& sm, bool compute_normals =
             uint32_t v1 = static_cast<uint32_t>(sm.target(h));
             h = sm.next(h);
             uint32_t v2 = static_cast<uint32_t>(sm.target(h));
-            // Swap v1 and v2 to reverse winding
+
             meshgl.triVerts.push_back(v0);
-            meshgl.triVerts.push_back(v2);
             meshgl.triVerts.push_back(v1);
+            meshgl.triVerts.push_back(v2);
         }
     }
 
