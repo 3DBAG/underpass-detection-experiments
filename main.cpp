@@ -411,7 +411,7 @@ int main(int argc, char* argv[]) {
             static_cast<int>(house_with_underpass.Status()), house_with_underpass.NumTri()) << std::endl;
 
         // Get the mesh and recompute with flat normals
-        auto result_meshgl = house_with_underpass.GetMeshGL();
+        result_meshgl = house_with_underpass.GetMeshGL();
 
     } else if (method == BooleanMethod::CgalNef) {
         std::cout << "Using CGAL Nef polyhedra for boolean operations" << std::endl;
