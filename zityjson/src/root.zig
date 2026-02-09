@@ -243,6 +243,12 @@ pub const CityJSON = struct {
               const geom = &stored_city_object.geometries[i];
               geom.* = try StoredGeometry.init(self.allocator, g.type, g.lod);
 
+              // Collect unique vertices for this geometry, then add faces with remapped indices
+              var vertex_remap = std.AutoArrayHashMap(usize, usize).init(self.allocator);
+              defer vertex_remap.deinit();
+              var ring_indices: std.ArrayList(usize) = .{};
+              defer ring_indices.deinit(self.allocator);
+
               switch (g.type) {
                   .MultiSurface => {
                     const parsed_ = std.json.parseFromValue(CJMultiSurfaceBounds, self.allocator, g.boundaries, .{}) catch |err| {
@@ -251,55 +257,68 @@ pub const CityJSON = struct {
                     };
                     defer parsed_.deinit();
                     const bounds = parsed_.value;
+
+                    // First pass: collect unique vertices
                     for (bounds) |polygon| {
                         for (polygon) |ring| {
-                            // Collect vertex indices for this ring
-                            var ring_indices = try std.ArrayList(usize).initCapacity(self.allocator, ring.len);
-                            defer ring_indices.deinit(self.allocator);
-
-                            // TODO: handle holes better
                             for (ring) |vi| {
-                                const vertex_idx = try geom.polygonal_mesh.addVertex(cj.getTransformedVertex(vi));
-                                try ring_indices.append(self.allocator, vertex_idx);
+                                const result = try vertex_remap.getOrPut(vi);
+                                if (!result.found_existing) {
+                                    result.value_ptr.* = try geom.polygonal_mesh.addVertex(cj.getTransformedVertex(vi));
+                                }
                             }
+                        }
+                    }
 
-                            // Add the face for this ring
-                            try geom.polygonal_mesh.addFace(ring_indices.items, .wall);  // or appropriate FaceType
+                    // Second pass: add faces with remapped indices
+                    for (bounds) |polygon| {
+                        for (polygon) |ring| {
+                            ring_indices.clearRetainingCapacity();
+                            try ring_indices.ensureTotalCapacity(self.allocator, ring.len);
+                            for (ring) |vi| {
+                                ring_indices.appendAssumeCapacity(vertex_remap.get(vi).?);
+                            }
+                            try geom.polygonal_mesh.addFace(ring_indices.items, .wall);
                         }
                     }
                   },
                   .Solid => {
-                    // std.debug.print("Solid type\n", .{});
                     const parsed_ = std.json.parseFromValue(CJSolidBounds, self.allocator, g.boundaries, .{}) catch |err| {
                         std.debug.print("Error parsing bounds: {any}\n", .{err});
                         return;
                     };
                     defer parsed_.deinit();
                     const bounds = parsed_.value;
-                    // todo handle interiot vs exterior shells
+
+                    // First pass: collect unique vertices
                     for (bounds) |shell| {
                         for (shell) |polygon| {
                             for (polygon) |ring| {
-                                // Collect vertex indices for this ring
-                                var ring_indices = try std.ArrayList(usize).initCapacity(self.allocator, ring.len);
-                                defer ring_indices.deinit(self.allocator);
-
-                                // TODO: handle holes better vs exterior ring
                                 for (ring) |vi| {
-                                    const vertex_idx = try geom.polygonal_mesh.addVertex(cj.getTransformedVertex(vi));
-                                    try ring_indices.append(self.allocator, vertex_idx);
+                                    const result = try vertex_remap.getOrPut(vi);
+                                    if (!result.found_existing) {
+                                        result.value_ptr.* = try geom.polygonal_mesh.addVertex(cj.getTransformedVertex(vi));
+                                    }
                                 }
+                            }
+                        }
+                    }
 
-                                // Add the face for this ring
-                                try geom.polygonal_mesh.addFace(ring_indices.items, .wall);  // or appropriate FaceType
+                    // Second pass: add faces with remapped indices
+                    for (bounds) |shell| {
+                        for (shell) |polygon| {
+                            for (polygon) |ring| {
+                                ring_indices.clearRetainingCapacity();
+                                try ring_indices.ensureTotalCapacity(self.allocator, ring.len);
+                                for (ring) |vi| {
+                                    ring_indices.appendAssumeCapacity(vertex_remap.get(vi).?);
+                                }
+                                try geom.polygonal_mesh.addFace(ring_indices.items, .wall);
                             }
                         }
                     }
                   },
               }
-
-              // std.debug.print("Mesh has {d} faces\n", .{geom.polygonal_mesh.faces.items.len});
-              // std.debug.print("Mesh has {d} vertices\n", .{geom.polygonal_mesh.vertices.items.len/3});
           }
       }
     }
