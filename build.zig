@@ -50,6 +50,10 @@ pub fn build(b: *std.Build) void {
         .file = b.path("PolygonExtruder.cpp"),
         .flags = cpp_flags,
     });
+    exe.root_module.addCSourceFile(.{
+        .file = b.path("RerunVisualization.cpp"),
+        .flags = cpp_flags,
+    });
 
     // 2. Linking System Libraries
     // Note: Zig automatically picks up NIX_CFLAGS_COMPILE and NIX_LDFLAGS from the environment

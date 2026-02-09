@@ -14,13 +14,10 @@
 #include <CGAL/boost/graph/convert_nef_polyhedron_to_polygon_mesh.h>
 #include <CGAL/Polygon_mesh_processing/polygon_soup_to_polygon_mesh.h>
 
-#ifdef ENABLE_RERUN
-#include <rerun.hpp>
-#endif
-
 #include "zityjson.h"
 #include "OGRVectorReader.h"
 #include "PolygonExtruder.h"
+#include "RerunVisualization.h"
 
 // Enum to select boolean operation method
 enum class BooleanMethod {
@@ -219,81 +216,12 @@ Surface_mesh nef_boolean_difference(const Surface_mesh& mesh_a, const std::vecto
     return exact_to_surface_mesh(exact_result);
 }
 
-#ifdef ENABLE_RERUN
-// Helper to extract positions from MeshGL (handles variable numProp stride)
-std::vector<rerun::Position3D> meshgl_positions(const manifold::MeshGL& mesh) {
-    std::vector<rerun::Position3D> positions;
-    positions.reserve(mesh.NumVert());
-    for (size_t i = 0; i < mesh.NumVert(); ++i) {
-        size_t offset = i * mesh.numProp;
-        positions.push_back(rerun::Position3D(
-            mesh.vertProperties[offset],
-            mesh.vertProperties[offset + 1],
-            mesh.vertProperties[offset + 2]
-        ));
-    }
-    return positions;
-}
 
-// Helper to extract triangle indices from MeshGL
-std::vector<rerun::TriangleIndices> meshgl_triangles(const manifold::MeshGL& mesh) {
-    std::vector<rerun::TriangleIndices> triangles;
-    triangles.reserve(mesh.NumTri());
-    for (size_t i = 0; i < mesh.NumTri(); ++i) {
-        triangles.push_back(rerun::TriangleIndices(
-            mesh.triVerts[i * 3],
-            mesh.triVerts[i * 3 + 1],
-            mesh.triVerts[i * 3 + 2]
-        ));
-    }
-    return triangles;
-}
-
-// Helper to extract vertex normals from MeshGL (assumes numProp >= 6 with normals at indices 3,4,5)
-std::vector<rerun::Vector3D> meshgl_normals(const manifold::MeshGL& mesh) {
-    std::vector<rerun::Vector3D> normals;
-    if (mesh.numProp < 6) {
-        return normals;  // No normals stored
-    }
-    normals.reserve(mesh.NumVert());
-    for (size_t i = 0; i < mesh.NumVert(); ++i) {
-        size_t offset = i * mesh.numProp;
-        normals.push_back(rerun::Vector3D(
-            mesh.vertProperties[offset + 3],
-            mesh.vertProperties[offset + 4],
-            mesh.vertProperties[offset + 5]
-        ));
-    }
-    return normals;
-}
-#endif
 
 int main(int argc, char* argv[]) {
     if (argc < 5) {
         std::cerr << "Usage: " << argv[0] << " <cityjson_file> <cityjson_id> <shapefile> <extrusion_height>" << std::endl;
         return 1;
-    }
-
-    const char* cityjson_id = argv[2];
-    const char* shapefile_path = argv[3];
-    double extrusion_height = std::stod(argv[4]);
-
-    CityJSONHandle cj = cityjson_create();
-    if (cityjson_load(cj, argv[1]) == 0) {
-        size_t count = cityjson_object_count(cj);
-        for (size_t i = 0; i < count; i++) {
-            const char* oid = cityjson_get_object_name(cj, i);
-            size_t geom_count = cityjson_get_geometry_count(cj, i);
-            for (size_t g = 0; g < geom_count; g++) {
-                const double* verts = cityjson_get_vertices(cj, i, g);
-                size_t vert_count = cityjson_get_vertex_count(cj, i, g);
-                // std::cout << std::format("Object name: {}, geometry: {}", oid, g) << std::endl;
-            }
-        }
-        size_t start, end;
-        uint8_t type;
-        cityjson_get_face_info(cj, 0, 0, 0, &start, &end, &type);
-        std::cout << std::format("Face info: start={}, end={}, type={}", start, end, type) << std::endl;
     }
 
     Surface_mesh sm;
@@ -303,64 +231,78 @@ int main(int argc, char* argv[]) {
     double offset_y = 0.0;
     double offset_z = 0.0;
 
-    ssize_t idx = cityjson_get_object_index(cj, cityjson_id);
-    if (idx >= 0) {
-        size_t obj_idx = static_cast<size_t>(idx);
-        size_t geom_count = cityjson_get_geometry_count(cj, obj_idx);
-        std::cout << std::format("Geometry count: {}", geom_count) << std::endl;
+    const char* cityjson_id = argv[2];
+    const char* shapefile_path = argv[3];
+    double extrusion_height = std::stod(argv[4]);
 
-        if (geom_count > 0) {
-            size_t last_geom = geom_count - 1;
-            const double* verts = cityjson_get_vertices(cj, obj_idx, last_geom);
-            size_t vert_count = cityjson_get_vertex_count(cj, obj_idx, last_geom);
-            size_t face_count = cityjson_get_face_count(cj, obj_idx, last_geom);
-            const size_t* indices = cityjson_get_indices(cj, obj_idx, last_geom);
+    CityJSONHandle cj = cityjson_create();
+    if (cityjson_load(cj, argv[1]) == 0) {
+      ssize_t idx = cityjson_get_object_index(cj, cityjson_id);
+      if (idx >= 0) {
+          size_t obj_idx = static_cast<size_t>(idx);
+          size_t geom_count = cityjson_get_geometry_count(cj, obj_idx);
+          std::cout << std::format("Geometry count: {}", geom_count) << std::endl;
 
-            // Get the first vertex as offset (to bring coordinates near origin)
-            offset_x = verts[0];
-            offset_y = verts[1];
-            offset_z = verts[2];
+          if (geom_count > 0) {
+              size_t last_geom = geom_count - 1;
+              const double* verts = cityjson_get_vertices(cj, obj_idx, last_geom);
+              size_t vert_count = cityjson_get_vertex_count(cj, obj_idx, last_geom);
+              size_t face_count = cityjson_get_face_count(cj, obj_idx, last_geom);
+              const size_t* indices = cityjson_get_indices(cj, obj_idx, last_geom);
 
-            // Add vertices to surface mesh with offset applied
-            std::vector<Surface_mesh::Vertex_index> vertex_handles;
-            vertex_handles.reserve(vert_count);
-            for (size_t v = 0; v < vert_count; v++) {
-                K::Point_3 pt(
-                    verts[v * 3] - offset_x,
-                    verts[v * 3 + 1] - offset_y,
-                    verts[v * 3 + 2] - offset_z
-                );
-                vertex_handles.push_back(sm.add_vertex(pt));
-            }
+              // Get the first vertex as offset (to bring coordinates near origin)
+              offset_x = verts[0];
+              offset_y = verts[1];
+              offset_z = verts[2];
 
-            // Add faces to surface mesh
-            for (size_t f = 0; f < face_count; f++) {
-                size_t start, count;
-                uint8_t face_type;
-                if (cityjson_get_face_info(cj, obj_idx, last_geom, f, &start, &count, &face_type) == 0) {
-                    std::vector<Surface_mesh::Vertex_index> face_vertices;
-                    face_vertices.reserve(count);
-                    for (size_t i = 0; i < count; i++) {
-                        face_vertices.push_back(vertex_handles[indices[start + i]]);
-                    }
-                    sm.add_face(face_vertices);
-                }
-            }
+              // Add vertices to surface mesh with offset applied
+              std::vector<Surface_mesh::Vertex_index> vertex_handles;
+              vertex_handles.reserve(vert_count);
+              for (size_t v = 0; v < vert_count; v++) {
+                  K::Point_3 pt(
+                      verts[v * 3] - offset_x,
+                      verts[v * 3 + 1] - offset_y,
+                      verts[v * 3 + 2] - offset_z
+                  );
+                  vertex_handles.push_back(sm.add_vertex(pt));
+              }
 
-            std::cout << std::format("CGAL Surface_mesh: {} vertices, {} faces",
-                sm.number_of_vertices(), sm.number_of_faces()) << std::endl;
+              // Add faces to surface mesh
+              for (size_t f = 0; f < face_count; f++) {
+                  size_t start, count;
+                  uint8_t face_type;
+                  if (cityjson_get_face_info(cj, obj_idx, last_geom, f, &start, &count, &face_type) == 0) {
+                      std::vector<Surface_mesh::Vertex_index> face_vertices;
+                      face_vertices.reserve(count);
+                      for (size_t i = 0; i < count; i++) {
+                          face_vertices.push_back(vertex_handles[indices[start + i]]);
+                      }
+                      sm.add_face(face_vertices);
+                  }
+              }
 
-            // Triangulate the mesh
-            CGAL::Polygon_mesh_processing::triangulate_faces(sm);
-            std::cout << std::format("After triangulation: {} vertices, {} faces",
-                sm.number_of_vertices(), sm.number_of_faces()) << std::endl;
-        }
+              std::cout << std::format("House CGAL Surface_mesh- faces: {}, vertices: {}",
+                  sm.number_of_faces(), sm.number_of_vertices()) << std::endl;
+
+              // Triangulate the mesh
+              CGAL::Polygon_mesh_processing::triangulate_faces(sm);
+              std::cout << std::format("After triangulation - faces: {}, vertices: {}",
+                  sm.number_of_faces(), sm.number_of_vertices()) << std::endl;
+          }
+      }
+      cityjson_destroy(cj);
     }
-    cityjson_destroy(cj);
+
 
     ogr::VectorReader reader;
     reader.open(shapefile_path);
     auto polygons = reader.read_polygons();
+
+#ifdef ENABLE_RERUN
+    const auto rec = rerun::RecordingStream("test_3d_intersection");
+    rec.spawn().exit_on_failure();
+    extrusion::set_rerun_recording_stream(&rec);
+#endif
 
     std::vector<extrusion::Surface_mesh> extruded_meshes;
     extruded_meshes.reserve(polygons.size());
@@ -382,13 +324,13 @@ int main(int argc, char* argv[]) {
         }
 
         auto extruded_mesh = extrusion::extrude_polygon(offset_polygon, -1.0, extrusion_height);
-        CGAL::Polygon_mesh_processing::triangulate_faces(extruded_mesh);
+        // CGAL::Polygon_mesh_processing::triangulate_faces(extruded_mesh);
         extruded_meshes.push_back(std::move(extruded_mesh));
         std::cout << "polygon has " << polygon.size() << " vertices and " << polygon.interior_rings().size() << " holes" << std::endl;
     }
 
     // Convert CityJSON mesh (house) to MeshGL with normals
-    auto house_meshgl = surface_mesh_to_meshgl(sm, true);
+    auto house_meshgl = surface_mesh_to_meshgl(sm, false);
     std::cout << std::format("House MeshGL - triangles: {}, vertices: {}, numProp: {}",
         house_meshgl.NumTri(), house_meshgl.NumVert(), house_meshgl.numProp) << std::endl;
 
@@ -398,7 +340,7 @@ int main(int argc, char* argv[]) {
         auto& extruded_mesh = extruded_meshes[i];
         std::cout << std::format("Extruded mesh {} - CGAL faces: {}, vertices: {}",
             i, extruded_mesh.number_of_faces(), extruded_mesh.number_of_vertices()) << std::endl;
-        auto meshgl = surface_mesh_to_meshgl(extruded_mesh, true);
+        auto meshgl = surface_mesh_to_meshgl(extruded_mesh, false);
         std::cout << std::format("  MeshGL triangles: {}, vertices: {}",
             meshgl.NumTri(), meshgl.NumVert()) << std::endl;
         if (meshgl.NumTri() > 0) {
@@ -408,32 +350,18 @@ int main(int argc, char* argv[]) {
     std::cout << std::format("Underpass MeshGLs count: {}", underpass_meshgls.size()) << std::endl;
 
 #ifdef ENABLE_RERUN
-    const auto rec = rerun::RecordingStream("test_3d_intersection");
-    rec.spawn().exit_on_failure();
-
-    // Visualize house mesh (CityJSON building) - original MeshGL
-    rec.log(
-        "house",
-        rerun::Mesh3D(meshgl_positions(house_meshgl))
-            .with_triangle_indices(meshgl_triangles(house_meshgl))
-            .with_vertex_normals(meshgl_normals(house_meshgl))
-            .with_albedo_factor(rerun::Rgba32(200, 200, 100, 255))
-    );
+    // Visualize house mesh (CityJSON building)
+    viz::log_meshgl(rec, "house", house_meshgl, rerun::Rgba32(200, 200, 100, 255));
 
     // Visualize underpass meshes (extruded polygons)
     for (size_t i = 0; i < underpass_meshgls.size(); ++i) {
-        rec.log(
-            std::format("underpass/{}", i),
-            rerun::Mesh3D(meshgl_positions(underpass_meshgls[i]))
-                .with_triangle_indices(meshgl_triangles(underpass_meshgls[i]))
-                .with_vertex_normals(meshgl_normals(underpass_meshgls[i]))
-                .with_albedo_factor(rerun::Rgba32(100, 180, 220, 255))
-        );
+        viz::log_meshgl(rec, std::format("underpass/{}", i), underpass_meshgls[i],
+                        rerun::Rgba32(100, 180, 220, 255));
     }
 #endif
 
     // Select boolean operation method
-    BooleanMethod method = BooleanMethod::Manifold;
+    BooleanMethod method = BooleanMethod::CgalNef;
 
     manifold::MeshGL result_meshgl;
 
@@ -487,7 +415,7 @@ int main(int argc, char* argv[]) {
             result_sm.number_of_faces(), result_sm.number_of_vertices()) << std::endl;
 
         // Convert to MeshGL for visualization and export (flip normals - Nef output has reversed winding)
-        result_meshgl = surface_mesh_to_meshgl(result_sm, true);
+        result_meshgl = surface_mesh_to_meshgl(result_sm, false);
     }
 
     std::cout << std::format("Result MeshGL - triangles: {}, vertices: {}, numProp: {}",
@@ -495,15 +423,7 @@ int main(int argc, char* argv[]) {
 
 #ifdef ENABLE_RERUN
     // Visualize result mesh (boolean difference)
-    if (result_meshgl.NumTri() > 0) {
-        rec.log(
-            "result",
-            rerun::Mesh3D(meshgl_positions(result_meshgl))
-                .with_triangle_indices(meshgl_triangles(result_meshgl))
-                .with_vertex_normals(meshgl_normals(result_meshgl))
-                .with_albedo_factor(rerun::Rgba32(100, 200, 100, 255))
-        );
-    }
+    viz::log_meshgl(rec, "result", result_meshgl, rerun::Rgba32(100, 200, 100, 255));
 #endif
     manifold::ExportMesh("house.ply", house_meshgl, {});
     manifold::ExportMesh("underpass.ply", underpass_meshgls.front(), {});
