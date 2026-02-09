@@ -1,4 +1,5 @@
 #include <iostream>
+#include <fstream>
 #include <format>
 
 #include <manifold/manifold.h>
@@ -7,6 +8,7 @@
 #include <CGAL/Simple_cartesian.h>
 #include <CGAL/Surface_mesh.h>
 #include <CGAL/Polygon_mesh_processing/triangulate_faces.h>
+#include <CGAL/IO/PLY.h>
 #include <CGAL/Polygon_mesh_processing/compute_normal.h>
 #include <CGAL/Exact_predicates_exact_constructions_kernel.h>
 #include <CGAL/Nef_polyhedron_3.h>
@@ -215,7 +217,6 @@ Surface_mesh nef_boolean_difference(const Surface_mesh& mesh_a, const std::vecto
 }
 
 
-
 int main(int argc, char* argv[]) {
     if (argc < 5) {
         std::cerr << "Usage: " << argv[0] << " <cityjson_file> <cityjson_id> <shapefile> <extrusion_height>" << std::endl;
@@ -239,14 +240,19 @@ int main(int argc, char* argv[]) {
       if (idx >= 0) {
           size_t obj_idx = static_cast<size_t>(idx);
           size_t geom_count = cityjson_get_geometry_count(cj, obj_idx);
-          std::cout << std::format("Geometry count: {}", geom_count) << std::endl;
+          std::cout << std::format("CJ Geometry count: {}", geom_count) << std::endl;
 
           if (geom_count > 0) {
-              size_t last_geom = geom_count - 1;
+              size_t last_geom = geom_count - 1; // select lod2 model...
               const double* verts = cityjson_get_vertices(cj, obj_idx, last_geom);
               size_t vert_count = cityjson_get_vertex_count(cj, obj_idx, last_geom);
               size_t face_count = cityjson_get_face_count(cj, obj_idx, last_geom);
               const size_t* indices = cityjson_get_indices(cj, obj_idx, last_geom);
+
+              // print vert count
+              std::cout << std::format("CJ Vertex count: {}", vert_count) << std::endl;
+              // print face count
+              std::cout << std::format("CJ Face count: {}", face_count) << std::endl;
 
               // Get the first vertex as offset (to bring coordinates near origin)
               offset_x = verts[0];
@@ -282,10 +288,28 @@ int main(int argc, char* argv[]) {
               std::cout << std::format("House CGAL Surface_mesh- faces: {}, vertices: {}",
                   sm.number_of_faces(), sm.number_of_vertices()) << std::endl;
 
+              // Write mesh to PLY file
+              std::string ply_filename = std::format("house_{}_polygonal.ply", obj_idx);
+              std::ofstream ply_out_(ply_filename, std::ios::binary);
+              if (CGAL::IO::write_PLY(ply_out_, sm, std::format("CityJSON object {}", obj_idx))) {
+                  std::cout << std::format("Wrote mesh to {}", ply_filename) << std::endl;
+              } else {
+                  std::cerr << std::format("Failed to write {}", ply_filename) << std::endl;
+              }
+
               // Triangulate the mesh
               CGAL::Polygon_mesh_processing::triangulate_faces(sm);
               std::cout << std::format("After triangulation - faces: {}, vertices: {}",
                   sm.number_of_faces(), sm.number_of_vertices()) << std::endl;
+
+              // Write mesh to PLY file
+              ply_filename = std::format("house_{}.ply", obj_idx);
+              std::ofstream ply_out(ply_filename, std::ios::binary);
+              if (CGAL::IO::write_PLY(ply_out, sm, std::format("CityJSON object {}", obj_idx))) {
+                  std::cout << std::format("Wrote mesh to {}", ply_filename) << std::endl;
+              } else {
+                  std::cerr << std::format("Failed to write {}", ply_filename) << std::endl;
+              }
           }
       }
       cityjson_destroy(cj);
@@ -359,7 +383,7 @@ int main(int argc, char* argv[]) {
 #endif
 
     // Select boolean operation method
-    BooleanMethod method = BooleanMethod::CgalNef;
+    BooleanMethod method = BooleanMethod::Manifold;
 
     manifold::MeshGL result_meshgl;
 
