@@ -254,7 +254,8 @@ Surface_mesh corefine_boolean_difference(const Surface_mesh& mesh_a, const std::
 
 int main(int argc, char* argv[]) {
     if (argc < 5) {
-        std::cerr << "Usage: " << argv[0] << " <cityjson_file> <cityjson_id> <ogr_source> <extrusion_height>" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " <cityjson_file> <cityjson_id> <ogr_source> <extrusion_height> [method]" << std::endl;
+        std::cerr << "  method: manifold (default), nef, pmp" << std::endl;
         return 1;
     }
 
@@ -269,6 +270,19 @@ int main(int argc, char* argv[]) {
     const char* cityjson_id = argv[2];
     const char* ogr_source_path = argv[3];
     double extrusion_height = std::stod(argv[4]);
+    // Select boolean operation method
+    BooleanMethod method = BooleanMethod::Manifold;
+    if (argc > 5) {
+        std::string method_str = argv[5];
+        if (method_str == "nef") {
+            method = BooleanMethod::CgalNef;
+        } else if (method_str == "pmp") {
+            method = BooleanMethod::CgalPMP;
+        } else if (method_str != "manifold") {
+            std::cerr << "Unknown method: " << method_str << " (use manifold, nef, or pmp)" << std::endl;
+            return 1;
+        }
+    }
 
     CityJSONHandle cj = cityjson_create();
     if (cityjson_load(cj, argv[1]) == 0) {
@@ -397,9 +411,6 @@ int main(int argc, char* argv[]) {
                         rerun::Rgba32(100, 180, 220, 255));
     }
 #endif
-
-    // Select boolean operation method
-    BooleanMethod method = BooleanMethod::Manifold;
 
     manifold::MeshGL result_meshgl;
 
