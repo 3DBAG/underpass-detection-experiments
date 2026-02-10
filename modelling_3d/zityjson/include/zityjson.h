@@ -1,0 +1,83 @@
+#ifndef ZITYJSON_H
+#define ZITYJSON_H
+
+#include <stddef.h>
+#include <stdint.h>
+#include <sys/types.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+// Opaque handle to a CityJSON instance
+typedef struct CityJSON* CityJSONHandle;
+
+// Face type enumeration (matches Zig FaceType enum)
+typedef enum {
+    ZITYJSON_FACE_WALL = 0,
+    ZITYJSON_FACE_FLOOR = 1,
+    ZITYJSON_FACE_CEILING = 2,
+    ZITYJSON_FACE_ROOF = 3,
+    ZITYJSON_FACE_WINDOW = 4,
+    ZITYJSON_FACE_DOOR = 5
+} ZityJsonFaceType;
+
+// Create a new CityJSON instance.
+// Returns NULL on failure.
+CityJSONHandle cityjson_create(void);
+
+// Destroy a CityJSON instance and free all associated memory.
+void cityjson_destroy(CityJSONHandle handle);
+
+// Load a CityJSON file.
+// Returns 0 on success, non-zero on failure.
+int cityjson_load(CityJSONHandle handle, const char* path);
+
+// Get the number of objects in the CityJSON.
+size_t cityjson_object_count(CityJSONHandle handle);
+
+// Get the name of an object by index.
+// Returns NULL if index is out of bounds.
+const char* cityjson_get_object_name(CityJSONHandle handle, size_t index);
+
+// Get the index of an object by its key (name).
+// Returns -1 if not found.
+ssize_t cityjson_get_object_index(CityJSONHandle handle, const char* key);
+
+// Get the geometry count for an object by index.
+size_t cityjson_get_geometry_count(CityJSONHandle handle, size_t object_index);
+
+// Get the vertex count for a geometry by object and geometry index.
+size_t cityjson_get_vertex_count(CityJSONHandle handle, size_t object_index, size_t geometry_index);
+
+// Get the face count for a geometry by object and geometry index.
+size_t cityjson_get_face_count(CityJSONHandle handle, size_t object_index, size_t geometry_index);
+
+// Get pointer to vertex data (x, y, z triplets as double) for a geometry by object and geometry index.
+// Returns NULL if index is out of bounds.
+const double* cityjson_get_vertices(CityJSONHandle handle, size_t object_index, size_t geometry_index);
+
+// Get pointer to index data for a geometry by object and geometry index.
+// Returns NULL if index is out of bounds.
+const size_t* cityjson_get_indices(CityJSONHandle handle, size_t object_index, size_t geometry_index);
+
+// Get the index count for a geometry by object and geometry index.
+size_t cityjson_get_index_count(CityJSONHandle handle, size_t object_index, size_t geometry_index);
+
+// Get face info: start index, vertex count, and face type.
+// Returns 0 on success, -1 on failure.
+int cityjson_get_face_info(
+    CityJSONHandle handle,
+    size_t object_index,
+    size_t geometry_index,
+    size_t face_index,
+    size_t* out_start,
+    size_t* out_count,
+    uint8_t* out_face_type
+);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif // ZITYJSON_H
