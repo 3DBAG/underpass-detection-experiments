@@ -70,7 +70,7 @@
       {
         # Development shell
         devShells.default = pkgs.mkShell {
-          buildInputs = cppDeps ++ buildTools;
+          buildInputs = cppDeps ++ buildTools ++ [ pkgs.wget pkgs.just ];
 
           # Environment variables
           GDAL_DATA = "${pkgs.gdal}/share/gdal";
@@ -82,8 +82,16 @@
             export NIX_CFLAGS_COMPILE=$(echo "$NIX_CFLAGS_COMPILE" | sed 's/-fmacro-prefix-map=[^ ]*//g')
             echo "Entering development environment for test-3d-intersection"
             echo ""
+            echo "To download 3dbag CityJSON test tile (id 9-444-728):"
+            echo "  just download-tile"
+            echo ""
             echo "To build the project run:"
             echo "  zig build"
+            echo ""
+            echo "  (To compile in release mode add: -Doptimize=ReleaseFast)"
+            echo ""
+            echo "To run the program with sample data:"
+            echo "  ./zig-out/bin/test_3d_intersection ./sample_data/9-444-728.city.json NL.IMBAG.Pand.0363100012105349-0 ./sample_data/amsterdam_beemsterstraat_42.shp 3.5"
           '';
         };
 

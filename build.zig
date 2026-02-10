@@ -39,19 +39,19 @@ pub fn build(b: *std.Build) void {
 
     // 1. C++ Setup
     exe.root_module.addCSourceFile(.{
-        .file = b.path("main.cpp"),
+        .file = b.path("src/main.cpp"),
         .flags = cpp_flags,
     });
     exe.root_module.addCSourceFile(.{
-        .file = b.path("OGRVectorReader.cpp"),
+        .file = b.path("src/OGRVectorReader.cpp"),
         .flags = cpp_flags,
     });
     exe.root_module.addCSourceFile(.{
-        .file = b.path("PolygonExtruder.cpp"),
+        .file = b.path("src/PolygonExtruder.cpp"),
         .flags = cpp_flags,
     });
     exe.root_module.addCSourceFile(.{
-        .file = b.path("RerunVisualization.cpp"),
+        .file = b.path("src/RerunVisualization.cpp"),
         .flags = cpp_flags,
     });
 
