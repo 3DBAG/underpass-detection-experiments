@@ -33,6 +33,44 @@ void cityjson_destroy(CityJSONHandle handle);
 // Returns 0 on success, non-zero on failure.
 int cityjson_load(CityJSONHandle handle, const char* path);
 
+// Save a CityJSON file.
+// Returns 0 on success, non-zero on failure.
+int cityjson_save(CityJSONHandle handle, const char* path);
+
+// ---------------------------------------------------------------------------
+// Builder API — construct CityJSON from scratch
+// ---------------------------------------------------------------------------
+
+// Object type constants
+#define CITYJSON_BUILDING       0
+#define CITYJSON_BUILDING_PART  1
+
+// Geometry type constants
+#define CITYJSON_MULTISURFACE   0
+#define CITYJSON_SOLID          1
+
+// Add a new CityObject.
+// object_type: CITYJSON_BUILDING or CITYJSON_BUILDING_PART.
+// Returns the object index, or -1 on failure.
+ssize_t cityjson_add_object(CityJSONHandle handle, const char* name, uint8_t object_type);
+
+// Add a geometry to an object.
+// geometry_type: CITYJSON_MULTISURFACE or CITYJSON_SOLID.
+// lod: level of detail string, e.g. "1.2".
+// Returns the geometry index within that object, or -1 on failure.
+ssize_t cityjson_add_geometry(CityJSONHandle handle, size_t object_index, uint8_t geometry_type, const char* lod);
+
+// Add a vertex to a geometry's mesh.
+// Returns the vertex index, or -1 on failure.
+ssize_t cityjson_add_vertex(CityJSONHandle handle, size_t object_index, size_t geometry_index, double x, double y, double z);
+
+// Add a face to a geometry's mesh.
+// vertex_indices: array of vertex indices for this face.
+// num_indices: number of indices.
+// face_type: one of ZITYJSON_FACE_WALL, ZITYJSON_FACE_FLOOR, etc.
+// Returns 0 on success, -1 on failure.
+int cityjson_add_face(CityJSONHandle handle, size_t object_index, size_t geometry_index, const size_t* vertex_indices, size_t num_indices, uint8_t face_type);
+
 // Get the number of objects in the CityJSON.
 size_t cityjson_object_count(CityJSONHandle handle);
 
