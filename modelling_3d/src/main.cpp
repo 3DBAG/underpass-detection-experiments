@@ -40,7 +40,7 @@ using Exact_surface_mesh = CGAL::Surface_mesh<Exact_kernel::Point_3>;
 // Convert CGAL Surface_mesh to Manifold MeshGL
 // The mesh must be triangulated before calling this function.
 // If compute_normals is true, uses flat shading (face normals) by duplicating vertices per face.
-manifold::MeshGL surface_mesh_to_meshgl(Surface_mesh& sm, bool compute_normals = true) {
+manifold::MeshGL surface_mesh_to_meshgl(Surface_mesh& sm, bool compute_normals = true, bool flip_normals = false) {
     manifold::MeshGL meshgl;
 
     if (sm.number_of_faces() == 0) {
@@ -77,9 +77,15 @@ manifold::MeshGL surface_mesh_to_meshgl(Surface_mesh& sm, bool compute_normals =
                 meshgl.vertProperties.push_back(static_cast<float>(pt.x()));
                 meshgl.vertProperties.push_back(static_cast<float>(pt.y()));
                 meshgl.vertProperties.push_back(static_cast<float>(pt.z()));
-                meshgl.vertProperties.push_back(static_cast<float>(normal.x()));
-                meshgl.vertProperties.push_back(static_cast<float>(normal.y()));
-                meshgl.vertProperties.push_back(static_cast<float>(normal.z()));
+                if (flip_normals) {
+                  meshgl.vertProperties.push_back(static_cast<float>(-normal.x()));
+                  meshgl.vertProperties.push_back(static_cast<float>(-normal.y()));
+                  meshgl.vertProperties.push_back(static_cast<float>(-normal.z()));
+                } else {
+                  meshgl.vertProperties.push_back(static_cast<float>(normal.x()));
+                  meshgl.vertProperties.push_back(static_cast<float>(normal.y()));
+                  meshgl.vertProperties.push_back(static_cast<float>(normal.z()));
+                }
             }
 
             // Add triangle indices
@@ -377,16 +383,16 @@ int main(int argc, char* argv[]) {
             offset_polygon.interior_rings().push_back(std::move(offset_hole));
         }
 
-        auto extruded_mesh = extrusion::extrude_polygon(offset_polygon, -1.0, extrusion_height, ignore_holes);
+        auto extruded_mesh = extrusion::extrude_polygon(offset_polygon, -0.1, extrusion_height + 0.1, ignore_holes);
         extruded_meshes.push_back(std::move(extruded_mesh));
     }
 
-    // Convert CityJSON mesh (house) to MeshGL with normals
+    // Convert CityJSON mesh (house) to MeshGL
     auto house_meshgl = surface_mesh_to_meshgl(sm, false);
     std::cout << std::format("House MeshGL - triangles: {}, vertices: {}, numProp: {}",
         house_meshgl.NumTri(), house_meshgl.NumVert(), house_meshgl.numProp) << std::endl;
 
-    // Convert extruded meshes to MeshGL with normals
+    // Convert extruded meshes to MeshGL
     std::vector<manifold::MeshGL> underpass_meshgls;
     for (size_t i = 0; i < extruded_meshes.size(); ++i) {
         auto& extruded_mesh = extruded_meshes[i];
@@ -403,11 +409,11 @@ int main(int argc, char* argv[]) {
 
 #ifdef ENABLE_RERUN
     // Visualize house mesh (CityJSON building)
-    viz::log_meshgl(rec, "house", house_meshgl, rerun::Rgba32(200, 200, 100, 255));
+    viz::log_meshgl(rec, "house", surface_mesh_to_meshgl(sm, true), rerun::Rgba32(200, 200, 100, 255));
 
     // Visualize underpass meshes (extruded polygons)
-    for (size_t i = 0; i < underpass_meshgls.size(); ++i) {
-        viz::log_meshgl(rec, std::format("underpass/{}", i), underpass_meshgls[i],
+    for (size_t i = 0; i < extruded_meshes.size(); ++i) {
+        viz::log_meshgl(rec, std::format("underpass/{}", i), surface_mesh_to_meshgl(extruded_meshes[i], true),
                         rerun::Rgba32(100, 180, 220, 255));
     }
 #endif
@@ -439,6 +445,10 @@ int main(int argc, char* argv[]) {
 
         // Get the mesh and recompute with flat normals
         result_meshgl = house_with_underpass.GetMeshGL();
+        #ifdef ENABLE_RERUN
+            // Visualize result mesh (boolean difference)
+            viz::log_meshgl(rec, "result manifold", result_meshgl, rerun::Rgba32(100, 200, 100, 255));
+        #endif
 
     } else if (method == BooleanMethod::CgalNef) {
         std::cout << "Using CGAL Nef polyhedra for boolean operations" << std::endl;
@@ -459,6 +469,10 @@ int main(int argc, char* argv[]) {
 
         // Triangulate the result (Nef conversion may produce non-triangular faces)
         CGAL::Polygon_mesh_processing::triangulate_faces(result_sm);
+        #ifdef ENABLE_RERUN
+            // Visualize result mesh (boolean difference)
+            viz::log_meshgl(rec, "result nef", surface_mesh_to_meshgl(result_sm), rerun::Rgba32(100, 200, 100, 255));
+        #endif
 
         std::cout << std::format("Result Surface_mesh - faces: {}, vertices: {}",
             result_sm.number_of_faces(), result_sm.number_of_vertices()) << std::endl;
@@ -482,6 +496,10 @@ int main(int argc, char* argv[]) {
 
         // Perform boolean difference using PMP corefinement
         Surface_mesh result_sm = corefine_boolean_difference(sm, underpass_surfaces);
+        #ifdef ENABLE_RERUN
+            // Visualize result mesh (boolean difference)
+            viz::log_meshgl(rec, "result pmp", surface_mesh_to_meshgl(result_sm, true, true), rerun::Rgba32(100, 200, 100, 255));
+        #endif
 
         std::cout << std::format("Result Surface_mesh - faces: {}, vertices: {}",
             result_sm.number_of_faces(), result_sm.number_of_vertices()) << std::endl;
@@ -492,10 +510,6 @@ int main(int argc, char* argv[]) {
     std::cout << std::format("Result MeshGL - triangles: {}, vertices: {}, numProp: {}",
         result_meshgl.NumTri(), result_meshgl.NumVert(), result_meshgl.numProp) << std::endl;
 
-#ifdef ENABLE_RERUN
-    // Visualize result mesh (boolean difference)
-    viz::log_meshgl(rec, "result", result_meshgl, rerun::Rgba32(100, 200, 100, 255));
-#endif
     manifold::ExportMesh("house.ply", house_meshgl, {});
     manifold::ExportMesh("underpass.ply", underpass_meshgls.front(), {});
     manifold::ExportMesh("house_with_underpass.ply", result_meshgl, {});
