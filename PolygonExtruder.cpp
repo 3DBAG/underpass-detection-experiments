@@ -113,13 +113,16 @@ static std::vector<CDT::Vertex_handle> insert_ring(
 // Populates ring_handles: first element is the exterior ring, followed by one
 // element per interior ring (hole). Handles refer to vertices in cdt.
 static void triangulate_polygon(const ogr::LinearRing& ring, CDT& cdt,
-                                std::vector<std::vector<CDT::Vertex_handle>>& ring_handles) {
+                                std::vector<std::vector<CDT::Vertex_handle>>& ring_handles,
+                                bool ignore_holes = false) {
   // Insert exterior ring
   ring_handles.push_back(insert_ring(ring, cdt));
 
   // Insert interior rings (holes)
-  for (const auto& hole : ring.interior_rings()) {
-    ring_handles.push_back(insert_ring(hole, cdt));
+  if (!ignore_holes) {
+    for (const auto& hole : ring.interior_rings()) {
+      ring_handles.push_back(insert_ring(hole, cdt));
+    }
   }
 
   if (cdt.number_of_faces() == 0) return;
@@ -128,7 +131,7 @@ static void triangulate_polygon(const ogr::LinearRing& ring, CDT& cdt,
 }
 
 Surface_mesh extrude_polygon(const ogr::LinearRing& ring, double floor_height,
-                             double roof_height) {
+                             double roof_height, bool ignore_holes) {
   Surface_mesh mesh;
 
   if (ring.size() < 3) {
@@ -138,7 +141,7 @@ Surface_mesh extrude_polygon(const ogr::LinearRing& ring, double floor_height,
   // Triangulate the polygon with holes
   CDT cdt;
   std::vector<std::vector<CDT::Vertex_handle>> ring_handles;
-  triangulate_polygon(ring, cdt, ring_handles);
+  triangulate_polygon(ring, cdt, ring_handles, ignore_holes);
 
 #ifdef ENABLE_RERUN
   if (g_rec) {

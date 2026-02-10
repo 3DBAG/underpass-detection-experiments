@@ -219,11 +219,12 @@ Surface_mesh nef_boolean_difference(const Surface_mesh& mesh_a, const std::vecto
 
 int main(int argc, char* argv[]) {
     if (argc < 5) {
-        std::cerr << "Usage: " << argv[0] << " <cityjson_file> <cityjson_id> <shapefile> <extrusion_height>" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " <cityjson_file> <cityjson_id> <ogr_source> <extrusion_height>" << std::endl;
         return 1;
     }
 
     Surface_mesh sm;
+    bool ignore_holes = false;
 
     // Offset to bring coordinates near origin (set from first vertex)
     double offset_x = 0.0;
@@ -231,7 +232,7 @@ int main(int argc, char* argv[]) {
     double offset_z = 0.0;
 
     const char* cityjson_id = argv[2];
-    const char* shapefile_path = argv[3];
+    const char* ogr_source_path = argv[3];
     double extrusion_height = std::stod(argv[4]);
 
     CityJSONHandle cj = cityjson_create();
@@ -317,7 +318,7 @@ int main(int argc, char* argv[]) {
 
 
     ogr::VectorReader reader;
-    reader.open(shapefile_path);
+    reader.open(ogr_source_path);
     auto polygons = reader.read_polygons();
 
 #ifdef ENABLE_RERUN
@@ -345,7 +346,7 @@ int main(int argc, char* argv[]) {
             offset_polygon.interior_rings().push_back(std::move(offset_hole));
         }
 
-        auto extruded_mesh = extrusion::extrude_polygon(offset_polygon, -1.0, extrusion_height);
+        auto extruded_mesh = extrusion::extrude_polygon(offset_polygon, -1.0, extrusion_height, ignore_holes);
         // CGAL::Polygon_mesh_processing::triangulate_faces(extruded_mesh);
         extruded_meshes.push_back(std::move(extruded_mesh));
         std::cout << "polygon has " << polygon.size() << " vertices and " << polygon.interior_rings().size() << " holes" << std::endl;

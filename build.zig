@@ -12,7 +12,7 @@ pub fn build(b: *std.Build) void {
         .name = "zityjson",
         .linkage = .static,
         .root_module = b.createModule(.{
-            .root_source_file = b.path("zityjson/src/root.zig"),
+            .root_source_file = b.path("zityjson/src/zityjson.zig"),
             .target = target,
             .optimize = optimize,
         }),
