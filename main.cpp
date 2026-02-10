@@ -15,6 +15,7 @@
 #include <CGAL/Polyhedron_3.h>
 #include <CGAL/boost/graph/convert_nef_polyhedron_to_polygon_mesh.h>
 #include <CGAL/Polygon_mesh_processing/polygon_soup_to_polygon_mesh.h>
+#include <CGAL/Polygon_mesh_processing/corefinement.h>
 
 #include "zityjson.h"
 #include "OGRVectorReader.h"
@@ -23,8 +24,9 @@
 
 // Enum to select boolean operation method
 enum class BooleanMethod {
-    Manifold,   // Use Manifold library (faster, floating-point)
-    CgalNef     // Use CGAL Nef polyhedra (slower, exact arithmetic)
+    Manifold,       // Use Manifold library (faster, floating-point)
+    CgalNef,        // Use CGAL Nef polyhedra (slower, exact arithmetic)
+    CgalPMP    // Use CGAL PMP corefine_and_compute_difference (robust, exact)
 };
 
 // Type aliases for CGAL
@@ -216,6 +218,41 @@ Surface_mesh nef_boolean_difference(const Surface_mesh& mesh_a, const std::vecto
     return exact_to_surface_mesh(exact_result);
 }
 
+// Boolean difference using CGAL PMP corefinement
+Surface_mesh corefine_boolean_difference(const Surface_mesh& mesh_a, const Surface_mesh& mesh_b) {
+    auto exact_a = surface_mesh_to_exact(mesh_a);
+    auto exact_b = surface_mesh_to_exact(mesh_b);
+
+    Exact_surface_mesh exact_result;
+    bool success = CGAL::Polygon_mesh_processing::corefine_and_compute_difference(
+        exact_a, exact_b, exact_result);
+
+    if (!success) {
+        std::cerr << "Warning: corefine_and_compute_difference failed" << std::endl;
+    }
+
+    return exact_to_surface_mesh(exact_result);
+}
+
+// Boolean difference using CGAL PMP corefinement (overload for multiple meshes to subtract)
+Surface_mesh corefine_boolean_difference(const Surface_mesh& mesh_a, const std::vector<Surface_mesh>& meshes_b) {
+    auto exact_a = surface_mesh_to_exact(mesh_a);
+
+    for (const auto& mesh_b : meshes_b) {
+        auto exact_b = surface_mesh_to_exact(mesh_b);
+
+        Exact_surface_mesh exact_result;
+        bool success = CGAL::Polygon_mesh_processing::corefine_and_compute_difference(
+            exact_a, exact_b, exact_result);
+
+        if (!success) {
+            std::cerr << "Warning: corefine_and_compute_difference failed" << std::endl;
+        }
+        exact_a = std::move(exact_result);
+    }
+
+    return exact_to_surface_mesh(exact_a);
+}
 
 int main(int argc, char* argv[]) {
     if (argc < 5) {
@@ -384,7 +421,7 @@ int main(int argc, char* argv[]) {
 #endif
 
     // Select boolean operation method
-    BooleanMethod method = BooleanMethod::Manifold;
+    BooleanMethod method = BooleanMethod::CgalPMP;
 
     manifold::MeshGL result_meshgl;
 
@@ -438,6 +475,28 @@ int main(int argc, char* argv[]) {
             result_sm.number_of_faces(), result_sm.number_of_vertices()) << std::endl;
 
         // Convert to MeshGL for visualization and export (flip normals - Nef output has reversed winding)
+        result_meshgl = surface_mesh_to_meshgl(result_sm, false);
+
+    } else if (method == BooleanMethod::CgalPMP) {
+        std::cout << "Using CGAL PMP corefinement for boolean operations" << std::endl;
+
+        // Collect underpass meshes as Surface_mesh
+        std::vector<Surface_mesh> underpass_surfaces;
+        underpass_surfaces.reserve(extruded_meshes.size());
+        for (const auto& extruded_mesh : extruded_meshes) {
+            underpass_surfaces.push_back(extruded_mesh);
+        }
+
+        std::cout << std::format("House Surface_mesh - faces: {}, vertices: {}",
+            sm.number_of_faces(), sm.number_of_vertices()) << std::endl;
+        std::cout << std::format("Underpass meshes count: {}", underpass_surfaces.size()) << std::endl;
+
+        // Perform boolean difference using PMP corefinement
+        Surface_mesh result_sm = corefine_boolean_difference(sm, underpass_surfaces);
+
+        std::cout << std::format("Result Surface_mesh - faces: {}, vertices: {}",
+            result_sm.number_of_faces(), result_sm.number_of_vertices()) << std::endl;
+
         result_meshgl = surface_mesh_to_meshgl(result_sm, false);
     }
 
