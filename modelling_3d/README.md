@@ -55,7 +55,6 @@ zig build -Doptimize=ReleaseFast
 ├── flake.nix          # Nix flake for dependencies
 ├── flake.lock         # Nix flake lock file
 ├── justfile           # Task runner recipes
-├── vcpkg.json         # vcpkg dependency manifest
 ├── src/               # C++ source code
 │   ├── main.cpp               # Main entry point
 │   ├── OGRVectorReader.cpp    # OGR/GDAL vector data reader
