@@ -51,17 +51,30 @@ zig build -Doptimize=ReleaseFast
 ```
 .
 ├── build.zig          # Zig build configuration
+├── build.zig.zon      # Zig build dependencies
 ├── flake.nix          # Nix flake for dependencies
-├── main.cpp           # Main entry point
+├── flake.lock         # Nix flake lock file
+├── justfile           # Task runner recipes
+├── vcpkg.json         # vcpkg dependency manifest
+├── src/               # C++ source code
+│   ├── main.cpp               # Main entry point
+│   ├── OGRVectorReader.cpp    # OGR/GDAL vector data reader
+│   ├── OGRVectorReader.h
+│   ├── PolygonExtruder.cpp    # Polygon extrusion to 3D
+│   ├── PolygonExtruder.h
+│   ├── RerunVisualization.cpp # Rerun visualization support
+│   └── RerunVisualization.h
 ├── zityjson/          # CityJSON parsing library (Zig)
 │   ├── src/
 │   └── include/
-└── sample_data/       # Sample mesh files
+└── sample_data/       # Sample input data
 ```
 
 ## Dependencies
 
 Managed via Nix flake:
 - **manifold** - 3D geometry processing
+- **CGAL** - 3D geometry processing
+- **OGR** - Vector data reader
 - **rerun** - Visualization (optional)
 - **zityjson** - CityJSON parser (built-in)
