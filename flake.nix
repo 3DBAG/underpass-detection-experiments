@@ -92,6 +92,8 @@
             echo ""
             echo "To run the program with sample data:"
             echo "  ./zig-out/bin/test_3d_intersection ./sample_data/9-444-728.city.json NL.IMBAG.Pand.0363100012105349-0 ./sample_data/amsterdam_beemsterstraat_42.gpkg 3.5"
+            echo ""
+            echo "  (a number of .ply files will appear in the current working directory)"
           '';
         };
 
