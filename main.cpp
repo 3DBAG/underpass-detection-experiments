@@ -1,5 +1,4 @@
 #include <iostream>
-#include <fstream>
 #include <format>
 
 #include <manifold/manifold.h>
@@ -8,7 +7,6 @@
 #include <CGAL/Simple_cartesian.h>
 #include <CGAL/Surface_mesh.h>
 #include <CGAL/Polygon_mesh_processing/triangulate_faces.h>
-#include <CGAL/IO/PLY.h>
 #include <CGAL/Polygon_mesh_processing/compute_normal.h>
 #include <CGAL/Exact_predicates_exact_constructions_kernel.h>
 #include <CGAL/Nef_polyhedron_3.h>
@@ -326,28 +324,10 @@ int main(int argc, char* argv[]) {
               std::cout << std::format("House CGAL Surface_mesh- faces: {}, vertices: {}",
                   sm.number_of_faces(), sm.number_of_vertices()) << std::endl;
 
-              // Write mesh to PLY file
-              std::string ply_filename = std::format("house_{}_polygonal.ply", obj_idx);
-              std::ofstream ply_out_(ply_filename, std::ios::binary);
-              if (CGAL::IO::write_PLY(ply_out_, sm, std::format("CityJSON object {}", obj_idx))) {
-                  std::cout << std::format("Wrote mesh to {}", ply_filename) << std::endl;
-              } else {
-                  std::cerr << std::format("Failed to write {}", ply_filename) << std::endl;
-              }
-
               // Triangulate the mesh
               CGAL::Polygon_mesh_processing::triangulate_faces(sm);
               std::cout << std::format("After triangulation - faces: {}, vertices: {}",
                   sm.number_of_faces(), sm.number_of_vertices()) << std::endl;
-
-              // Write mesh to PLY file
-              ply_filename = std::format("house_{}.ply", obj_idx);
-              std::ofstream ply_out(ply_filename, std::ios::binary);
-              if (CGAL::IO::write_PLY(ply_out, sm, std::format("CityJSON object {}", obj_idx))) {
-                  std::cout << std::format("Wrote mesh to {}", ply_filename) << std::endl;
-              } else {
-                  std::cerr << std::format("Failed to write {}", ply_filename) << std::endl;
-              }
           }
       }
       cityjson_destroy(cj);
@@ -384,9 +364,7 @@ int main(int argc, char* argv[]) {
         }
 
         auto extruded_mesh = extrusion::extrude_polygon(offset_polygon, -1.0, extrusion_height, ignore_holes);
-        // CGAL::Polygon_mesh_processing::triangulate_faces(extruded_mesh);
         extruded_meshes.push_back(std::move(extruded_mesh));
-        std::cout << "polygon has " << polygon.size() << " vertices and " << polygon.interior_rings().size() << " holes" << std::endl;
     }
 
     // Convert CityJSON mesh (house) to MeshGL with normals
@@ -421,7 +399,7 @@ int main(int argc, char* argv[]) {
 #endif
 
     // Select boolean operation method
-    BooleanMethod method = BooleanMethod::CgalPMP;
+    BooleanMethod method = BooleanMethod::Manifold;
 
     manifold::MeshGL result_meshgl;
 

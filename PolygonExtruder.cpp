@@ -160,18 +160,6 @@ Surface_mesh extrude_polygon(const ogr::LinearRing& ring, double floor_height,
     roof_vertex_map[vit] = mesh.add_vertex(Point_3(p.x(), p.y(), roof_height));
   }
 
-  std::cerr << std::format("input polygon: exterior ring size={}, interior rings={}\n",
-      ring.size(), ring.interior_rings().size());
-  for (size_t i = 0; i < ring.interior_rings().size(); ++i) {
-    std::cerr << std::format("  hole[{}] size={}\n", i, ring.interior_rings()[i].size());
-  }
-
-  std::cerr << std::format("CDT vertices: {}, floor_map: {}, roof_map: {}, ring_handles[0]: {}\n",
-      cdt.number_of_vertices(), floor_vertex_map.size(), roof_vertex_map.size(), ring_handles[0].size());
-  for (size_t ri = 1; ri < ring_handles.size(); ++ri) {
-    std::cerr << std::format("  ring_handles[{}]: {}\n", ri, ring_handles[ri].size());
-  }
-
   // Add triangulated floor and roof faces
   for (auto fit = cdt.finite_faces_begin(); fit != cdt.finite_faces_end(); ++fit) {
     if (!fit->info().in_domain()) continue;
