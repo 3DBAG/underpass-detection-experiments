@@ -447,7 +447,7 @@ int main(int argc, char* argv[]) {
         result_meshgl = house_with_underpass.GetMeshGL();
         #ifdef ENABLE_RERUN
             // Visualize result mesh (boolean difference)
-            viz::log_meshgl(rec, "result manifold", result_meshgl, rerun::Rgba32(100, 200, 100, 255));
+            viz::log_meshgl(rec, "result_manifold", result_meshgl, rerun::Rgba32(100, 200, 100, 255));
         #endif
 
     } else if (method == BooleanMethod::CgalNef) {
@@ -471,7 +471,7 @@ int main(int argc, char* argv[]) {
         CGAL::Polygon_mesh_processing::triangulate_faces(result_sm);
         #ifdef ENABLE_RERUN
             // Visualize result mesh (boolean difference)
-            viz::log_meshgl(rec, "result nef", surface_mesh_to_meshgl(result_sm), rerun::Rgba32(100, 200, 100, 255));
+            viz::log_meshgl(rec, "result_nef", surface_mesh_to_meshgl(result_sm), rerun::Rgba32(100, 200, 100, 255));
         #endif
 
         std::cout << std::format("Result Surface_mesh - faces: {}, vertices: {}",
@@ -498,7 +498,7 @@ int main(int argc, char* argv[]) {
         Surface_mesh result_sm = corefine_boolean_difference(sm, underpass_surfaces);
         #ifdef ENABLE_RERUN
             // Visualize result mesh (boolean difference)
-            viz::log_meshgl(rec, "result pmp", surface_mesh_to_meshgl(result_sm, true, true), rerun::Rgba32(100, 200, 100, 255));
+            viz::log_meshgl(rec, "result_pmp", surface_mesh_to_meshgl(result_sm, true, true), rerun::Rgba32(100, 200, 100, 255));
         #endif
 
         std::cout << std::format("Result Surface_mesh - faces: {}, vertices: {}",
