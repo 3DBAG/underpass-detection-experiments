@@ -193,9 +193,9 @@ def projection(img_id, P):
 
     # Print result
 
-    for i in range(len(P)):
-        print("original 3D Point: ({}, {}, {}), ->> ({}, {})".format(P[i][0], P[i][1], P[i][2], point[i][0],
-                                                                     point[i][1]))
+    # for i in range(len(P)):
+    #     print("original 3D Point: ({}, {}, {}), ->> ({}, {})".format(P[i][0], P[i][1], P[i][2], point[i][0],
+    #                                                                  point[i][1]))
     return point
 
 

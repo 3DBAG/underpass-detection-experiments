@@ -1524,14 +1524,14 @@ def LSR(arr):
 if __name__ == '__main__':
 
     """read json template file"""
-    json_template = os.path.join(PROJECT_ROOT, 'template', 'gelderseplein_lod2.city.json')
+    json_template = os.path.join(PROJECT_ROOT, 'data/perspective_projection', 'template.json')
     with open(json_template, "r") as json_file:
         json_data = json_file.read()
         j = json.loads(json_data)
 
     """read .off file"""
-    path = os.path.join(PROJECT_ROOT, 'template', 'gelderseplein_LOD22_walls.off')
-    non_wall_path = os.path.join(PROJECT_ROOT, 'template', 'gelderseplein_original_LOD22.off')
+    path = os.path.join(PROJECT_ROOT, 'data/perspective_projection', 'LOD22_walls.off')
+    non_wall_path = os.path.join(PROJECT_ROOT, 'data/perspective_projection', 'original_LOD22.off')
     vertices = read_mesh_vertex(path)
     faces, colors = read_mesh_faces_1(path)
     print("finish read")
@@ -1542,6 +1542,7 @@ if __name__ == '__main__':
 
     rectangles, else_polygon = get_off_3Dfootprint(grouped_faces, vertices)
     rect_for_projection = rectangles.copy()
+    print(rect_for_projection[0])
 
     img_id = '24_07251_f_rgb.jpg'
     img_type = img_id.strip().split("_")[0]
@@ -1581,7 +1582,7 @@ if __name__ == '__main__':
     for rectangle in rectangles:
         rect = rectangle.copy()
         # Project 3D rectangle corners to 2D image coordinates
-new_facede_2d = projection(img_id, rect)
+        new_facede_2d = projection(img_id, rect)
         print(new_facede_2d)
         pts = np.array(new_facede_2d, np.int32)
         # Store projected points for visualization and later use

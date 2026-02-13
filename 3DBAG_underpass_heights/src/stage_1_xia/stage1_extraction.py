@@ -6,7 +6,7 @@ import numpy as np
 np.set_printoptions(suppress=True)
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection, Line3DCollection
 from extract_texture import *
-from perspective_projection import *
+from perspective_projection.perspective_projection import *
 import math
 from surface_merge import *
 from layout import *

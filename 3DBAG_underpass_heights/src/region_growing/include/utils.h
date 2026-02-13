@@ -301,7 +301,7 @@ void save_polygon_mesh_regions(
       put(face_color, item, color);
     }
   }
-  CGAL::IO::write_PLY(out, polygon_mesh, CGAL::parameters::face_color_map(face_color));
+  CGAL::IO::write_OFF(out, polygon_mesh, CGAL::parameters::face_color_map(face_color));
 }
 
 } // namespace utils

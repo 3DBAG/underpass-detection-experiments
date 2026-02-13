@@ -1,3 +1,4 @@
+#include <filesystem>
 #include <CGAL/Exact_predicates_inexact_constructions_kernel.h>
 #ifdef USE_POLYHEDRON
 #include <CGAL/Polyhedron_3.h>
@@ -29,26 +30,46 @@ using Region_growing = CGAL::Shape_detection::Region_growing<Neighbor_query, Reg
 int main(int argc, char *argv[]) {
  
   // Load data either from a local folder or a user-provided file.
-  // const bool is_default_input = (argc <= 1);
-  // const std::string filename = is_default_input ? "data/gelderseplein.obj" : argv[1];
-  const std::string filename = "gelderseplein.off";
-
+  const bool is_default_input = argc > 1 ? false : true;
+  const std::string filename = "data/region_growing/almere_0034100000050540.obj";
   std::ifstream in(filename);
-  std::cout << "file name: " << filename << std::endl;
+  CGAL::IO::set_ascii_mode(in); 
+
+  // Debug code
+  std::ifstream test(filename);
+  if (!test.is_open()) {
+    std::cerr << "Cannot open file: " << filename << std::endl;
+  } else {
+    std::cout << "File opened successfully!" << std::endl;
+  }
  
   Polygon_mesh polygon_mesh;
-  if (!CGAL::IO::read_polygon_mesh(filename, polygon_mesh)) {
-    std::cerr << "ERROR: cannot read the input file!" << std::endl;
-    return EXIT_FAILURE;
-  }
+
+  try {
+        if (!CGAL::IO::read_polygon_mesh(filename, polygon_mesh)) {
+            std::cerr << "CGAL read_polygon_mesh returned false: file could not be parsed\n";
+        } else {
+            std::cout << "Mesh loaded successfully!\n";
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "Exception while reading mesh: " << e.what() << std::endl;
+    } catch (...) {
+        std::cerr << "Unknown exception while reading mesh" << std::endl;
+    }
+
+  // CGAL::IO::read_polygon_mesh(filename, polygon_mesh);
+  // if (!CGAL::IO::read_polygon_mesh(filename, polygon_mesh)) {
+  //   std::cerr << "ERROR: cannot read the input file!" << std::endl;
+  //   return EXIT_FAILURE;
+  // }
   const auto& face_range = faces(polygon_mesh);
   std::cout << "* number of input faces: " << face_range.size() << std::endl;
   // assert(!is_default_input || face_range.size() == 32245);
  
   // Default parameter values for the data file building.off.
   const FT          max_distance    = FT(1);
-  const FT          max_angle       = FT(45);
-  const std::size_t min_region_size = 5;
+  const FT          max_angle       = FT(90);
+  const std::size_t min_region_size = 1;
  
   // Create instances of the classes Neighbor_query and Region_type.
   Neighbor_query neighbor_query(polygon_mesh);
@@ -94,7 +115,7 @@ int main(int argc, char *argv[]) {
   }
  
   // Save regions to a file.
-  const std::string fullpath = (argc > 2 ? argv[2] : "planes_polygon_mesh.ply");
+  const std::string fullpath = (argc > 2 ? argv[2] : "output/region_growing/almere_0034100000050540_lod22_walls.off");
   utils::save_polygon_mesh_regions(polygon_mesh, regions, fullpath);
  
   return EXIT_SUCCESS;

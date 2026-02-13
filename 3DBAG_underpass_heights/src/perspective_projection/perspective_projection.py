@@ -10,79 +10,71 @@ from functions import *
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(os.path.dirname(SCRIPT_DIR))
 
-# 1. Read points in world coordinates (pw), and rectangles (facades) for projection
-off_file_path = os.path.join(PROJECT_ROOT, 'data/perspective_projection', 'LOD22_walls.off')
-print("Input mesh: ", off_file_path)
+# Load resources and name variables (image_id, mesh file path, camera parameters file path)
+img_id = '402_0030_00131343.tif'
+mesh_path = os.path.join(PROJECT_ROOT, 'data/perspective_projection', '402_0030_00131343.off')
+camera_parameters_path = os.path.join(PROJECT_ROOT, 'data/perspective_projection', 'camera_parameters.txt')
 
+
+# 1. Read points in world coordinates (pw) and rectangles (facades) 
 # Read mesh vertices (in world coordinates)
-pw = read_mesh_vertex(off_file_path)
-
-# 2. Translate points to camera coodinates system (pc)
-extrinsic_params = os.path.join(PROJECT_ROOT, 'data/perspective_projection', 'calibrated_external_camera_parameters.txt')
-img_id = '404_0029_00131853.tif'
-
-# Get camera center c and rotation matrix r
-camera_origin, r = get_extrinsic_params(extrinsic_params, img_id)
-# Transform world coordinate points (pw) to camera coordinate points (pc)
-pc = get_camera_coordinates(pw, camera_origin, r)
-
+pw = read_mesh_vertex(mesh_path)
 # Read mesh faces
-faces, colors = read_mesh_faces(off_file_path)
+faces, colors = read_mesh_faces(mesh_path)
 # Filter surfaces: keep only walls
-wallsurface, new_color_list1 = wallsurface_filter_bynormal(faces, colors, pc)
+wallsurface, new_color_list1 = wallsurface_filter_bynormal(faces, colors, pw)
 # Group faces by color (same facade)
-grouped_faces, new_color_list = merge_surface(faces, colors, pc)
+grouped_faces, new_color_list = merge_surface(faces, colors, pw)
 # Retrieve rectangles representing facades
-rectangles, else_polygon = get_off_3Dfootprint(grouped_faces, pc)
+rectangles, else_polygon = get_off_3Dfootprint(grouped_faces, pw)
 rectangles_3d = rectangles.copy()
 
-# 3. Project 3D rectangles (facades) to 2D image coordinates
-# Get camera intrinsic parameters
-intrinsic_params = os.path.join(PROJECT_ROOT, 'data/perspective_projection', 'calibrated_camera_parameters.txt')
-c, f = get_intrinsic_params(intrinsic_params, img_id)
 
-# Load source image
-image = cv2.imread(os.path.join(PROJECT_ROOT, 'data/perspective_projection', img_id))
-
-
-def reorder_rectangle_points(rect):
-    rect = [list(p) for p in rect]  # ensure list, not np array
-
-    # Split by depth (Z)
-    near = sorted(rect, key=lambda p: p[2], reverse=True)[:2]
-    far  = sorted(rect, key=lambda p: p[2])[:2]
-
-    # Sort by vertical axis (Y)
-    near = sorted(near, key=lambda p: p[1])  # bottom → top
-    far  = sorted(far,  key=lambda p: p[1])  # bottom → top
-
-    # CCW order
-    return [
-        near[0],  # bottom-near
-        far[0],   # bottom-far
-        far[1],   # top-far
-        near[1]   # top-near
-    ]
-
-# Project each facade on image
+# 2. Project facades (rectangles) on 2D image
+facades_2d = []
 for rect_3d in rectangles_3d:
-    # Re-order rectangle points to have correct drawing order
-    rect_3d = reorder_rectangle_points(rect_3d)
-    # Project 3D rectangle corners to 2D image coordinates
-    rect_2d = project_3d_2d(rect_3d, c, f)
-    rect_2d = np.array(rect_2d, dtype=np.int32)
-    # Draw projected rectangle on image
-    cv2.polylines(image, [rect_2d], True, (0, 0, 255), 10)
-    
-    
+    rect_2d = project_3d_2d(rect_3d, img_id, camera_parameters_path)
+    # rect_2d = projection(img_id, rect_3d)
+    facade_2d = np.array(rect_2d, dtype=np.int32)
+    facades_2d.append(facade_2d)
 
-# Save output image with projected facades
+image = cv2.imread(os.path.join(PROJECT_ROOT, 'data/perspective_projection', img_id))
+for facade_2d in facades_2d:
+    cv2.polylines(image, [facade_2d], True, (0, 0, 255), 10)
+
 output_image = os.path.join(PROJECT_ROOT, 'output/perspective_projection', 'projected_facades.jpg')
 os.makedirs(os.path.dirname(output_image), exist_ok=True)
 cv2.imwrite(output_image, image)
 
-# Email Xia
-# Execute her code to get an idea of what the output should look like: figure out differences
-# Make the code work with the simplest case: project a point onto the image
-# Input Rotterdam data in Xia's code
+
+# 3. Extract facade textures
+for index, facade_2d in enumerate(facades_2d):
+    # Read image with projected facades
+    img = cv2.imread(output_image)
+    # Load projected rectangle
+    rectangle = np.array(facade_2d, dtype="float32")
+
+    # Compute output size
+    width = int(np.sqrt(((rectangle[0][0] - rectangle[3][0]) ** 2) + ((rectangle[0][1] - rectangle[3][1]) ** 2)))
+    width2 = int(np.sqrt(((rectangle[1][0] - rectangle[2][0]) ** 2) + ((rectangle[1][1] - rectangle[2][1]) ** 2)))
+    width = max(width, width2)
+
+    height = int(np.sqrt(((rectangle[0][0] - rectangle[1][0]) ** 2) + ((rectangle[0][1] - rectangle[1][1]) ** 2)))
+    height2 = int(np.sqrt(((rectangle[2][0] - rectangle[3][0]) ** 2) + ((rectangle[2][1] - rectangle[3][1]) ** 2)))
+    height = max(height, height2)
+
+    # Destination rectangle
+    output_rectangle = np.array([
+        [0, 0],
+        [0, height-1],
+        [width-1, height-1],
+        [width-1, 0]
+    ], dtype="float32")
+
+    # Perspective transform
+    M = cv2.getPerspectiveTransform(rectangle, output_rectangle)
+    warped = cv2.warpPerspective(img, M, (width, height), flags=cv2.INTER_LINEAR)
+    cv2.imwrite(os.path.join('output/perspective_projection', f"facade_{index+1}_rectified.png"), warped)
+
+
 

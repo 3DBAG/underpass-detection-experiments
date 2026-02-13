@@ -1,6 +1,10 @@
 import re
 import numpy as np
+import os
 
+# Configure root directory
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(os.path.dirname(SCRIPT_DIR))
 
 def compute_r_matrix(omega, phi, kappa):
 
@@ -15,78 +19,14 @@ def compute_r_matrix(omega, phi, kappa):
                       [np.sin(phi), 0, np.cos(phi)]])
     
     # Rotation matrix around Z-axis (kappa)
-    r_kappa = np.array([[np.cos(kappa), np.sin(kappa), 0],
+    r_kappa = np.array([[np.cos(kappa), -np.sin(kappa), 0],
                         [-np.sin(kappa), np.cos(kappa), 0],
                         [0, 0, 1]])
     
     # Combined rotation matrix
     r = r_kappa @ r_phi @ r_omega
-
-    return r
-
-
-
-def get_extrinsic_params(extrinsic_params, img_id):
-
-    # Open extrinsic parameters files
-    with open(extrinsic_params, 'r') as f:
-        lines = f.readlines()
-        for line in lines:
-            params = line.split()
-
-            if params[0] != img_id:
-                continue
-            
-            # Camera center
-            c = np.array([float(params[1]), float(params[2]), float(params[3])]).reshape(3, 1)
-            # Convert angles from degrees to radians
-            omega = np.deg2rad(float(params[4]))
-            phi = np.deg2rad(float(params[5]))
-            kappa = np.deg2rad(float(params[6]))
-            # Compute rotation matrix
-            r = compute_r_matrix(omega, phi, kappa)
-
-            return c, r
-
-
-
-def get_intrinsic_params(intrinsic_params, img_id):
-
-    # Open intrinsic parameters files
-    with open(intrinsic_params, 'r') as f:
-        lines = f.readlines()
-        for line in lines:
-            params = line.split()
-            
-            if len(params) == 0 or params[0] != img_id:
-                continue
-            
-            # Principal point
-            line_cx = lines.index(line) + 1
-            cx = lines[line_cx].split()[2]
-            line_cy = lines.index(line) + 2
-            cy = lines[line_cy].split()[2]
-            c = np.array([float(cx), float(cy)]).reshape(2, 1)
-
-            # Focal length
-            line_fx = lines.index(line) + 1
-            fx = lines[line_fx].split()[0]
-            line_fy = lines.index(line) + 2
-            fy = lines[line_fy].split()[1]
-            f = np.array([float(fx), float(fy)]).reshape(2, 1)
-
-            return c, f
-        
-
-def get_camera_coordinates(points, c, r):
-
-    #Initialize list for camera coordinates
-    pc = []
-    for point in points:
-        point_c = r @ (np.array(point).reshape(3,1) - c) 
-        pc.append(point_c.flatten().tolist())
     
-    return pc
+    return r
 
 
 def read_mesh_vertex(path):
@@ -246,19 +186,162 @@ def get_off_3Dfootprint(grouped_faces, vertices):
     return total_3Dfootprint, else_polygon
 
 
-def project_3d_2d(rect_3d, c, f):
+def compute_projection_matrix(img_id, params_path):
+
+    # Get camera parameters
+    img = False
+    with open(params_path, 'r') as f:
+        lines = f.readlines()
+        for line in lines:
+            params = line.split()
+
+            if params[0] != img_id:
+                continue
+
+            img = True
+            # Camera center coordinates
+            x = float(params[3])
+            y = float(params[4])
+            z = float(params[5])
+            # Camera rotation
+            omega = np.deg2rad(float(params[6]))
+            phi = np.deg2rad(float(params[7]))
+            kappa = np.deg2rad(float(params[8]))
+            # Focal length
+            fx = float(params[9])
+            fy = float(params[10])
+            # Principal point
+            cx = float(params[11])
+            cy = float(params[12])
+
+            break
+
+        if not img:
+            raise ValueError(f"Image ID {img_id} not found in parameters file.")
     
+    # Compute camera matrix
+    k = np.array([[fx, 0, cx],
+                  [0, fy, cy],
+                  [0, 0, 1]]).astype(np.float32)
+    
+    # Compute rotation matrix
+    r = compute_r_matrix(omega, phi, kappa)
+
+    # Compute translation vector
+    t = -r @ np.array([[x], [y], [z]]).astype(np.float32).reshape(3, 1)
+
+    # Compute projection matrix
+    m = k @ np.hstack((r, t.reshape(3, 1)))
+
+    return m
+
+
+def project_3d_2d(rect_3d, img_id, params_path):
+    
+    # Compute projection matrix
+    m = compute_projection_matrix(img_id, params_path)
+
     rect_2d = []
+    for vertex in rect_3d:
+        # Express rectangle vertex in homogeneous coordinates
+        vertex_3d_homogeneous = np.hstack((vertex, np.array([1])))
+        # Compute projected point 
+        vertex_2d_homogeneous = m @ vertex_3d_homogeneous.reshape(4, 1)
+        # Convert projected point back to Cartesian coordinates
+        vertex_2d = vertex_2d_homogeneous[:2] / vertex_2d_homogeneous[2]
+        # Construct projected rectangle
+        rect_2d.append([int(14192 - vertex_2d[0][0]), int(10640 - vertex_2d[1][0])])
 
-    for point in rect_3d:
-        x = point[0]
-        y = point[1]
-        z = point[2]
-
-        u = f[0][0] * (x / z) + c[0][0]
-        v = f[1][0] * (y / z) + c[1][0]
-        
-        rect_2d.append([u, v])
-        print(f"3D point: ({x}, {y}, {z}) -> 2D point: ({u}, {v})")
+    for i in range(len(rect_2d)):
+        print("original 3D Point: ({}, {}, {}), ->> ({}, {})".format(rect_3d[i][0], rect_3d[i][1], rect_3d[i][2], 
+                                                                     rect_2d[i][0], rect_2d[i][1]))
 
     return rect_2d
+
+
+# def get_camera_parameters(img_id):
+#     """
+#     :param img_id: image id
+#     :return: return original R and t
+#     """
+#     cp_file = os.path.join(PROJECT_ROOT, 'data\perspective_projection', 'calibrated_camera_parameters.txt')
+
+#     print(cp_file)
+#     if_img = False
+#     parameters_count = 0
+#     camera_parameters = []
+#     with open(cp_file) as lines:
+#         for line in lines:
+#             parts = line.strip().split(" ")
+#             if parts[0] == img_id:
+#                 if_img = True
+#                 continue
+#             elif if_img == True and parameters_count != 9:
+#                 camera_parameters.append(parts)
+#                 parameters_count+=1
+#             elif parameters_count == 9:
+#                 break
+
+#     K = np.array([camera_parameters[0], camera_parameters[1], camera_parameters[2]]).astype(np.float32)
+#     t = np.array([camera_parameters[5]]).astype(np.float32)
+#     R = np.array([camera_parameters[6], camera_parameters[7], camera_parameters[8]]).astype(np.float32)
+
+#     t = t.reshape(3, 1)
+#     t1 = -1. * R @ t
+#     Rt = np.hstack((R, t1.reshape(3, 1)))
+#     KRt = K @ Rt
+
+#     return KRt
+
+
+# def get_offset(img_id):
+#     """
+#     offset of 3D coordinates
+#     :return: offset in x,y,z dimension
+#     """
+#     offset_file = os.path.join(PROJECT_ROOT, 'data/perspective_projection', 'offset.xyz')
+
+#     img_type = img_id.strip().split("_")[0]
+
+#     with open(offset_file) as file:
+#         for line in file:
+#             parts = line.strip().split(" ")
+
+#             if parts[0] == img_type:
+#                 offset_x = parts[1]
+#                 offset_y = parts[2]
+#                 offset_z = parts[3]
+
+#                 return float(offset_x), float(offset_y), float(offset_z)
+            
+
+# def projection(img_id, P):
+
+#     M = get_camera_parameters(img_id)
+
+#     offset_x, offset_y, offset_z = get_offset(img_id)
+
+#     Ps = []
+#     for line in P:
+#         P_new = [0, 0, 0]
+#         P_new[0] = line[0] - offset_x
+#         P_new[1] = line[1] - offset_y
+#         P_new[2] = line[2] - offset_z
+#         # reshape 3D point coordinates
+#         P_new = np.hstack((P_new, np.array([1])))
+#         Ps.append(P_new)
+
+#     # Ps = np.hstack((P,np.array([1,1,1,1]).reshape(4,1)))
+
+#     point = []
+#     for pt in Ps:
+#         P_proj = M @ pt.reshape(4, 1)
+#         x = P_proj[:2] / P_proj[2]
+#         point.append([int(x[0][0]), int(x[1][0])])
+        
+#     # Print result
+
+#     for i in range(len(P)):
+#         print("original 3D Point: ({}, {}, {}), ->> ({}, {})".format(P[i][0], P[i][1], P[i][2], point[i][0],
+#                                                                      point[i][1]))
+#     return point
