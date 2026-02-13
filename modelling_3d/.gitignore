@@ -1,0 +1,15 @@
+# IDE
+.idea
+.run
+.zed
+
+# Build dirs and artifacts
+.zig-cache/
+zig-out/
+/result/bin/test_3d_intersection
+
+# OSX
+.DS_Store
+
+# claude
+.claude

@@ -20,7 +20,17 @@ Create the following structure:
 
 ```
 
-## 2. Run code
-Run stage1_registration.py
+## 2. How to run:
+Create a Python virtual environment and install the project requirements: then run the script:
 
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
 
+Then run with:
+
+```bash
+python3 src/stage_1/stage1_registration.py
+```
