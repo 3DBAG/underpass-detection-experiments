@@ -362,6 +362,38 @@ int main(int argc, char* argv[]) {
     const auto rec = rerun::RecordingStream("test_3d_intersection");
     rec.spawn().exit_on_failure();
     extrusion::set_rerun_recording_stream(&rec);
+
+    // Log BAG building footprints as outlines
+    {
+        ogr::VectorReader bag_reader;
+        bag_reader.open("sample_data/amsterdam_beemsterstraat_42_bag.gpkg");
+        auto bag_polygons = bag_reader.read_polygons();
+
+        std::vector<rerun::LineStrip3D> strips;
+        strips.reserve(bag_polygons.size());
+        for (const auto& polygon : bag_polygons) {
+            std::vector<rerun::Position3D> points;
+            points.reserve(polygon.size() + 1);
+            for (const auto& pt : polygon) {
+                points.emplace_back(
+                    static_cast<float>(pt[0] - offset_x),
+                    static_cast<float>(pt[1] - offset_y),
+                    static_cast<float>(pt[2] - offset_z-0.4)
+                );
+            }
+            // Close the ring
+            if (!polygon.empty()) {
+                points.emplace_back(
+                    static_cast<float>(polygon[0][0] - offset_x),
+                    static_cast<float>(polygon[0][1] - offset_y),
+                    static_cast<float>(polygon[0][2] - offset_z-0.4)
+                );
+            }
+            strips.push_back(rerun::LineStrip3D(std::move(points)));
+        }
+        rec.log("bag_footprints", rerun::LineStrips3D(std::move(strips))
+            .with_colors({rerun::Rgba32(180, 180, 180, 255)}));
+    }
 #endif
 
     std::vector<extrusion::Surface_mesh> extruded_meshes;
@@ -383,7 +415,7 @@ int main(int argc, char* argv[]) {
             offset_polygon.interior_rings().push_back(std::move(offset_hole));
         }
 
-        auto extruded_mesh = extrusion::extrude_polygon(offset_polygon, -0.1, extrusion_height + 0.1, ignore_holes);
+        auto extruded_mesh = extrusion::extrude_polygon(offset_polygon, -0.05, extrusion_height + 0.05, ignore_holes);
         extruded_meshes.push_back(std::move(extruded_mesh));
     }
 
