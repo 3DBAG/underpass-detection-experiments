@@ -94,29 +94,41 @@ pub const CJObject = struct {
     geometry: []const CJGeometry,
 };
 
+const CJTransform = struct {
+    scale: [3]f64,
+    translate: [3]f64,
+
+    pub fn apply(self: @This(), v: [3]i64) [3]f64 {
+        return .{
+            @as(f64, @floatFromInt(v[0])) * self.scale[0] + self.translate[0],
+            @as(f64, @floatFromInt(v[1])) * self.scale[1] + self.translate[1],
+            @as(f64, @floatFromInt(v[2])) * self.scale[2] + self.translate[2],
+        };
+    }
+};
+
 const CJFile = struct {
     version: []const u8,
     type: []const u8,
     vertices: []const [3]i64,
     CityObjects: std.json.ArrayHashMap(CJObject),
-    transform: struct {
-        scale: [3]f64,
-        translate: [3]f64,
-    },
+    transform: CJTransform,
 
     // Methods are fine - JSON parsing ignores them
     pub fn getTransformedVertex(self: @This(), idx: usize) [3]f64 {
-        const v = self.vertices[idx];
-        return .{
-            @as(f64, @floatFromInt(v[0])) * self.transform.scale[0] + self.transform.translate[0],
-            @as(f64, @floatFromInt(v[1])) * self.transform.scale[1] + self.transform.translate[1],
-            @as(f64, @floatFromInt(v[2])) * self.transform.scale[2] + self.transform.translate[2],
-        };
+        return self.transform.apply(self.vertices[idx]);
     }
 
     pub fn vertexCount(self: @This()) usize {
         return self.vertices.len;
     }
+};
+
+const CJFeature = struct {
+    type: []const u8,
+    id: []const u8,
+    CityObjects: std.json.ArrayHashMap(CJObject),
+    vertices: []const [3]i64,
 };
 
 const CJMultiSurfaceBounds = []const []const []usize;
@@ -216,134 +228,226 @@ pub const CityJSON = struct {
     }
 
     pub fn load(self: *CityJSON, path: []const u8) !void {
-      const file = if (std.fs.path.isAbsolute(path))
-          try std.fs.openFileAbsolute(path, .{ .mode = .read_only })
-      else
-          try std.fs.cwd().openFile(path, .{ .mode = .read_only });
-      defer file.close();
-      var read_buf: [2048]u8 = undefined;
-      var f_reader: std.fs.File.Reader = file.reader(&read_buf);
+        if (std.mem.endsWith(u8, path, ".jsonl")) {
+            try self.loadCityJSONSeq(path);
+            return;
+        }
+        try self.loadCityJSON(path);
+    }
 
-      var j_reader = std.json.Reader.init(self.allocator, &f_reader.interface);
-      defer j_reader.deinit();
+    fn loadCityJSON(self: *CityJSON, path: []const u8) !void {
+        const file = if (std.fs.path.isAbsolute(path))
+            try std.fs.openFileAbsolute(path, .{ .mode = .read_only })
+        else
+            try std.fs.cwd().openFile(path, .{ .mode = .read_only });
+        defer file.close();
 
-      // Parse into the struct
-      const parsed = try std.json.parseFromTokenSource(CJFile, self.allocator, &j_reader, .{
-          .ignore_unknown_fields = true,
-      });
-      defer parsed.deinit();
+        var read_buf: [2048]u8 = undefined;
+        var f_reader: std.fs.File.Reader = file.reader(&read_buf);
+        var j_reader = std.json.Reader.init(self.allocator, &f_reader.interface);
+        defer j_reader.deinit();
 
-      const cj = parsed.value;
-      // std.debug.print("File version: {s}, type: {s}, Nr of vertices: {d}\n", .{
-          // cj.version, cj.type, cj.vertices.len
-      // });
-      // print first 5 vertices
-      // for (cj.vertices[0..5]) |vertex| {
-      //     std.debug.print("{d}, {d}, {d}\n",
-      //       .{  @as(f64, @floatFromInt(vertex[0]))*cj.transform.scale[0] + cj.transform.translate[0],
-      //           @as(f64, @floatFromInt(vertex[1]))*cj.transform.scale[1] + cj.transform.translate[1],
-      //           @as(f64, @floatFromInt(vertex[2]))*cj.transform.scale[2] + cj.transform.translate[2]
-      //       });
-      // }
-      // print transform
-      // std.debug.print("Scale: {d}, {d}, {d}\n", .{ cj.transform.scale[0], cj.transform.scale[1], cj.transform.scale[2] });
-      // std.debug.print("Translate: {d}, {d}, {d}\n", .{ cj.transform.translate[0], cj.transform.translate[1], cj.transform.translate[2] });
+        const parsed = try std.json.parseFromTokenSource(CJFile, self.allocator, &j_reader, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
 
-      // Accessing the dynamic part:
-      const city_objs = parsed.value.CityObjects; // It's an ArrayHashMap
-      for (city_objs.map.keys(), city_objs.map.values()) |key, obj| {
-          // std.debug.print("\nID: {s}\n", .{key});
-          // std.debug.print("Type: {s}\n", .{@tagName(obj.type)});
+        try self.ingestCityObjects(parsed.value.CityObjects, parsed.value.vertices, parsed.value.transform);
+    }
 
-          const owned_key = try self.allocator.dupeZ(u8, key);
-          try self.objects.put(owned_key, try StoredCityObject.init(self.allocator, obj.type, obj.geometry.len));
-          const stored_city_object = self.objects.getPtr(key).?;
+    fn loadCityJSONSeq(self: *CityJSON, path: []const u8) !void {
+        const file = if (std.fs.path.isAbsolute(path))
+            try std.fs.openFileAbsolute(path, .{ .mode = .read_only })
+        else
+            try std.fs.cwd().openFile(path, .{ .mode = .read_only });
+        defer file.close();
 
-          for (obj.geometry, 0..) |g, i| {
-              // std.debug.print("Geometry Type: {s}\n", .{@tagName(g.type)});
-              // std.debug.print("LOD: {s}\n", .{g.lod});
+        var did_read_header = false;
+        var seq_transform: CJTransform = undefined;
 
-              const geom = &stored_city_object.geometries[i];
-              geom.* = try StoredGeometry.init(self.allocator, g.type, g.lod);
+        var pending_line: std.ArrayList(u8) = .{};
+        defer pending_line.deinit(self.allocator);
 
-              // Collect unique vertices for this geometry, then add faces with remapped indices
-              var vertex_remap = std.AutoArrayHashMap(usize, usize).init(self.allocator);
-              defer vertex_remap.deinit();
-              var ring_indices: std.ArrayList(usize) = .{};
-              defer ring_indices.deinit(self.allocator);
+        var read_chunk: [8192]u8 = undefined;
+        while (true) {
+            const bytes_read = try file.read(&read_chunk);
+            if (bytes_read == 0) break;
 
-              switch (g.type) {
-                  .MultiSurface => {
-                    const parsed_ = std.json.parseFromValue(CJMultiSurfaceBounds, self.allocator, g.boundaries, .{}) catch |err| {
-                        std.debug.print("Error parsing bounds: {any}\n", .{err});
-                        return;
-                    };
-                    defer parsed_.deinit();
-                    const bounds = parsed_.value;
+            var start: usize = 0;
+            while (start < bytes_read) {
+                if (std.mem.indexOfScalar(u8, read_chunk[start..bytes_read], '\n')) |relative_end| {
+                    const end = start + relative_end;
+                    try pending_line.appendSlice(self.allocator, read_chunk[start..end]);
+                    try self.ingestCityJSONSeqLine(pending_line.items, &did_read_header, &seq_transform);
+                    pending_line.clearRetainingCapacity();
+                    start = end + 1;
+                } else {
+                    try pending_line.appendSlice(self.allocator, read_chunk[start..bytes_read]);
+                    break;
+                }
+            }
+        }
 
-                    // First pass: collect unique vertices
-                    for (bounds) |polygon| {
+        if (pending_line.items.len > 0) {
+            try self.ingestCityJSONSeqLine(pending_line.items, &did_read_header, &seq_transform);
+        }
+
+        if (!did_read_header) return error.InvalidCityJSONSeqHeader;
+    }
+
+    fn ingestCityJSONSeqLine(
+        self: *CityJSON,
+        raw_line: []const u8,
+        did_read_header: *bool,
+        seq_transform: *CJTransform,
+    ) !void {
+        // Normalize line endings and ignore surrounding whitespace so CRLF files
+        // and padded lines still parse as valid JSON lines.
+        var line = std.mem.trim(u8, raw_line, " \t\r");
+        // CityJSONSeq readers should tolerate empty lines between entries.
+        if (line.len == 0) return;
+
+        // Some producers write a UTF-8 BOM at the start of the file. Strip it
+        // from the first meaningful line (the CityJSON header) before parsing.
+        if (!did_read_header.* and std.mem.startsWith(u8, line, "\xEF\xBB\xBF")) {
+            line = line[3..];
+        }
+
+        if (!did_read_header.*) {
+            const parsed_header = try std.json.parseFromSlice(CJFile, self.allocator, line, .{
+                .ignore_unknown_fields = true,
+            });
+            defer parsed_header.deinit();
+
+            if (!std.mem.eql(u8, parsed_header.value.type, "CityJSON")) {
+                return error.InvalidCityJSONSeqHeader;
+            }
+
+            seq_transform.* = parsed_header.value.transform;
+            did_read_header.* = true;
+            return;
+        }
+
+        const parsed_feature = try std.json.parseFromSlice(CJFeature, self.allocator, line, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed_feature.deinit();
+
+        if (!std.mem.eql(u8, parsed_feature.value.type, "CityJSONFeature")) {
+            return error.InvalidCityJSONSeqFeature;
+        }
+        if (parsed_feature.value.id.len == 0) {
+            return error.InvalidCityJSONSeqFeature;
+        }
+        if (!cityObjectsContainsKey(parsed_feature.value.CityObjects, parsed_feature.value.id)) {
+            return error.InvalidCityJSONSeqFeatureParent;
+        }
+
+        try self.ingestCityObjects(parsed_feature.value.CityObjects, parsed_feature.value.vertices, seq_transform.*);
+    }
+
+    fn cityObjectsContainsKey(city_objs: std.json.ArrayHashMap(CJObject), key: []const u8) bool {
+        for (city_objs.map.keys()) |obj_key| {
+            if (std.mem.eql(u8, obj_key, key)) return true;
+        }
+        return false;
+    }
+
+    fn ingestCityObjects(
+        self: *CityJSON,
+        city_objs: std.json.ArrayHashMap(CJObject),
+        vertices: []const [3]i64,
+        transform: CJTransform,
+    ) !void {
+        for (city_objs.map.keys(), city_objs.map.values()) |key, obj| {
+            const owned_key = try self.allocator.dupeZ(u8, key);
+            try self.objects.put(owned_key, try StoredCityObject.init(self.allocator, obj.type, obj.geometry.len));
+            const stored_city_object = self.objects.getPtr(key).?;
+
+            for (obj.geometry, 0..) |g, i| {
+                const geom = &stored_city_object.geometries[i];
+                geom.* = try StoredGeometry.init(self.allocator, g.type, g.lod);
+                try self.ingestGeometry(&geom.polygonal_mesh, g, vertices, transform);
+            }
+        }
+    }
+
+    fn ingestGeometry(
+        self: *CityJSON,
+        mesh: *PolygonalMesh,
+        g: CJGeometry,
+        vertices: []const [3]i64,
+        transform: CJTransform,
+    ) !void {
+        var vertex_remap = std.AutoArrayHashMap(usize, usize).init(self.allocator);
+        defer vertex_remap.deinit();
+        var ring_indices: std.ArrayList(usize) = .{};
+        defer ring_indices.deinit(self.allocator);
+
+        switch (g.type) {
+            .MultiSurface => {
+                const parsed_ = try std.json.parseFromValue(CJMultiSurfaceBounds, self.allocator, g.boundaries, .{});
+                defer parsed_.deinit();
+                const bounds = parsed_.value;
+
+                for (bounds) |polygon| {
+                    for (polygon) |ring| {
+                        for (ring) |vi| {
+                            if (vi >= vertices.len) return error.InvalidVertexIndex;
+                            const result = try vertex_remap.getOrPut(vi);
+                            if (!result.found_existing) {
+                                result.value_ptr.* = try mesh.addVertex(transform.apply(vertices[vi]));
+                            }
+                        }
+                    }
+                }
+
+                for (bounds) |polygon| {
+                    for (polygon) |ring| {
+                        ring_indices.clearRetainingCapacity();
+                        try ring_indices.ensureTotalCapacity(self.allocator, ring.len);
+                        for (ring) |vi| {
+                            ring_indices.appendAssumeCapacity(vertex_remap.get(vi).?);
+                        }
+                        try mesh.addFace(ring_indices.items, .wall);
+                    }
+                }
+            },
+            .Solid => {
+                const parsed_ = try std.json.parseFromValue(CJSolidBounds, self.allocator, g.boundaries, .{});
+                defer parsed_.deinit();
+                const bounds = parsed_.value;
+
+                // First pass: collect unique vertices
+                for (bounds) |shell| {
+                    for (shell) |polygon| {
                         for (polygon) |ring| {
                             for (ring) |vi| {
+                                if (vi >= vertices.len) return error.InvalidVertexIndex;
                                 const result = try vertex_remap.getOrPut(vi);
                                 if (!result.found_existing) {
-                                    result.value_ptr.* = try geom.polygonal_mesh.addVertex(cj.getTransformedVertex(vi));
+                                    result.value_ptr.* = try mesh.addVertex(transform.apply(vertices[vi]));
                                 }
                             }
                         }
                     }
+                }
 
-                    // Second pass: add faces with remapped indices
-                    for (bounds) |polygon| {
+                // Second pass: add faces with remapped indices
+                for (bounds) |shell| {
+                    for (shell) |polygon| {
                         for (polygon) |ring| {
                             ring_indices.clearRetainingCapacity();
                             try ring_indices.ensureTotalCapacity(self.allocator, ring.len);
                             for (ring) |vi| {
                                 ring_indices.appendAssumeCapacity(vertex_remap.get(vi).?);
                             }
-                            try geom.polygonal_mesh.addFace(ring_indices.items, .wall);
+                            try mesh.addFace(ring_indices.items, .wall);
                         }
                     }
-                  },
-                  .Solid => {
-                    const parsed_ = std.json.parseFromValue(CJSolidBounds, self.allocator, g.boundaries, .{}) catch |err| {
-                        std.debug.print("Error parsing bounds: {any}\n", .{err});
-                        return;
-                    };
-                    defer parsed_.deinit();
-                    const bounds = parsed_.value;
-
-                    // First pass: collect unique vertices
-                    for (bounds) |shell| {
-                        for (shell) |polygon| {
-                            for (polygon) |ring| {
-                                for (ring) |vi| {
-                                    const result = try vertex_remap.getOrPut(vi);
-                                    if (!result.found_existing) {
-                                        result.value_ptr.* = try geom.polygonal_mesh.addVertex(cj.getTransformedVertex(vi));
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // Second pass: add faces with remapped indices
-                    for (bounds) |shell| {
-                        for (shell) |polygon| {
-                            for (polygon) |ring| {
-                                ring_indices.clearRetainingCapacity();
-                                try ring_indices.ensureTotalCapacity(self.allocator, ring.len);
-                                for (ring) |vi| {
-                                    ring_indices.appendAssumeCapacity(vertex_remap.get(vi).?);
-                                }
-                                try geom.polygonal_mesh.addFace(ring_indices.items, .wall);
-                            }
-                        }
-                    }
-                  },
-              }
-          }
-      }
+                }
+            },
+        }
     }
 
     pub fn save(self: *const CityJSON, path: []const u8) !void {
@@ -848,4 +952,44 @@ test "builder API round-trip" {
     try std.testing.expectEqual(CJGeometryType.Solid, loaded_obj.geometries[1].type);
     try std.testing.expectEqualStrings("1.0", loaded_obj.geometries[1].lod);
     try std.testing.expectEqual(@as(usize, 1), loaded_obj.geometries[1].polygonal_mesh.faces.items.len);
+}
+
+test "load cityjson sequence" {
+    const allocator = std.testing.allocator;
+
+    const seq_content =
+        \\{"type":"CityJSON","version":"2.0","transform":{"scale":[0.001,0.001,0.001],"translate":[10.0,20.0,30.0]},"CityObjects":{},"vertices":[]}
+        \\{"type":"CityJSONFeature","id":"SeqBuilding","CityObjects":{"SeqBuilding":{"type":"Building","geometry":[{"type":"MultiSurface","lod":"1.0","boundaries":[[[0,1,2]]]}]}},"vertices":[[0,0,0],[1000,0,0],[0,1000,0]]}
+        \\
+    ;
+
+    const tmp_path = "/tmp/zityjson_seq_test.city.jsonl";
+    const file = try std.fs.createFileAbsolute(tmp_path, .{ .truncate = true });
+    defer file.close();
+    try file.writeAll(seq_content);
+
+    var cj = try CityJSON.init(allocator);
+    defer cj.deinit();
+    try cj.load(tmp_path);
+
+    try std.testing.expectEqual(@as(usize, 1), cj.objects.count());
+    try std.testing.expect(cj.objects.contains("SeqBuilding"));
+
+    const obj = cj.objects.get("SeqBuilding").?;
+    try std.testing.expectEqual(@as(usize, 1), obj.geometries.len);
+    try std.testing.expectEqual(CJGeometryType.MultiSurface, obj.geometries[0].type);
+    try std.testing.expectEqualStrings("1.0", obj.geometries[0].lod);
+
+    const mesh = &obj.geometries[0].polygonal_mesh;
+    try std.testing.expectEqual(@as(usize, 3), mesh.vertices.items.len / 3);
+    try std.testing.expectEqual(@as(usize, 1), mesh.faces.items.len);
+
+    const v0 = mesh.getVertex(0);
+    const v1 = mesh.getVertex(1);
+    const v2 = mesh.getVertex(2);
+    try std.testing.expect(@abs(v0[0] - 10.0) < 0.000001);
+    try std.testing.expect(@abs(v0[1] - 20.0) < 0.000001);
+    try std.testing.expect(@abs(v0[2] - 30.0) < 0.000001);
+    try std.testing.expect(@abs(v1[0] - 11.0) < 0.000001);
+    try std.testing.expect(@abs(v2[1] - 21.0) < 0.000001);
 }
