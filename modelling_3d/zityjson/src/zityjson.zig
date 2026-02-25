@@ -242,7 +242,7 @@ pub const CityJSON = struct {
             try std.fs.cwd().openFile(path, .{ .mode = .read_only });
         defer file.close();
 
-        var read_buf: [2048]u8 = undefined;
+        var read_buf: [64 * 1024]u8 = undefined;
         var f_reader: std.fs.File.Reader = file.reader(&read_buf);
         var j_reader = std.json.Reader.init(self.allocator, &f_reader.interface);
         defer j_reader.deinit();
@@ -361,8 +361,20 @@ pub const CityJSON = struct {
     ) !void {
         for (city_objs.map.keys(), city_objs.map.values()) |key, obj| {
             const owned_key = try self.allocator.dupeZ(u8, key);
-            try self.objects.put(owned_key, try StoredCityObject.init(self.allocator, obj.type, obj.geometry.len));
-            const stored_city_object = self.objects.getPtr(key).?;
+            errdefer self.allocator.free(owned_key.ptr[0..owned_key.len + 1]);
+
+            var entry = try self.objects.getOrPut(owned_key);
+            if (entry.found_existing) {
+                // Existing entry keeps ownership of its original key allocation.
+                self.allocator.free(owned_key.ptr[0..owned_key.len + 1]);
+            }
+
+            const new_object = try StoredCityObject.init(self.allocator, obj.type, obj.geometry.len);
+            if (entry.found_existing) {
+                entry.value_ptr.deinit(self.allocator);
+            }
+            entry.value_ptr.* = new_object;
+            const stored_city_object = entry.value_ptr;
 
             for (obj.geometry, 0..) |g, i| {
                 const geom = &stored_city_object.geometries[i];
