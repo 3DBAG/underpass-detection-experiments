@@ -22,6 +22,7 @@
 #include <ogrsf_frmts.h>
 
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 
 namespace ogr {
@@ -108,6 +109,47 @@ void VectorReader::read_polygon(OGRPolygon* poPolygon,
   polygons.push_back(gf_polygon);
 }
 
+void VectorReader::read_polygon_feature(
+    OGRPolygon* poPolygon,
+    const std::string& id,
+    double extrusion_height,
+    std::vector<PolygonFeature>& features) {
+  LinearRing polygon;
+  OGRPoint poPoint;
+  auto ogr_ering = poPolygon->getExteriorRing();
+
+  // Ensure we output CCW exterior ring
+  if (ogr_ering->isClockwise()) {
+    ogr_ering->reversePoints();
+  }
+
+  for (int i = 0; i < ogr_ering->getNumPoints() - 1; ++i) {
+    ogr_ering->getPoint(i, &poPoint);
+    polygon.push_back({poPoint.getX(), poPoint.getY(), poPoint.getZ()});
+  }
+
+  // Read interior rings (holes)
+  for (int i = 0; i < poPolygon->getNumInteriorRings(); ++i) {
+    auto ogr_iring = poPolygon->getInteriorRing(i);
+    // Ensure we output CW interior ring
+    if (!ogr_iring->isClockwise()) {
+      ogr_iring->reversePoints();
+    }
+    std::vector<std::array<double, 3>> hole;
+    for (int j = 0; j < ogr_iring->getNumPoints() - 1; ++j) {
+      ogr_iring->getPoint(j, &poPoint);
+      hole.push_back({poPoint.getX(), poPoint.getY(), poPoint.getZ()});
+    }
+    polygon.interior_rings().push_back(std::move(hole));
+  }
+
+  PolygonFeature feature;
+  feature.polygon = std::move(polygon);
+  feature.id = id;
+  feature.extrusion_height = extrusion_height;
+  features.push_back(std::move(feature));
+}
+
 std::vector<LinearRing> VectorReader::read_polygons() {
   if (poLayer_ == nullptr) {
     throw std::runtime_error("[VectorReader] Layer is not open");
@@ -142,6 +184,53 @@ std::vector<LinearRing> VectorReader::read_polygons() {
   }
 
   return polygons;
+}
+
+std::vector<VectorReader::PolygonFeature> VectorReader::read_polygon_features(
+    const std::string& id_attribute,
+    const std::string& height_attribute) {
+  if (poLayer_ == nullptr) {
+    throw std::runtime_error("[VectorReader] Layer is not open");
+  }
+
+  std::vector<PolygonFeature> features;
+  poLayer_->ResetReading();
+
+  OGRFeature* poFeature;
+  while ((poFeature = poLayer_->GetNextFeature()) != nullptr) {
+    OGRGeometry* poGeometry = poFeature->GetGeometryRef();
+    if (poGeometry == nullptr) {
+      OGRFeature::DestroyFeature(poFeature);
+      continue;
+    }
+
+    std::string id;
+    int id_field_idx = poFeature->GetFieldIndex(id_attribute.c_str());
+    if (id_field_idx >= 0 && poFeature->IsFieldSetAndNotNull(id_field_idx)) {
+      id = poFeature->GetFieldAsString(id_field_idx);
+    }
+
+    double extrusion_height = std::numeric_limits<double>::quiet_NaN();
+    int h_field_idx = poFeature->GetFieldIndex(height_attribute.c_str());
+    if (h_field_idx >= 0 && poFeature->IsFieldSetAndNotNull(h_field_idx)) {
+      extrusion_height = poFeature->GetFieldAsDouble(h_field_idx);
+    }
+
+    if (wkbFlatten(poGeometry->getGeometryType()) == wkbPolygon) {
+      OGRPolygon* poPolygon = poGeometry->toPolygon();
+      read_polygon_feature(poPolygon, id, extrusion_height, features);
+    } else if (wkbFlatten(poGeometry->getGeometryType()) == wkbMultiPolygon) {
+      OGRMultiPolygon* poMultiPolygon = poGeometry->toMultiPolygon();
+      for (auto poly_it = poMultiPolygon->begin();
+           poly_it != poMultiPolygon->end(); ++poly_it) {
+        read_polygon_feature(*poly_it, id, extrusion_height, features);
+      }
+    }
+
+    OGRFeature::DestroyFeature(poFeature);
+  }
+
+  return features;
 }
 
 size_t VectorReader::get_feature_count() {

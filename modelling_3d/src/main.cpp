@@ -1,5 +1,8 @@
 #include <iostream>
 #include <format>
+#include <cmath>
+#include <stdexcept>
+#include <chrono>
 
 #include <manifold/manifold.h>
 #include <manifold/meshIO.h>
@@ -36,6 +39,7 @@ using Exact_kernel = CGAL::Exact_predicates_exact_constructions_kernel;
 using Nef_polyhedron = CGAL::Nef_polyhedron_3<Exact_kernel>;
 using Exact_polyhedron = CGAL::Polyhedron_3<Exact_kernel>;
 using Exact_surface_mesh = CGAL::Surface_mesh<Exact_kernel::Point_3>;
+using Clock = std::chrono::steady_clock;
 
 // Convert CGAL Surface_mesh to Manifold MeshGL
 // The mesh must be triangulated before calling this function.
@@ -258,261 +262,318 @@ Surface_mesh corefine_boolean_difference(const Surface_mesh& mesh_a, const std::
     return exact_to_surface_mesh(exact_a);
 }
 
+bool load_cityjson_object_mesh(
+    CityJSONHandle cj,
+    size_t object_index,
+    Surface_mesh& sm,
+    double offset_x,
+    double offset_y,
+    double offset_z) {
+    size_t geom_count = cityjson_get_geometry_count(cj, object_index);
+    if (geom_count == 0) {
+        return false;
+    }
+
+    size_t geom_idx = geom_count - 1;
+    const double* verts = cityjson_get_vertices(cj, object_index, geom_idx);
+    const size_t* indices = cityjson_get_indices(cj, object_index, geom_idx);
+    size_t vert_count = cityjson_get_vertex_count(cj, object_index, geom_idx);
+    size_t face_count = cityjson_get_face_count(cj, object_index, geom_idx);
+
+    if (verts == nullptr || indices == nullptr || vert_count == 0 || face_count == 0) {
+        return false;
+    }
+
+    std::vector<Surface_mesh::Vertex_index> vertex_handles;
+    vertex_handles.reserve(vert_count);
+    for (size_t v = 0; v < vert_count; ++v) {
+        vertex_handles.push_back(sm.add_vertex(K::Point_3(
+            verts[v * 3] - offset_x,
+            verts[v * 3 + 1] - offset_y,
+            verts[v * 3 + 2] - offset_z)));
+    }
+
+    for (size_t f = 0; f < face_count; ++f) {
+        size_t start = 0;
+        size_t count = 0;
+        uint8_t face_type = 0;
+        if (cityjson_get_face_info(cj, object_index, geom_idx, f, &start, &count, &face_type) != 0) {
+            continue;
+        }
+        std::vector<Surface_mesh::Vertex_index> face_vertices;
+        face_vertices.reserve(count);
+        for (size_t i = 0; i < count; ++i) {
+            face_vertices.push_back(vertex_handles[indices[start + i]]);
+        }
+        sm.add_face(face_vertices);
+    }
+
+    CGAL::Polygon_mesh_processing::triangulate_faces(sm);
+    return sm.number_of_faces() > 0;
+}
+
+ogr::LinearRing make_offset_polygon(
+    const ogr::LinearRing& polygon,
+    double offset_x,
+    double offset_y,
+    double offset_z) {
+    ogr::LinearRing offset_polygon;
+    offset_polygon.reserve(polygon.size());
+    for (const auto& pt : polygon) {
+        offset_polygon.push_back({pt[0] - offset_x, pt[1] - offset_y, pt[2] - offset_z});
+    }
+    for (const auto& hole : polygon.interior_rings()) {
+        std::vector<std::array<double, 3>> offset_hole;
+        offset_hole.reserve(hole.size());
+        for (const auto& pt : hole) {
+            offset_hole.push_back({pt[0] - offset_x, pt[1] - offset_y, pt[2] - offset_z});
+        }
+        offset_polygon.interior_rings().push_back(std::move(offset_hole));
+    }
+    return offset_polygon;
+}
+
+void append_meshgl(manifold::MeshGL& dst, const manifold::MeshGL& src) {
+    if (src.NumTri() == 0) {
+        return;
+    }
+    if (dst.numProp == 0) {
+        dst.numProp = src.numProp;
+    }
+    if (dst.numProp != src.numProp) {
+        throw std::runtime_error("Cannot append MeshGL with different numProp");
+    }
+
+    uint32_t vertex_offset = static_cast<uint32_t>(dst.vertProperties.size() / dst.numProp);
+    dst.vertProperties.insert(dst.vertProperties.end(), src.vertProperties.begin(), src.vertProperties.end());
+    dst.triVerts.reserve(dst.triVerts.size() + src.triVerts.size());
+    for (uint32_t tri_vert : src.triVerts) {
+        dst.triVerts.push_back(vertex_offset + tri_vert);
+    }
+}
+
+void apply_meshgl_offset(manifold::MeshGL& mesh, double offset_x, double offset_y, double offset_z) {
+    if (mesh.numProp < 3) {
+        return;
+    }
+    for (size_t i = 0; i + 2 < mesh.vertProperties.size(); i += mesh.numProp) {
+        mesh.vertProperties[i] += static_cast<float>(offset_x);
+        mesh.vertProperties[i + 1] += static_cast<float>(offset_y);
+        mesh.vertProperties[i + 2] += static_cast<float>(offset_z);
+    }
+}
+
 int main(int argc, char* argv[]) {
-    if (argc < 5) {
-        std::cerr << "Usage: " << argv[0] << " <cityjson_file> <cityjson_id> <ogr_source> <extrusion_height> [method]" << std::endl;
+    auto t_program_start = Clock::now();
+
+    if (argc < 4) {
+        std::cerr << "Usage: " << argv[0]
+                  << " <cityjson_file> <ogr_source> <height_attribute> [id_attribute] [method] [undo_offset]" << std::endl;
+        std::cerr << "  id_attribute default: identificatie" << std::endl;
         std::cerr << "  method: manifold (default), nef, pmp" << std::endl;
+        std::cerr << "  undo_offset: false (default), true" << std::endl;
         return 1;
     }
 
-    Surface_mesh sm;
-    bool ignore_holes = false;
+    const char* cityjson_path = argv[1];
+    const char* ogr_source_path = argv[2];
+    std::string height_attribute = argv[3];
+    std::string id_attribute = argc > 4 ? argv[4] : "identificatie";
+    std::string method_str = argc > 5 ? argv[5] : "manifold";
+    std::string undo_offset_str = argc > 6 ? argv[6] : "false";
+    bool undo_offset = undo_offset_str == "1" || undo_offset_str == "true" ||
+                       undo_offset_str == "yes" || undo_offset_str == "on";
 
-    // Offset to bring coordinates near origin (set from first vertex)
-    double offset_x = 0.0;
-    double offset_y = 0.0;
-    double offset_z = 0.0;
-
-    const char* cityjson_id = argv[2];
-    const char* ogr_source_path = argv[3];
-    double extrusion_height = std::stod(argv[4]);
-    // Select boolean operation method
     BooleanMethod method = BooleanMethod::Manifold;
-    if (argc > 5) {
-        std::string method_str = argv[5];
-        if (method_str == "nef") {
-            method = BooleanMethod::CgalNef;
-        } else if (method_str == "pmp") {
-            method = BooleanMethod::CgalPMP;
-        } else if (method_str != "manifold") {
-            std::cerr << "Unknown method: " << method_str << " (use manifold, nef, or pmp)" << std::endl;
-            return 1;
-        }
+    if (method_str == "nef") {
+        method = BooleanMethod::CgalNef;
+    } else if (method_str == "pmp") {
+        method = BooleanMethod::CgalPMP;
+    } else if (method_str != "manifold") {
+        std::cerr << "Unknown method: " << method_str << " (use manifold, nef, or pmp)" << std::endl;
+        return 1;
     }
-
-    CityJSONHandle cj = cityjson_create();
-    if (cityjson_load(cj, argv[1]) == 0) {
-      ssize_t idx = cityjson_get_object_index(cj, cityjson_id);
-      if (idx >= 0) {
-          size_t obj_idx = static_cast<size_t>(idx);
-          size_t geom_count = cityjson_get_geometry_count(cj, obj_idx);
-          std::cout << std::format("CJ Geometry count: {}", geom_count) << std::endl;
-
-          if (geom_count > 0) {
-              size_t last_geom = geom_count - 1; // select lod2 model...
-              const double* verts = cityjson_get_vertices(cj, obj_idx, last_geom);
-              size_t vert_count = cityjson_get_vertex_count(cj, obj_idx, last_geom);
-              size_t face_count = cityjson_get_face_count(cj, obj_idx, last_geom);
-              const size_t* indices = cityjson_get_indices(cj, obj_idx, last_geom);
-
-              // print vert count
-              std::cout << std::format("CJ Vertex count: {}", vert_count) << std::endl;
-              // print face count
-              std::cout << std::format("CJ Face count: {}", face_count) << std::endl;
-
-              // Get the first vertex as offset (to bring coordinates near origin)
-              offset_x = verts[0];
-              offset_y = verts[1];
-              offset_z = verts[2];
-
-              // Add vertices to surface mesh with offset applied
-              std::vector<Surface_mesh::Vertex_index> vertex_handles;
-              vertex_handles.reserve(vert_count);
-              for (size_t v = 0; v < vert_count; v++) {
-                  K::Point_3 pt(
-                      verts[v * 3] - offset_x,
-                      verts[v * 3 + 1] - offset_y,
-                      verts[v * 3 + 2] - offset_z
-                  );
-                  vertex_handles.push_back(sm.add_vertex(pt));
-              }
-
-              // Add faces to surface mesh
-              for (size_t f = 0; f < face_count; f++) {
-                  size_t start, count;
-                  uint8_t face_type;
-                  if (cityjson_get_face_info(cj, obj_idx, last_geom, f, &start, &count, &face_type) == 0) {
-                      std::vector<Surface_mesh::Vertex_index> face_vertices;
-                      face_vertices.reserve(count);
-                      for (size_t i = 0; i < count; i++) {
-                          face_vertices.push_back(vertex_handles[indices[start + i]]);
-                      }
-                      sm.add_face(face_vertices);
-                  }
-              }
-
-              std::cout << std::format("House CGAL Surface_mesh- faces: {}, vertices: {}",
-                  sm.number_of_faces(), sm.number_of_vertices()) << std::endl;
-
-              // Triangulate the mesh
-              CGAL::Polygon_mesh_processing::triangulate_faces(sm);
-              std::cout << std::format("After triangulation - faces: {}, vertices: {}",
-                  sm.number_of_faces(), sm.number_of_vertices()) << std::endl;
-          }
-      }
-      cityjson_destroy(cj);
-    }
-
 
     ogr::VectorReader reader;
+    auto t_ogr_read_start = Clock::now();
     reader.open(ogr_source_path);
-    auto polygons = reader.read_polygons();
+    auto polygon_features = reader.read_polygon_features(id_attribute, height_attribute);
+    auto t_ogr_read_end = Clock::now();
+    std::cout << std::format("Read {} polygon features", polygon_features.size()) << std::endl;
 
-#ifdef ENABLE_RERUN
-    const auto rec = rerun::RecordingStream("test_3d_intersection");
-    rec.spawn().exit_on_failure();
-    extrusion::set_rerun_recording_stream(&rec);
-#endif
+    CityJSONHandle cj = cityjson_create();
+    if (cj == nullptr) {
+        std::cerr << "Failed to create CityJSON handle" << std::endl;
+        return 1;
+    }
+    auto t_json_read_start = Clock::now();
+    int json_load_result = cityjson_load(cj, cityjson_path);
+    auto t_json_read_end = Clock::now();
+    if (json_load_result != 0) {
+        std::cerr << "Failed to load CityJSON: " << cityjson_path << std::endl;
+        cityjson_destroy(cj);
+        return 1;
+    }
 
-    std::vector<extrusion::Surface_mesh> extruded_meshes;
-    extruded_meshes.reserve(polygons.size());
+    bool ignore_holes = false;
+    manifold::MeshGL combined_result_meshgl;
+    size_t processed_count = 0;
+    size_t skipped_count = 0;
+    bool global_offset_set = false;
+    double global_offset_x = 0.0;
+    double global_offset_y = 0.0;
+    double global_offset_z = 0.0;
+    std::chrono::duration<double, std::milli> ds_conversion_ms{0.0};
+    std::chrono::duration<double, std::milli> intersection_ms{0.0};
 
-    for (const auto& polygon : polygons) {
-        // Apply offset to polygon coordinates
-        ogr::LinearRing offset_polygon;
-        offset_polygon.reserve(polygon.size());
-        for (const auto& pt : polygon) {
-            offset_polygon.push_back({pt[0] - offset_x, pt[1] - offset_y, pt[2] - offset_z});
+    for (size_t i = 0; i < polygon_features.size(); ++i) {
+        const auto& feature = polygon_features[i];
+        if (feature.id.empty()) {
+            std::cerr << std::format("Skipping feature {}: empty id attribute '{}'", i, id_attribute) << std::endl;
+            ++skipped_count;
+            continue;
         }
-        for (const auto& hole : polygon.interior_rings()) {
-            std::vector<std::array<double, 3>> offset_hole;
-            offset_hole.reserve(hole.size());
-            for (const auto& pt : hole) {
-                offset_hole.push_back({pt[0] - offset_x, pt[1] - offset_y, pt[2] - offset_z});
+        if (!std::isfinite(feature.extrusion_height)) {
+            std::cerr << std::format("Skipping feature {} (id='{}'): invalid height attribute '{}'",
+                                     i, feature.id, height_attribute) << std::endl;
+            ++skipped_count;
+            continue;
+        }
+
+        ssize_t idx = cityjson_get_object_index(cj, feature.id.c_str());
+        if (idx < 0) {
+            std::cerr << std::format("Skipping feature {}: CityJSON object not found for id '{}'",
+                                     i, feature.id) << std::endl;
+            ++skipped_count;
+            continue;
+        }
+
+        if (!global_offset_set) {
+            size_t obj_idx = static_cast<size_t>(idx);
+            size_t geom_count = cityjson_get_geometry_count(cj, obj_idx);
+            if (geom_count == 0) {
+                std::cerr << std::format("Skipping feature {} (id='{}'): no CityJSON geometry", i, feature.id)
+                          << std::endl;
+                ++skipped_count;
+                continue;
             }
-            offset_polygon.interior_rings().push_back(std::move(offset_hole));
-        }
-
-        auto extruded_mesh = extrusion::extrude_polygon(offset_polygon, -0.1, extrusion_height + 0.1, ignore_holes);
-        extruded_meshes.push_back(std::move(extruded_mesh));
-    }
-
-    // Convert CityJSON mesh (house) to MeshGL
-    auto house_meshgl = surface_mesh_to_meshgl(sm, false);
-    std::cout << std::format("House MeshGL - triangles: {}, vertices: {}, numProp: {}",
-        house_meshgl.NumTri(), house_meshgl.NumVert(), house_meshgl.numProp) << std::endl;
-
-    // Convert extruded meshes to MeshGL
-    std::vector<manifold::MeshGL> underpass_meshgls;
-    for (size_t i = 0; i < extruded_meshes.size(); ++i) {
-        auto& extruded_mesh = extruded_meshes[i];
-        std::cout << std::format("Extruded mesh {} - CGAL faces: {}, vertices: {}",
-            i, extruded_mesh.number_of_faces(), extruded_mesh.number_of_vertices()) << std::endl;
-        auto meshgl = surface_mesh_to_meshgl(extruded_mesh, false);
-        std::cout << std::format("  MeshGL triangles: {}, vertices: {}",
-            meshgl.NumTri(), meshgl.NumVert()) << std::endl;
-        if (meshgl.NumTri() > 0) {
-            underpass_meshgls.push_back(meshgl);
-        }
-    }
-    std::cout << std::format("Underpass MeshGLs count: {}", underpass_meshgls.size()) << std::endl;
-
-#ifdef ENABLE_RERUN
-    // Visualize house mesh (CityJSON building)
-    viz::log_meshgl(rec, "house", surface_mesh_to_meshgl(sm, true), rerun::Rgba32(200, 200, 100, 255));
-
-    // Visualize underpass meshes (extruded polygons)
-    for (size_t i = 0; i < extruded_meshes.size(); ++i) {
-        viz::log_meshgl(rec, std::format("underpass/{}", i), surface_mesh_to_meshgl(extruded_meshes[i], true),
-                        rerun::Rgba32(100, 180, 220, 255));
-    }
-#endif
-
-    manifold::MeshGL result_meshgl;
-
-    if (method == BooleanMethod::Manifold) {
-        std::cout << "Using Manifold for boolean operations" << std::endl;
-
-        // Convert to Manifold for boolean operations
-        auto house = manifold::Manifold(house_meshgl);
-        std::cout << std::format("House Manifold - status: {}, triangles: {}",
-            static_cast<int>(house.Status()), house.NumTri()) << std::endl;
-
-        manifold::Manifold underpass;
-        for (const auto& meshgl : underpass_meshgls) {
-            auto m = manifold::Manifold(meshgl);
-            std::cout << std::format("  Underpass part - status: {}, triangles: {}",
-                static_cast<int>(m.Status()), m.NumTri()) << std::endl;
-            if (m.Status() == manifold::Manifold::Error::NoError) {
-                underpass += m;
+            size_t geom_idx = geom_count - 1;
+            const double* verts = cityjson_get_vertices(cj, obj_idx, geom_idx);
+            size_t vert_count = cityjson_get_vertex_count(cj, obj_idx, geom_idx);
+            if (verts == nullptr || vert_count == 0) {
+                std::cerr << std::format("Skipping feature {} (id='{}'): invalid CityJSON vertices", i, feature.id)
+                          << std::endl;
+                ++skipped_count;
+                continue;
             }
-        }
-        std::cout << std::format("Underpass Manifold - triangles: {}", underpass.NumTri()) << std::endl;
-
-        auto house_with_underpass = house - underpass;
-        std::cout << std::format("Result Manifold - status: {}, triangles: {}",
-            static_cast<int>(house_with_underpass.Status()), house_with_underpass.NumTri()) << std::endl;
-
-        // Get the mesh and recompute with flat normals
-        result_meshgl = house_with_underpass.GetMeshGL();
-        #ifdef ENABLE_RERUN
-            // Visualize result mesh (boolean difference)
-            viz::log_meshgl(rec, "result_manifold", result_meshgl, rerun::Rgba32(100, 200, 100, 255));
-        #endif
-
-    } else if (method == BooleanMethod::CgalNef) {
-        std::cout << "Using CGAL Nef polyhedra for boolean operations" << std::endl;
-
-        // Collect underpass meshes as Surface_mesh
-        std::vector<Surface_mesh> underpass_surfaces;
-        underpass_surfaces.reserve(extruded_meshes.size());
-        for (const auto& extruded_mesh : extruded_meshes) {
-            underpass_surfaces.push_back(extruded_mesh);
+            global_offset_x = verts[0];
+            global_offset_y = verts[1];
+            global_offset_z = verts[2];
+            global_offset_set = true;
+            std::cout << std::format("Global offset set to ({}, {}, {})",
+                                     global_offset_x, global_offset_y, global_offset_z) << std::endl;
         }
 
-        std::cout << std::format("House Surface_mesh - faces: {}, vertices: {}",
-            sm.number_of_faces(), sm.number_of_vertices()) << std::endl;
-        std::cout << std::format("Underpass meshes count: {}", underpass_surfaces.size()) << std::endl;
-
-        // Perform boolean difference using Nef polyhedra
-        Surface_mesh result_sm = nef_boolean_difference(sm, underpass_surfaces);
-
-        // Triangulate the result (Nef conversion may produce non-triangular faces)
-        CGAL::Polygon_mesh_processing::triangulate_faces(result_sm);
-        #ifdef ENABLE_RERUN
-            // Visualize result mesh (boolean difference)
-            viz::log_meshgl(rec, "result_nef", surface_mesh_to_meshgl(result_sm), rerun::Rgba32(100, 200, 100, 255));
-        #endif
-
-        std::cout << std::format("Result Surface_mesh - faces: {}, vertices: {}",
-            result_sm.number_of_faces(), result_sm.number_of_vertices()) << std::endl;
-
-        // Convert to MeshGL for visualization and export (flip normals - Nef output has reversed winding)
-        result_meshgl = surface_mesh_to_meshgl(result_sm, false);
-
-    } else if (method == BooleanMethod::CgalPMP) {
-        std::cout << "Using CGAL PMP corefinement for boolean operations" << std::endl;
-
-        // Collect underpass meshes as Surface_mesh
-        std::vector<Surface_mesh> underpass_surfaces;
-        underpass_surfaces.reserve(extruded_meshes.size());
-        for (const auto& extruded_mesh : extruded_meshes) {
-            underpass_surfaces.push_back(extruded_mesh);
+        auto t_conversion_start = Clock::now();
+        Surface_mesh house_sm;
+        if (!load_cityjson_object_mesh(cj, static_cast<size_t>(idx), house_sm,
+                                       global_offset_x, global_offset_y, global_offset_z)) {
+            std::cerr << std::format("Skipping feature {} (id='{}'): could not build CityJSON mesh", i, feature.id)
+                      << std::endl;
+            ++skipped_count;
+            continue;
         }
 
-        std::cout << std::format("House Surface_mesh - faces: {}, vertices: {}",
-            sm.number_of_faces(), sm.number_of_vertices()) << std::endl;
-        std::cout << std::format("Underpass meshes count: {}", underpass_surfaces.size()) << std::endl;
+        auto offset_polygon = make_offset_polygon(feature.polygon, global_offset_x, global_offset_y, global_offset_z);
+        auto underpass_sm = extrusion::extrude_polygon(
+            offset_polygon, -0.1, feature.extrusion_height + 0.1, ignore_holes);
+        auto t_conversion_end = Clock::now();
+        ds_conversion_ms += t_conversion_end - t_conversion_start;
 
-        // Perform boolean difference using PMP corefinement
-        Surface_mesh result_sm = corefine_boolean_difference(sm, underpass_surfaces);
-        #ifdef ENABLE_RERUN
-            // Visualize result mesh (boolean difference)
-            viz::log_meshgl(rec, "result_pmp", surface_mesh_to_meshgl(result_sm, true, true), rerun::Rgba32(100, 200, 100, 255));
-        #endif
+        manifold::MeshGL result_meshgl;
+        auto t_intersection_start = Clock::now();
+        if (method == BooleanMethod::Manifold) {
+            auto house_meshgl = surface_mesh_to_meshgl(house_sm, false);
+            auto underpass_meshgl = surface_mesh_to_meshgl(underpass_sm, false);
+            if (house_meshgl.NumTri() == 0 || underpass_meshgl.NumTri() == 0) {
+                std::cerr << std::format("Skipping feature {} (id='{}'): empty house or underpass mesh",
+                                         i, feature.id) << std::endl;
+                ++skipped_count;
+                continue;
+            }
 
-        std::cout << std::format("Result Surface_mesh - faces: {}, vertices: {}",
-            result_sm.number_of_faces(), result_sm.number_of_vertices()) << std::endl;
+            manifold::Manifold house(house_meshgl);
+            manifold::Manifold underpass(underpass_meshgl);
+            if (house.Status() != manifold::Manifold::Error::NoError ||
+                underpass.Status() != manifold::Manifold::Error::NoError) {
+                std::cerr << std::format("Skipping feature {} (id='{}'): invalid manifold input", i, feature.id)
+                          << std::endl;
+                ++skipped_count;
+                continue;
+            }
 
-        result_meshgl = surface_mesh_to_meshgl(result_sm, false);
+            auto result = house - underpass;
+            if (result.Status() != manifold::Manifold::Error::NoError) {
+                std::cerr << std::format("Skipping feature {} (id='{}'): manifold boolean failed", i, feature.id)
+                          << std::endl;
+                ++skipped_count;
+                continue;
+            }
+            result_meshgl = result.GetMeshGL();
+        } else if (method == BooleanMethod::CgalNef) {
+            Surface_mesh result_sm = nef_boolean_difference(house_sm, underpass_sm);
+            CGAL::Polygon_mesh_processing::triangulate_faces(result_sm);
+            result_meshgl = surface_mesh_to_meshgl(result_sm, false);
+        } else {
+            Surface_mesh result_sm = corefine_boolean_difference(house_sm, underpass_sm);
+            CGAL::Polygon_mesh_processing::triangulate_faces(result_sm);
+            result_meshgl = surface_mesh_to_meshgl(result_sm, false);
+        }
+        auto t_intersection_end = Clock::now();
+        intersection_ms += t_intersection_end - t_intersection_start;
+
+        if (result_meshgl.NumTri() == 0) {
+            std::cerr << std::format("Skipping feature {} (id='{}'): boolean produced empty mesh", i, feature.id)
+                      << std::endl;
+            ++skipped_count;
+            continue;
+        }
+
+        append_meshgl(combined_result_meshgl, result_meshgl);
+        ++processed_count;
     }
 
-    std::cout << std::format("Result MeshGL - triangles: {}, vertices: {}, numProp: {}",
-        result_meshgl.NumTri(), result_meshgl.NumVert(), result_meshgl.numProp) << std::endl;
+    cityjson_destroy(cj);
 
-    manifold::ExportMesh("house.ply", house_meshgl, {});
-    manifold::ExportMesh("underpass.ply", underpass_meshgls.front(), {});
-    manifold::ExportMesh("house_with_underpass.ply", result_meshgl, {});
+    if (processed_count == 0 || combined_result_meshgl.NumTri() == 0) {
+        std::cerr << "No meshes processed successfully; no output written." << std::endl;
+        return 1;
+    }
+
+    std::cout << std::format("Processed features: {}, skipped: {}", processed_count, skipped_count) << std::endl;
+    std::cout << std::format("Final mesh - triangles: {}, vertices: {}",
+                             combined_result_meshgl.NumTri(), combined_result_meshgl.NumVert()) << std::endl;
+
+    if (undo_offset && global_offset_set) {
+        apply_meshgl_offset(combined_result_meshgl, global_offset_x, global_offset_y, global_offset_z);
+    }
+
+    auto t_output_write_start = Clock::now();
+    manifold::ExportMesh("house_with_underpass.ply", combined_result_meshgl, {});
+    auto t_output_write_end = Clock::now();
+
+    auto ogr_read_ms = std::chrono::duration<double, std::milli>(t_ogr_read_end - t_ogr_read_start).count();
+    auto json_read_ms = std::chrono::duration<double, std::milli>(t_json_read_end - t_json_read_start).count();
+    auto output_write_ms = std::chrono::duration<double, std::milli>(t_output_write_end - t_output_write_start).count();
+    auto total_ms = std::chrono::duration<double, std::milli>(t_output_write_end - t_program_start).count();
+
+    std::cout << "Timing profile (ms):" << std::endl;
+    std::cout << std::format("  json reading: {:.3f}", json_read_ms) << std::endl;
+    std::cout << std::format("  ogr reading: {:.3f}", ogr_read_ms) << std::endl;
+    std::cout << std::format("  datastructure conversion: {:.3f}", ds_conversion_ms.count()) << std::endl;
+    std::cout << std::format("  intersecting: {:.3f}", intersection_ms.count()) << std::endl;
+    std::cout << std::format("  output writing: {:.3f}", output_write_ms) << std::endl;
+    std::cout << std::format("  total: {:.3f}", total_ms) << std::endl;
 
     return 0;
 }

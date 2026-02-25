@@ -38,6 +38,12 @@ using Extent = std::array<double, 6>;
 
 class VectorReader {
  public:
+  struct PolygonFeature {
+    LinearRing polygon;
+    std::string id;
+    double extrusion_height = 0.0;
+  };
+
   VectorReader() = default;
   ~VectorReader() = default;
 
@@ -55,6 +61,11 @@ class VectorReader {
   // Read all polygons from the layer
   std::vector<LinearRing> read_polygons();
 
+  // Read polygons with per-feature ID and extrusion height attributes.
+  std::vector<PolygonFeature> read_polygon_features(
+      const std::string& id_attribute,
+      const std::string& height_attribute);
+
   // Get the number of features in the layer
   size_t get_feature_count();
 
@@ -68,6 +79,10 @@ class VectorReader {
 
  private:
   void read_polygon(OGRPolygon* poPolygon, std::vector<LinearRing>& polygons);
+  void read_polygon_feature(OGRPolygon* poPolygon,
+                            const std::string& id,
+                            double extrusion_height,
+                            std::vector<PolygonFeature>& features);
 
   GDALDatasetUniquePtr poDS_;
   OGRLayer* poLayer_ = nullptr;
