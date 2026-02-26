@@ -83,11 +83,22 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
+    // Small utility for streaming FlatCityBuf summaries.
+    const fcb_info_exe = b.addExecutable(.{
+        .name = "fcb_info",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/fcb_info.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+
     // This declares intent for the executable to be installed into the
     // install prefix when running `zig build` (i.e. when executing the default
     // step). By default the install prefix is `zig-out/` but can be overridden
     // by passing `--prefix` or `-p`.
     b.installArtifact(exe);
+    b.installArtifact(fcb_info_exe);
 
     // ==========================================================================
     // Static library for C/C++ interop
@@ -145,6 +156,15 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| {
         run_cmd.addArgs(args);
     }
+
+    // Dedicated run step for FlatCityBuf summary utility:
+    // zig build run-fcb-info -- ../sample_data/9-444-728.fcb
+    const run_fcb_info_step = b.step("run-fcb-info", "Run the FlatCityBuf summary utility");
+    const run_fcb_info_cmd = b.addRunArtifact(fcb_info_exe);
+    if (b.args) |args| {
+        run_fcb_info_cmd.addArgs(args);
+    }
+    run_fcb_info_step.dependOn(&run_fcb_info_cmd.step);
 
     // Creates an executable that will run `test` blocks from the provided module.
     // Here `mod` needs to define a target, which is why earlier we made sure to

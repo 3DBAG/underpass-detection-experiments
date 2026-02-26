@@ -19,6 +19,18 @@ pub fn build(b: *std.Build) void {
     });
     zityjson_lib.bundle_compiler_rt = true;
 
+    // Build zfcb static library (streaming FlatCityBuf reader)
+    const zfcb_lib = b.addLibrary(.{
+        .name = "zfcb",
+        .linkage = .static,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("zityjson/src/zfcb.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    zfcb_lib.bundle_compiler_rt = true;
+
     // C++ flags
     const cpp_flags: []const []const u8 = if (enable_rerun)
         &.{ "-std=c++20", "-DENABLE_RERUN=1" }
@@ -103,17 +115,25 @@ pub fn build(b: *std.Build) void {
 
     // 4. Link zityjson
     exe.linkLibrary(zityjson_lib);
+    exe.linkLibrary(zfcb_lib);
     exe.root_module.addIncludePath(b.path("zityjson/include"));
 
     // 5. Installation
     b.installArtifact(exe);
 
-    // Optionally install zityjson library and header separately
-    const install_lib = b.step("lib", "Build and install zityjson library");
+    // Optionally install zityjson/zfcb libraries and zityjson header separately
+    const install_lib = b.step("lib", "Build and install zityjson/zfcb libraries");
     install_lib.dependOn(&b.addInstallArtifact(zityjson_lib, .{}).step);
+    install_lib.dependOn(&b.addInstallArtifact(zfcb_lib, .{}).step);
     install_lib.dependOn(&b.addInstallFileWithDir(
         b.path("zityjson/include/zityjson.h"),
         .header,
         "zityjson.h",
     ).step);
+    install_lib.dependOn(&b.addInstallFileWithDir(
+        b.path("zityjson/include/zfcb.h"),
+        .header,
+        "zfcb.h",
+    ).step);
+
 }
