@@ -4,6 +4,7 @@ A project for 3D geometry intersection testing using Manifold and optional Rerun
 
 ### TODO
 - [ ] maintain semantic surfaces in output, including outerceiling surface for top of the underpass
+- [ ] Untriangulate the output meshes
 - [ ] process all LoD's? currently only does LoD2.2
 - [ ] add geogram boolean difference
 - [ ] do benchmarking on large dataset, find failure cases
