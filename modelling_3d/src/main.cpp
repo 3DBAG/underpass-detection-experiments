@@ -577,10 +577,10 @@ int main(int argc, char* argv[]) {
 
     if (argc < 4) {
         std::cerr << "Usage: " << argv[0]
-                  << " <cityjson_or_fcb_file> <ogr_source> <height_attribute> [id_attribute] [method] [undo_offset]" << std::endl;
+                  << " <cityjson_or_fcb_file> <ogr_source> <height_attribute> [id_attribute] [method] [output_fcb]" << std::endl;
         std::cerr << "  id_attribute default: identificatie" << std::endl;
         std::cerr << "  method: manifold (default), nef, pmp" << std::endl;
-        std::cerr << "  undo_offset: false (default), true" << std::endl;
+        std::cerr << "  output_fcb: path for FCB output (only used when input is .fcb)" << std::endl;
         return 1;
     }
 
@@ -589,9 +589,8 @@ int main(int argc, char* argv[]) {
     std::string height_attribute = argv[3];
     std::string id_attribute = argc > 4 ? argv[4] : "identificatie";
     std::string method_str = argc > 5 ? argv[5] : "manifold";
-    std::string undo_offset_str = argc > 6 ? argv[6] : "false";
-    bool undo_offset = undo_offset_str == "1" || undo_offset_str == "true" ||
-                       undo_offset_str == "yes" || undo_offset_str == "on";
+    bool undo_offset = false;
+    const char* output_fcb_path = argc > 6 ? argv[6] : nullptr;
 
     BooleanMethod method = BooleanMethod::Manifold;
     if (method_str == "nef") {
@@ -780,6 +779,18 @@ int main(int argc, char* argv[]) {
             ++processed_count;
         }
     } else {
+        // FCB streaming mode: read features, process matching ones, write all to output.
+        ZfcbWriterHandle fcb_writer = nullptr;
+        if (output_fcb_path != nullptr) {
+            fcb_writer = zfcb_writer_open_from_reader(fcb, output_fcb_path);
+            if (fcb_writer == nullptr) {
+                std::cerr << "Failed to open FCB writer: " << output_fcb_path << std::endl;
+                zfcb_reader_destroy(fcb);
+                return 1;
+            }
+            std::cout << std::format("FCB output: {}", output_fcb_path) << std::endl;
+        }
+
         std::unordered_map<std::string_view, std::vector<size_t>> features_by_exact_id;
         std::vector<size_t> valid_feature_indices;
         std::vector<bool> seen_feature(polygon_features.size(), false);
@@ -818,14 +829,27 @@ int main(int argc, char* argv[]) {
             std::string_view next_id(peek_id_ptr, peek_id_len);
             auto exact_hint_it = features_by_exact_id.find(next_id);
             if (exact_hint_it == features_by_exact_id.end()) {
-                int skip_result = zfcb_skip_next(fcb);
-                if (skip_result < 0) {
-                    std::cerr << "FlatCityBuf stream error while skipping feature" << std::endl;
-                    stream_error = true;
-                    break;
-                }
-                if (skip_result == 0) {
-                    break;
+                // Non-matching feature: pass through raw to output.
+                if (fcb_writer != nullptr) {
+                    int write_result = zfcb_writer_write_pending_raw(fcb, fcb_writer);
+                    if (write_result < 0) {
+                        std::cerr << "FlatCityBuf stream error while writing pass-through feature" << std::endl;
+                        stream_error = true;
+                        break;
+                    }
+                    if (write_result == 0) {
+                        break;
+                    }
+                } else {
+                    int skip_result = zfcb_skip_next(fcb);
+                    if (skip_result < 0) {
+                        std::cerr << "FlatCityBuf stream error while skipping feature" << std::endl;
+                        stream_error = true;
+                        break;
+                    }
+                    if (skip_result == 0) {
+                        break;
+                    }
                 }
                 continue;
             }
@@ -853,6 +877,9 @@ int main(int argc, char* argv[]) {
                                                  feature_idx, feature.id) << std::endl;
                         ++skipped_count;
                     }
+                    if (fcb_writer != nullptr) {
+                        zfcb_writer_write_current_raw(fcb, fcb_writer);
+                    }
                     continue;
                 }
                 global_offset_x = verts[0];
@@ -872,8 +899,16 @@ int main(int argc, char* argv[]) {
                                              feature_idx, feature.id) << std::endl;
                     ++skipped_count;
                 }
+                // Write unmodified feature to output.
+                if (fcb_writer != nullptr) {
+                    zfcb_writer_write_current_raw(fcb, fcb_writer);
+                }
                 continue;
             }
+
+            // Track whether any polygon feature succeeded for this FCB feature.
+            bool any_succeeded = false;
+            manifold::MeshGL last_result_meshgl;
 
             for (size_t feature_idx : matched_indices) {
                 seen_feature[feature_idx] = true;
@@ -947,8 +982,45 @@ int main(int argc, char* argv[]) {
                 }
 
                 append_meshgl(combined_result_meshgl, result_meshgl);
+                last_result_meshgl = std::move(result_meshgl);
+                any_succeeded = true;
                 ++processed_count;
             }
+
+            // Write the feature to FCB output.
+            if (fcb_writer != nullptr) {
+                if (any_succeeded && last_result_meshgl.NumTri() > 0) {
+                    // Extract world-coordinate vertices from result mesh
+                    // (undo the global offset that was subtracted during loading).
+                    size_t num_verts = last_result_meshgl.NumVert();
+                    size_t num_prop = last_result_meshgl.numProp;
+                    std::vector<double> world_verts(num_verts * 3);
+                    for (size_t v = 0; v < num_verts; ++v) {
+                        world_verts[v * 3 + 0] = static_cast<double>(last_result_meshgl.vertProperties[v * num_prop + 0]) + global_offset_x;
+                        world_verts[v * 3 + 1] = static_cast<double>(last_result_meshgl.vertProperties[v * num_prop + 1]) + global_offset_y;
+                        world_verts[v * 3 + 2] = static_cast<double>(last_result_meshgl.vertProperties[v * num_prop + 2]) + global_offset_z;
+                    }
+
+                    std::string feature_id_str(next_id);
+                    int write_result = zfcb_writer_write_current_replaced_lod22(
+                        fcb, fcb_writer,
+                        feature_id_str.c_str(), feature_id_str.size(),
+                        world_verts.data(), num_verts,
+                        last_result_meshgl.triVerts.data(), last_result_meshgl.triVerts.size());
+                    if (write_result < 0) {
+                        std::cerr << std::format("Warning: failed to write modified feature '{}' to FCB, writing raw instead",
+                                                 feature_id_str) << std::endl;
+                        zfcb_writer_write_current_raw(fcb, fcb_writer);
+                    }
+                } else {
+                    // No successful boolean: write original feature.
+                    zfcb_writer_write_current_raw(fcb, fcb_writer);
+                }
+            }
+        }
+
+        if (fcb_writer != nullptr) {
+            zfcb_writer_destroy(fcb_writer);
         }
 
         if (stream_error) {
@@ -973,21 +1045,29 @@ int main(int argc, char* argv[]) {
         cityjson_destroy(cj);
     }
 
-    if (processed_count == 0 || combined_result_meshgl.NumTri() == 0) {
-        std::cerr << "No meshes processed successfully; no output written." << std::endl;
-        return 1;
-    }
-
     std::cout << std::format("Processed features: {}, skipped: {}", processed_count, skipped_count) << std::endl;
-    std::cout << std::format("Final mesh - triangles: {}, vertices: {}",
-                             combined_result_meshgl.NumTri(), combined_result_meshgl.NumVert()) << std::endl;
-
-    if (undo_offset && global_offset_set) {
-        apply_meshgl_offset(combined_result_meshgl, global_offset_x, global_offset_y, global_offset_z);
-    }
 
     auto t_output_write_start = Clock::now();
-    manifold::ExportMesh("house_with_underpass.ply", combined_result_meshgl, {});
+    if (use_fcb_input && output_fcb_path != nullptr) {
+        // FCB output was already written during streaming.
+        if (processed_count == 0) {
+            std::cerr << "Warning: no features were modified; output FCB is a copy of input." << std::endl;
+        }
+    } else {
+        if (processed_count == 0 || combined_result_meshgl.NumTri() == 0) {
+            std::cerr << "No meshes processed successfully; no output written." << std::endl;
+            return 1;
+        }
+
+        std::cout << std::format("Final mesh - triangles: {}, vertices: {}",
+                                 combined_result_meshgl.NumTri(), combined_result_meshgl.NumVert()) << std::endl;
+
+        if (undo_offset && global_offset_set) {
+            apply_meshgl_offset(combined_result_meshgl, global_offset_x, global_offset_y, global_offset_z);
+        }
+
+        manifold::ExportMesh("house_with_underpass.ply", combined_result_meshgl, {});
+    }
     auto t_output_write_end = Clock::now();
 
     auto ogr_read_ms = std::chrono::duration<double, std::milli>(t_ogr_read_end - t_ogr_read_start).count();

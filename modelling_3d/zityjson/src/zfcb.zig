@@ -31,6 +31,7 @@ const VT_GEOMETRY_SHELLS: u16 = 10;
 const VT_GEOMETRY_SURFACES: u16 = 12;
 const VT_GEOMETRY_STRINGS: u16 = 14;
 const VT_GEOMETRY_BOUNDARIES: u16 = 16;
+const VT_GEOMETRY_SEMANTICS: u16 = 18;
 
 const NODE_ITEM_SIZE_BYTES: u64 = 40;
 
@@ -198,6 +199,8 @@ pub const Reader = struct {
 
     header_buf: []u8 = &[_]u8{},
     owns_header_buf: bool = false,
+    preamble_buf: []u8 = &[_]u8{},
+    owns_preamble_buf: bool = false,
     root_columns: []const ColumnSchema = EMPTY_COLUMNS,
     owns_root_columns: bool = false,
 
@@ -249,6 +252,7 @@ pub const Reader = struct {
 
         if (self.pending_id_owned) |id| self.allocator.free(id);
         if (self.owns_root_columns) self.allocator.free(self.root_columns);
+        if (self.owns_preamble_buf) self.allocator.free(self.preamble_buf);
         if (self.owns_header_buf) self.allocator.free(self.header_buf);
     }
 
@@ -262,6 +266,10 @@ pub const Reader = struct {
 
     pub fn rootColumns(self: *const Reader) []const ColumnSchema {
         return self.root_columns;
+    }
+
+    pub fn preamble(self: *const Reader) []const u8 {
+        return self.preamble_buf;
     }
 
     pub fn peekNextId(self: *Reader) !?[]const u8 {
@@ -310,7 +318,17 @@ pub const Reader = struct {
         else
             0;
         const to_skip = try checkedAddU64(rtree_index_size, attr_index_size);
-        try skipBytes(&self.file, to_skip);
+        const to_skip_usize: usize = @intCast(to_skip);
+
+        const preamble_len = try checkedAdd(try checkedAdd(12, header_size), to_skip_usize);
+        self.preamble_buf = try self.allocator.alloc(u8, preamble_len);
+        self.owns_preamble_buf = true;
+        @memcpy(self.preamble_buf[0..8], &magic);
+        @memcpy(self.preamble_buf[8..12], &header_size_buf);
+        @memcpy(self.preamble_buf[12 .. 12 + header_size], self.header_buf[4..][0..header_size]);
+        if (to_skip_usize > 0) {
+            try readExact(&self.file, self.preamble_buf[12 + header_size ..]);
+        }
     }
 
     fn ensurePending(self: *Reader) !bool {
@@ -1022,6 +1040,270 @@ const fb = struct {
     }
 };
 
+pub const Writer = struct {
+    file: std.fs.File,
+
+    pub fn openPathFromReader(reader: *const Reader, path: []const u8) !Writer {
+        const file = if (std.fs.path.isAbsolute(path))
+            try std.fs.createFileAbsolute(path, .{ .truncate = true })
+        else
+            try std.fs.cwd().createFile(path, .{ .truncate = true });
+        errdefer file.close();
+
+        if (reader.preamble().len == 0) return error.MissingReaderPreamble;
+        try file.writeAll(reader.preamble());
+        return .{ .file = file };
+    }
+
+    pub fn deinit(self: *Writer) void {
+        self.file.close();
+    }
+
+    pub fn writeFeatureRaw(self: *Writer, feature_bytes: []const u8) !void {
+        try self.file.writeAll(feature_bytes);
+    }
+};
+
+fn alignAppend4(buf: *std.ArrayList(u8), allocator: std.mem.Allocator) !void {
+    const rem = buf.items.len & 3;
+    if (rem == 0) return;
+    const pad = 4 - rem;
+    try buf.appendNTimes(allocator, 0, pad);
+}
+
+fn appendU32Le(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, value: u32) !void {
+    var tmp: [4]u8 = undefined;
+    std.mem.writeInt(u32, &tmp, value, .little);
+    try buf.appendSlice(allocator, &tmp);
+}
+
+fn appendI32Le(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, value: i32) !void {
+    var tmp: [4]u8 = undefined;
+    std.mem.writeInt(i32, &tmp, value, .little);
+    try buf.appendSlice(allocator, &tmp);
+}
+
+fn appendVectorU32Values(
+    buf: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    values: []const u32,
+) !usize {
+    try alignAppend4(buf, allocator);
+    const start = buf.items.len;
+    try appendU32Le(buf, allocator, @intCast(values.len));
+    for (values) |v| {
+        try appendU32Le(buf, allocator, v);
+    }
+    return start;
+}
+
+fn appendVectorU32Repeated(
+    buf: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    count: usize,
+    value: u32,
+) !usize {
+    try alignAppend4(buf, allocator);
+    const start = buf.items.len;
+    try appendU32Le(buf, allocator, @intCast(count));
+    for (0..count) |_| {
+        try appendU32Le(buf, allocator, value);
+    }
+    return start;
+}
+
+fn quantizeCoordinate(value: f64, scale: f64, translate: f64) !i32 {
+    if (!std.math.isFinite(value)) return error.InvalidCoordinate;
+    if (scale == 0.0) return error.InvalidTransformScale;
+    const qf = std.math.round((value - translate) / scale);
+    if (!std.math.isFinite(qf)) return error.InvalidCoordinate;
+
+    const min_i32 = @as(f64, @floatFromInt(std.math.minInt(i32)));
+    const max_i32 = @as(f64, @floatFromInt(std.math.maxInt(i32)));
+    if (qf < min_i32 or qf > max_i32) return error.CoordinateOutOfRange;
+    return @intFromFloat(qf);
+}
+
+fn appendVectorVerticesQuantized(
+    buf: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    transform: Transform,
+    vertices_xyz: []const f64,
+) !usize {
+    if (vertices_xyz.len % 3 != 0) return error.InvalidVertexArray;
+    const vertex_count = vertices_xyz.len / 3;
+
+    try alignAppend4(buf, allocator);
+    const start = buf.items.len;
+    try appendU32Le(buf, allocator, @intCast(vertex_count));
+    for (0..vertex_count) |i| {
+        const x = vertices_xyz[i * 3];
+        const y = vertices_xyz[i * 3 + 1];
+        const z = vertices_xyz[i * 3 + 2];
+        try appendI32Le(buf, allocator, try quantizeCoordinate(x, transform.scale[0], transform.translate[0]));
+        try appendI32Le(buf, allocator, try quantizeCoordinate(y, transform.scale[1], transform.translate[1]));
+        try appendI32Le(buf, allocator, try quantizeCoordinate(z, transform.scale[2], transform.translate[2]));
+    }
+    return start;
+}
+
+fn patchUOffset(buf: []u8, field_pos: usize, target_pos: usize) !void {
+    if (target_pos <= field_pos) return error.InvalidRewriteOffset;
+    const rel = try checkedAdd(target_pos, 0) - field_pos;
+    var tmp: [4]u8 = undefined;
+    std.mem.writeInt(u32, &tmp, @intCast(rel), .little);
+    @memcpy(buf[field_pos .. field_pos + 4], &tmp);
+}
+
+fn buildObjectId(allocator: std.mem.Allocator, feature_id: []const u8) ![]u8 {
+    const out = try allocator.alloc(u8, feature_id.len + 2);
+    @memcpy(out[0..feature_id.len], feature_id);
+    out[feature_id.len] = '-';
+    out[feature_id.len + 1] = '0';
+    return out;
+}
+
+fn findLod22SolidGeometryTable(buf: []const u8, feature_id: []const u8) !usize {
+    const feature_table = try fb.sizePrefixedRootTable(buf);
+    const objects_vec = (try fb.getVectorInfo(buf, feature_table, VT_FEATURE_OBJECTS)) orelse {
+        return error.MissingRequiredField;
+    };
+
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const object_id = try buildObjectId(a, feature_id);
+
+    for (0..objects_vec.len) |obj_i| {
+        const obj_table = try fb.vectorTableAt(buf, objects_vec, obj_i);
+        const obj_id = try fb.getRequiredString(buf, obj_table, VT_OBJECT_ID);
+        if (!std.mem.eql(u8, obj_id, object_id)) continue;
+
+        const geom_vec = (try fb.getVectorInfo(buf, obj_table, VT_OBJECT_GEOMETRY)) orelse {
+            return error.MissingRequiredField;
+        };
+
+        for (0..geom_vec.len) |geom_i| {
+            const geom_table = try fb.vectorTableAt(buf, geom_vec, geom_i);
+            const geom_type_raw = try fb.getScalarU8Default(buf, geom_table, VT_GEOMETRY_TYPE, 0);
+            const geom_type: GeometryType = @enumFromInt(geom_type_raw);
+            const solid_like = geom_type == .Solid or geom_type == .MultiSolid or geom_type == .CompositeSolid;
+            if (!solid_like) continue;
+
+            const lod = (try fb.getString(buf, geom_table, VT_GEOMETRY_LOD)) orelse continue;
+            if (std.mem.eql(u8, lod, "2.2")) {
+                return geom_table;
+            }
+        }
+
+        return error.TargetGeometryNotFound;
+    }
+
+    return error.TargetObjectNotFound;
+}
+
+fn patchCurrentFeatureGeometryLod22(
+    allocator: std.mem.Allocator,
+    reader: *Reader,
+    feature_id: []const u8,
+    vertices_xyz_world: []const f64,
+    triangle_indices: []const u32,
+    out_feature_bytes: *std.ArrayList(u8),
+) !void {
+    if (triangle_indices.len % 3 != 0) return error.InvalidTriangleIndexArray;
+    if (vertices_xyz_world.len % 3 != 0) return error.InvalidVertexArray;
+    const new_vertex_count = vertices_xyz_world.len / 3;
+    if (new_vertex_count == 0) return error.InvalidVertexArray;
+    for (triangle_indices) |idx| {
+        if (idx >= new_vertex_count) return error.InvalidTriangleIndexArray;
+    }
+
+    out_feature_bytes.clearRetainingCapacity();
+    try out_feature_bytes.appendSlice(allocator, reader.feature_buf.items);
+
+    // Read original vertex data from the feature buffer so other geometries keep working.
+    const feature_table_orig = try fb.sizePrefixedRootTable(out_feature_bytes.items);
+    const orig_verts_vec = (try fb.getVectorInfo(out_feature_bytes.items, feature_table_orig, VT_FEATURE_VERTICES)) orelse {
+        return error.RewriteUnsupportedFeatureLayout;
+    };
+    const orig_vertex_count = orig_verts_vec.len;
+    const orig_verts_bytes = orig_vertex_count * 12; // 3 × i32 per vertex
+    const orig_verts_end = try checkedAdd(orig_verts_vec.start, orig_verts_bytes);
+    if (orig_verts_end > out_feature_bytes.items.len) return error.InvalidFlatBuffer;
+
+    // Save a copy of the original quantized vertices before we start appending,
+    // because appending may reallocate and invalidate the slice.
+    const orig_verts_copy = try allocator.alloc(u8, orig_verts_bytes);
+    defer allocator.free(orig_verts_copy);
+    @memcpy(orig_verts_copy, out_feature_bytes.items[orig_verts_vec.start..orig_verts_end]);
+
+    // Build combined vertex vector: original quantized vertices + new quantized vertices.
+    // This preserves vertex indices used by other geometries (LoD 1.2, 1.3, etc.).
+    try alignAppend4(out_feature_bytes, allocator);
+    const vertices_vec_start = out_feature_bytes.items.len;
+    const total_vertex_count = orig_vertex_count + new_vertex_count;
+    try appendU32Le(out_feature_bytes, allocator, @intCast(total_vertex_count));
+    // Copy original quantized vertices as-is.
+    try out_feature_bytes.appendSlice(allocator, orig_verts_copy);
+    // Append new vertices (quantized from world coordinates).
+    for (0..new_vertex_count) |i| {
+        const x = vertices_xyz_world[i * 3];
+        const y = vertices_xyz_world[i * 3 + 1];
+        const z = vertices_xyz_world[i * 3 + 2];
+        try appendI32Le(out_feature_bytes, allocator, try quantizeCoordinate(x, reader.transform.scale[0], reader.transform.translate[0]));
+        try appendI32Le(out_feature_bytes, allocator, try quantizeCoordinate(y, reader.transform.scale[1], reader.transform.translate[1]));
+        try appendI32Le(out_feature_bytes, allocator, try quantizeCoordinate(z, reader.transform.scale[2], reader.transform.translate[2]));
+    }
+
+    // Offset triangle indices so they reference the new vertices (after the original ones).
+    const index_offset: u32 = @intCast(orig_vertex_count);
+    const tri_count = triangle_indices.len / 3;
+    const solids_start = try appendVectorU32Values(out_feature_bytes, allocator, &.{1});
+    const shells_start = try appendVectorU32Values(out_feature_bytes, allocator, &.{@intCast(tri_count)});
+    const surfaces_start = try appendVectorU32Repeated(out_feature_bytes, allocator, tri_count, 1);
+    const strings_start = try appendVectorU32Repeated(out_feature_bytes, allocator, tri_count, 3);
+    // Write offset triangle indices.
+    try alignAppend4(out_feature_bytes, allocator);
+    const boundaries_start = out_feature_bytes.items.len;
+    try appendU32Le(out_feature_bytes, allocator, @intCast(triangle_indices.len));
+    for (triangle_indices) |idx| {
+        try appendU32Le(out_feature_bytes, allocator, idx + index_offset);
+    }
+    // Semantics: one entry per surface, all null (u32 max = unassigned).
+    const semantics_start = try appendVectorU32Repeated(out_feature_bytes, allocator, tri_count, std.math.maxInt(u32));
+
+    const feature_table = try fb.sizePrefixedRootTable(out_feature_bytes.items);
+    const vertices_field_pos = (try fb.tableFieldPos(out_feature_bytes.items, feature_table, VT_FEATURE_VERTICES)) orelse {
+        return error.RewriteUnsupportedFeatureLayout;
+    };
+    try patchUOffset(out_feature_bytes.items, vertices_field_pos, vertices_vec_start);
+
+    const geom_table = try findLod22SolidGeometryTable(out_feature_bytes.items, feature_id);
+    inline for ([_]struct {
+        vtable_offset: u16,
+        target_start: usize,
+    }{
+        .{ .vtable_offset = VT_GEOMETRY_SOLIDS, .target_start = solids_start },
+        .{ .vtable_offset = VT_GEOMETRY_SHELLS, .target_start = shells_start },
+        .{ .vtable_offset = VT_GEOMETRY_SURFACES, .target_start = surfaces_start },
+        .{ .vtable_offset = VT_GEOMETRY_STRINGS, .target_start = strings_start },
+        .{ .vtable_offset = VT_GEOMETRY_BOUNDARIES, .target_start = boundaries_start },
+    }) |entry| {
+        const field_pos = (try fb.tableFieldPos(out_feature_bytes.items, geom_table, entry.vtable_offset)) orelse {
+            return error.RewriteUnsupportedGeometryLayout;
+        };
+        try patchUOffset(out_feature_bytes.items, field_pos, entry.target_start);
+    }
+
+    // Patch semantics if the geometry has them (optional field).
+    if (try fb.tableFieldPos(out_feature_bytes.items, geom_table, VT_GEOMETRY_SEMANTICS)) |sem_field_pos| {
+        try patchUOffset(out_feature_bytes.items, sem_field_pos, semantics_start);
+    }
+
+    const payload_len: u32 = @intCast(out_feature_bytes.items.len - 4);
+    std.mem.writeInt(u32, out_feature_bytes.items[0..4], payload_len, .little);
+}
+
 // =============================================================================
 // C API exports
 // =============================================================================
@@ -1029,6 +1311,7 @@ const fb = struct {
 var c_allocator: std.mem.Allocator = std.heap.c_allocator;
 
 pub const ZfcbReaderHandle = *Reader;
+pub const ZfcbWriterHandle = *Writer;
 
 fn getCurrentObject(reader: *Reader, object_index: usize) ?*const ObjectView {
     if (object_index >= reader.current_feature.objects.len) return null;
@@ -1253,6 +1536,94 @@ export fn zfcb_current_geometry_boundaries(
     const geom = getCurrentGeometry(reader, object_index, geometry_index) orelse return null;
     if (geom.boundaries.len == 0) return null;
     return geom.boundaries.ptr;
+}
+
+export fn zfcb_writer_open_from_reader(
+    reader_handle: ?ZfcbReaderHandle,
+    output_path: [*c]const u8,
+) callconv(.c) ?ZfcbWriterHandle {
+    const reader = reader_handle orelse return null;
+    const output_path_slice = std.mem.span(output_path);
+
+    const writer = c_allocator.create(Writer) catch return null;
+    writer.* = Writer.openPathFromReader(reader, output_path_slice) catch {
+        c_allocator.destroy(writer);
+        return null;
+    };
+    return writer;
+}
+
+export fn zfcb_writer_destroy(writer_handle: ?ZfcbWriterHandle) callconv(.c) void {
+    if (writer_handle) |writer| {
+        writer.deinit();
+        c_allocator.destroy(writer);
+    }
+}
+
+// Returns: 1 when a feature was written, 0 at EOF, -1 on error.
+export fn zfcb_writer_write_pending_raw(
+    reader_handle: ?ZfcbReaderHandle,
+    writer_handle: ?ZfcbWriterHandle,
+) callconv(.c) c_int {
+    const reader = reader_handle orelse return -1;
+    const writer = writer_handle orelse return -1;
+
+    const has_pending = reader.ensurePending() catch return -1;
+    if (!has_pending) return 0;
+
+    writer.writeFeatureRaw(reader.feature_buf.items) catch return -1;
+    reader.pending_loaded = false;
+    return 1;
+}
+
+// Returns 0 on success, -1 on error.
+export fn zfcb_writer_write_current_raw(
+    reader_handle: ?ZfcbReaderHandle,
+    writer_handle: ?ZfcbWriterHandle,
+) callconv(.c) c_int {
+    const reader = reader_handle orelse return -1;
+    const writer = writer_handle orelse return -1;
+    if (reader.feature_buf.items.len < 4) return -1;
+    writer.writeFeatureRaw(reader.feature_buf.items) catch return -1;
+    return 0;
+}
+
+// Replaces feature vertices and the target Solid/LoD2.2 geometry for object "<feature_id>-0".
+// triangle_indices is a flat triangle index list (multiple of 3).
+// Returns 0 on success, -1 on error.
+export fn zfcb_writer_write_current_replaced_lod22(
+    reader_handle: ?ZfcbReaderHandle,
+    writer_handle: ?ZfcbWriterHandle,
+    feature_id_ptr: [*c]const u8,
+    feature_id_len: usize,
+    vertices_xyz_world_ptr: [*c]const f64,
+    vertex_count: usize,
+    triangle_indices_ptr: [*c]const u32,
+    triangle_index_count: usize,
+) callconv(.c) c_int {
+    const reader = reader_handle orelse return -1;
+    const writer = writer_handle orelse return -1;
+    if (feature_id_ptr == null or feature_id_len == 0) return -1;
+    if (vertices_xyz_world_ptr == null or vertex_count == 0) return -1;
+    if (triangle_indices_ptr == null or triangle_index_count == 0 or triangle_index_count % 3 != 0) return -1;
+
+    const feature_id = feature_id_ptr[0..feature_id_len];
+    const vertices_xyz_world = vertices_xyz_world_ptr[0 .. vertex_count * 3];
+    const triangle_indices = triangle_indices_ptr[0..triangle_index_count];
+
+    var rewritten_feature = std.ArrayList(u8){};
+    defer rewritten_feature.deinit(c_allocator);
+
+    patchCurrentFeatureGeometryLod22(
+        c_allocator,
+        reader,
+        feature_id,
+        vertices_xyz_world,
+        triangle_indices,
+        &rewritten_feature,
+    ) catch return -1;
+    writer.writeFeatureRaw(rewritten_feature.items) catch return -1;
+    return 0;
 }
 
 fn openSampleReader(allocator: std.mem.Allocator) !Reader {

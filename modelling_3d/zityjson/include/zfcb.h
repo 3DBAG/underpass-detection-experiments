@@ -100,6 +100,32 @@ const uint32_t* zfcb_current_geometry_surfaces(ZfcbReaderHandle handle, size_t o
 const uint32_t* zfcb_current_geometry_strings(ZfcbReaderHandle handle, size_t object_index, size_t geometry_index);
 const uint32_t* zfcb_current_geometry_boundaries(ZfcbReaderHandle handle, size_t object_index, size_t geometry_index);
 
+// Writer API – open from an existing reader (copies preamble), write features.
+typedef struct Writer* ZfcbWriterHandle;
+
+ZfcbWriterHandle zfcb_writer_open_from_reader(ZfcbReaderHandle reader_handle, const char* output_path);
+void zfcb_writer_destroy(ZfcbWriterHandle writer_handle);
+
+// Write the pending (peeked but not yet decoded) raw feature bytes. Returns 1/0/-1.
+int zfcb_writer_write_pending_raw(ZfcbReaderHandle reader_handle, ZfcbWriterHandle writer_handle);
+
+// Write the current (decoded) feature's raw bytes. Returns 0/-1.
+int zfcb_writer_write_current_raw(ZfcbReaderHandle reader_handle, ZfcbWriterHandle writer_handle);
+
+// Write the current feature with its LoD 2.2 Solid geometry replaced by a triangle mesh.
+// vertices_xyz_world: flat xyz array (length = vertex_count * 3) in world coordinates.
+// triangle_indices: flat triangle index list (length = triangle_index_count, must be multiple of 3).
+// Returns 0 on success, -1 on error.
+int zfcb_writer_write_current_replaced_lod22(
+    ZfcbReaderHandle reader_handle,
+    ZfcbWriterHandle writer_handle,
+    const char* feature_id,
+    size_t feature_id_len,
+    const double* vertices_xyz_world,
+    size_t vertex_count,
+    const uint32_t* triangle_indices,
+    size_t triangle_index_count);
+
 #ifdef __cplusplus
 }
 #endif
