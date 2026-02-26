@@ -30,8 +30,6 @@
 
         # Development dependencies matching vcpkg.json
         buildTools = with pkgs; [
-          cmake
-          pkg-config
           zig
         ];
         cppDeps = with pkgs; [
@@ -45,21 +43,16 @@
           gmp
           mpfr
           boost
+          eigen
 
           # geogram - geometry processing library
           geogram
-
-          # nlohmann_json - JSON library
-          nlohmann_json
 
           # GDAL with features
           gdal
           sqlite
           postgresql
           geos
-
-          # eigen3 - linear algebra library
-          eigen
 
           # Rerun SDK - visualization library
           rerunSdk
