@@ -232,7 +232,7 @@ int main(int argc, char* argv[]) {
         // FCB streaming mode: read features, process matching ones, write all to output.
         ZfcbWriterHandle fcb_writer = nullptr;
         if (output_fcb_path != nullptr) {
-            fcb_writer = zfcb_writer_open_from_reader(fcb, output_fcb_path);
+            fcb_writer = zfcb_writer_open_from_reader_no_index(fcb, output_fcb_path);
             if (fcb_writer == nullptr) {
                 std::cerr << "Failed to open FCB writer: " << output_fcb_path << std::endl;
                 zfcb_reader_destroy(fcb);

@@ -104,6 +104,10 @@ const uint32_t* zfcb_current_geometry_boundaries(ZfcbReaderHandle handle, size_t
 typedef struct Writer* ZfcbWriterHandle;
 
 ZfcbWriterHandle zfcb_writer_open_from_reader(ZfcbReaderHandle reader_handle, const char* output_path);
+// Like zfcb_writer_open_from_reader but strips the spatial and attribute indexes
+// from the output header. Use this when features may be modified (changed byte lengths
+// would invalidate the original index offsets).
+ZfcbWriterHandle zfcb_writer_open_from_reader_no_index(ZfcbReaderHandle reader_handle, const char* output_path);
 void zfcb_writer_destroy(ZfcbWriterHandle writer_handle);
 
 // Write the pending (peeked but not yet decoded) raw feature bytes. Returns 1/0/-1.

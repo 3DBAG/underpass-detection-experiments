@@ -272,6 +272,11 @@ pub const Reader = struct {
         return self.preamble_buf;
     }
 
+    pub fn headerSize(self: *const Reader) usize {
+        // header_buf includes a 4-byte size prefix; the rest is the flatbuffer data.
+        return self.header_buf.len - 4;
+    }
+
     pub fn peekNextId(self: *Reader) !?[]const u8 {
         if (!try self.ensurePending()) return null;
         return self.pending_id_owned;
@@ -1059,6 +1064,81 @@ pub const Writer = struct {
         self.file.close();
     }
 
+    /// Opens a writer that copies the header from the reader but strips the spatial
+    /// index and attribute indexes from the preamble. Use this variant when features
+    /// may be modified (e.g. via patchCurrentFeatureGeometryLod22), since changed
+    /// feature byte lengths invalidate the original index offsets.
+    pub fn openPathFromReaderNoIndex(reader: *const Reader, path: []const u8) !Writer {
+        var file = if (std.fs.path.isAbsolute(path))
+            try std.fs.createFileAbsolute(path, .{ .truncate = true })
+        else
+            try std.fs.cwd().createFile(path, .{ .truncate = true });
+        errdefer file.close();
+
+        if (reader.header_buf.len < 8) return error.MissingReaderPreamble;
+
+        const header_size = reader.headerSize();
+        // Preamble without indexes: magic(8) + header_size_buf(4) + header_data(header_size).
+        const base_preamble_len = 12 + header_size;
+        if (reader.preamble_buf.len < base_preamble_len) return error.MissingReaderPreamble;
+
+        // Work on a mutable copy so we can patch before writing.
+        // Reserve 2 extra bytes in case we need to append a zero u16 for index_node_size.
+        const allocator = std.heap.page_allocator;
+        const buf = try allocator.alloc(u8, base_preamble_len + 2);
+        defer allocator.free(buf);
+        @memcpy(buf[0..base_preamble_len], reader.preamble_buf[0..base_preamble_len]);
+        buf[base_preamble_len] = 0;
+        buf[base_preamble_len + 1] = 0;
+        var write_len: usize = base_preamble_len;
+
+        // Positions in header_buf map to buf positions as: buf_pos = hb_pos + 8.
+        const header_table = try fb.sizePrefixedRootTable(reader.header_buf);
+
+        // Locate the vtable (needed for both index_node_size and attribute_index patches).
+        if (header_table + 4 > reader.header_buf.len) return error.InvalidFlatBuffer;
+        const vtable_back = try fb.readI32Le(reader.header_buf, header_table);
+        const table_isize: isize = @intCast(header_table);
+        const vtable_isize = table_isize - @as(isize, vtable_back);
+        if (vtable_isize < 0) return error.InvalidFlatBuffer;
+        const vtable_pos: usize = @intCast(vtable_isize);
+        if (vtable_pos + 4 > reader.header_buf.len) return error.InvalidFlatBuffer;
+        const vtable_len = try fb.readU16Le(reader.header_buf, vtable_pos);
+
+        // Patch index_node_size to 0 to indicate no spatial index.
+        if (try fb.tableFieldPos(reader.header_buf, header_table, VT_HEADER_INDEX_NODE_SIZE)) |field_pos| {
+            // Field is explicitly stored; overwrite its value with 0.
+            const pos = field_pos + 8;
+            buf[pos] = 0;
+            buf[pos + 1] = 0;
+        } else if (VT_HEADER_INDEX_NODE_SIZE + 2 <= vtable_len) {
+            // Field absent (vtable entry is 0, flatbuffer default 16 applies).
+            // Append 2 zero bytes and point the vtable entry at them.
+            write_len = base_preamble_len + 2;
+
+            // Update header size in the size-prefix at buf[8..12].
+            const new_header_size: u32 = @intCast(header_size + 2);
+            std.mem.writeInt(u32, buf[8..12], new_header_size, .little);
+
+            // Set vtable entry to the relative offset from table_pos to the new bytes.
+            // New bytes are at header_buf position: 4 + header_size (end of original fb data).
+            const new_field_hb_pos: usize = 4 + header_size;
+            const rel: u16 = @intCast(new_field_hb_pos - header_table);
+            const vt_entry_buf_pos = vtable_pos + VT_HEADER_INDEX_NODE_SIZE + 8;
+            std.mem.writeInt(u16, buf[vt_entry_buf_pos..][0..2], rel, .little);
+        }
+
+        // Nullify the attribute_index vtable entry (make the field appear absent).
+        if (VT_HEADER_ATTRIBUTE_INDEX + 2 <= vtable_len) {
+            const pos = vtable_pos + VT_HEADER_ATTRIBUTE_INDEX + 8;
+            buf[pos] = 0;
+            buf[pos + 1] = 0;
+        }
+
+        try file.writeAll(buf[0..write_len]);
+        return .{ .file = file };
+    }
+
     pub fn writeFeatureRaw(self: *Writer, feature_bytes: []const u8) !void {
         try self.file.writeAll(feature_bytes);
     }
@@ -1553,6 +1633,21 @@ export fn zfcb_writer_open_from_reader(
     return writer;
 }
 
+export fn zfcb_writer_open_from_reader_no_index(
+    reader_handle: ?ZfcbReaderHandle,
+    output_path: [*c]const u8,
+) callconv(.c) ?ZfcbWriterHandle {
+    const reader = reader_handle orelse return null;
+    const output_path_slice = std.mem.span(output_path);
+
+    const writer = c_allocator.create(Writer) catch return null;
+    writer.* = Writer.openPathFromReaderNoIndex(reader, output_path_slice) catch {
+        c_allocator.destroy(writer);
+        return null;
+    };
+    return writer;
+}
+
 export fn zfcb_writer_destroy(writer_handle: ?ZfcbWriterHandle) callconv(.c) void {
     if (writer_handle) |writer| {
         writer.deinit();
@@ -1591,6 +1686,8 @@ export fn zfcb_writer_write_current_raw(
 // Replaces feature vertices and the target Solid/LoD2.2 geometry for object "<feature_id>-0".
 // triangle_indices is a flat triangle index list (multiple of 3).
 // Returns 0 on success, -1 on error.
+// NOTE: This changes the feature byte length, invalidating spatial/attribute indexes.
+// Use zfcb_writer_open_from_reader_no_index to create the writer.
 export fn zfcb_writer_write_current_replaced_lod22(
     reader_handle: ?ZfcbReaderHandle,
     writer_handle: ?ZfcbWriterHandle,
