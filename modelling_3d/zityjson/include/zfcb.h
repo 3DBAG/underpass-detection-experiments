@@ -119,7 +119,12 @@ int zfcb_writer_write_current_raw(ZfcbReaderHandle reader_handle, ZfcbWriterHand
 // Write the current feature with its LoD 2.2 Solid geometry replaced by a triangle mesh.
 // vertices_xyz_world: flat xyz array (length = vertex_count * 3) in world coordinates.
 // triangle_indices: flat triangle index list (length = triangle_index_count, must be multiple of 3).
+// semantic_types: per-triangle SemanticSurfaceType enum values (FCB geometry.fbs ordering:
+//   0=RoofSurface, 1=GroundSurface, 2=WallSurface, 4=OuterCeilingSurface).
+// semantic_types_count: must equal triangle_index_count / 3.
 // Returns 0 on success, -1 on error.
+// NOTE: This changes the feature byte length, invalidating spatial/attribute indexes.
+// Use zfcb_writer_open_from_reader_no_index to create the writer.
 int zfcb_writer_write_current_replaced_lod22(
     ZfcbReaderHandle reader_handle,
     ZfcbWriterHandle writer_handle,
@@ -128,7 +133,9 @@ int zfcb_writer_write_current_replaced_lod22(
     const double* vertices_xyz_world,
     size_t vertex_count,
     const uint32_t* triangle_indices,
-    size_t triangle_index_count);
+    size_t triangle_index_count,
+    const uint8_t* semantic_types,
+    size_t semantic_types_count);
 
 #ifdef __cplusplus
 }

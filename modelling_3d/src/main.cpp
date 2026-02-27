@@ -22,6 +22,69 @@
 
 using Clock = std::chrono::steady_clock;
 
+// SemanticSurfaceType enum values matching FCB geometry.fbs
+namespace SemanticSurfaceType {
+    constexpr uint8_t RoofSurface = 0;
+    constexpr uint8_t GroundSurface = 1;
+    constexpr uint8_t WallSurface = 2;
+    constexpr uint8_t OuterCeilingSurface = 4;
+}
+
+// Classify each triangle by face normal orientation and Z-position.
+// ground_z: building ground level (local coords).
+// underpass_z: underpass ceiling height (local coords).
+static std::vector<uint8_t> classify_triangle_semantics(
+    const manifold::MeshGL& mesh,
+    double ground_z,
+    double underpass_z,
+    double nz_threshold = 0.3,
+    double z_tolerance = 0.5)
+{
+    size_t num_prop = mesh.numProp;
+    size_t tri_count = mesh.triVerts.size() / 3;
+    std::vector<uint8_t> result(tri_count);
+
+    for (size_t t = 0; t < tri_count; ++t) {
+        uint32_t i0 = mesh.triVerts[t * 3 + 0];
+        uint32_t i1 = mesh.triVerts[t * 3 + 1];
+        uint32_t i2 = mesh.triVerts[t * 3 + 2];
+
+        float x0 = mesh.vertProperties[i0 * num_prop + 0];
+        float y0 = mesh.vertProperties[i0 * num_prop + 1];
+        float z0 = mesh.vertProperties[i0 * num_prop + 2];
+        float x1 = mesh.vertProperties[i1 * num_prop + 0];
+        float y1 = mesh.vertProperties[i1 * num_prop + 1];
+        float z1 = mesh.vertProperties[i1 * num_prop + 2];
+        float x2 = mesh.vertProperties[i2 * num_prop + 0];
+        float y2 = mesh.vertProperties[i2 * num_prop + 1];
+        float z2 = mesh.vertProperties[i2 * num_prop + 2];
+
+        // Cross product of edges e1 = v1-v0, e2 = v2-v0.
+        float ex1 = x1 - x0, ey1 = y1 - y0, ez1 = z1 - z0;
+        float ex2 = x2 - x0, ey2 = y2 - y0, ez2 = z2 - z0;
+        float nx = ey1 * ez2 - ez1 * ey2;
+        float ny = ez1 * ex2 - ex1 * ez2;
+        float nz = ex1 * ey2 - ey1 * ex2;
+
+        float len = std::sqrt(nx * nx + ny * ny + nz * nz);
+        if (len > 0.0f) nz /= len;
+
+        if (std::abs(nz) < nz_threshold) {
+            result[t] = SemanticSurfaceType::WallSurface;
+        } else if (nz > 0.0f) {
+            result[t] = SemanticSurfaceType::RoofSurface;
+        } else {
+            // Downward-facing: distinguish ground from outer ceiling by first vertex Z.
+            if (std::abs(static_cast<double>(z0) - ground_z) < z_tolerance) {
+                result[t] = SemanticSurfaceType::GroundSurface;
+            } else {
+                result[t] = SemanticSurfaceType::OuterCeilingSurface;
+            }
+        }
+    }
+    return result;
+}
+
 int main(int argc, char* argv[]) {
     auto t_program_start = Clock::now();
 
@@ -359,6 +422,8 @@ int main(int argc, char* argv[]) {
             // Track whether any polygon feature succeeded for this FCB feature.
             bool any_succeeded = false;
             manifold::MeshGL last_result_meshgl;
+            double last_house_min_z = 0.0;
+            double last_underpass_z = 0.0;
 
             for (size_t feature_idx : matched_indices) {
                 seen_feature[feature_idx] = true;
@@ -433,6 +498,8 @@ int main(int argc, char* argv[]) {
 
                 append_meshgl(combined_result_meshgl, result_meshgl);
                 last_result_meshgl = std::move(result_meshgl);
+                last_house_min_z = house_min_z_local;
+                last_underpass_z = feature.extrusion_height - global_offset_z;
                 any_succeeded = true;
                 ++processed_count;
             }
@@ -451,12 +518,16 @@ int main(int argc, char* argv[]) {
                         world_verts[v * 3 + 2] = static_cast<double>(last_result_meshgl.vertProperties[v * num_prop + 2]) + global_offset_z;
                     }
 
+                    auto semantics = classify_triangle_semantics(
+                        last_result_meshgl, last_house_min_z, last_underpass_z);
+
                     std::string feature_id_str(next_id);
                     int write_result = zfcb_writer_write_current_replaced_lod22(
                         fcb, fcb_writer,
                         feature_id_str.c_str(), feature_id_str.size(),
                         world_verts.data(), num_verts,
-                        last_result_meshgl.triVerts.data(), last_result_meshgl.triVerts.size());
+                        last_result_meshgl.triVerts.data(), last_result_meshgl.triVerts.size(),
+                        semantics.data(), semantics.size());
                     if (write_result < 0) {
                         std::cerr << std::format("Warning: failed to write modified feature '{}' to FCB, writing raw instead",
                                                  feature_id_str) << std::endl;

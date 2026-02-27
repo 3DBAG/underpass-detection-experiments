@@ -32,6 +32,7 @@ const VT_GEOMETRY_SURFACES: u16 = 12;
 const VT_GEOMETRY_STRINGS: u16 = 14;
 const VT_GEOMETRY_BOUNDARIES: u16 = 16;
 const VT_GEOMETRY_SEMANTICS: u16 = 18;
+const VT_GEOMETRY_SEMANTICS_OBJECTS: u16 = 20;
 
 const NODE_ITEM_SIZE_BYTES: u64 = 40;
 
@@ -1235,6 +1236,115 @@ fn patchUOffset(buf: []u8, field_pos: usize, target_pos: usize) !void {
     @memcpy(buf[field_pos .. field_pos + 4], &tmp);
 }
 
+/// Appends a u32 vector where each element is mapped from a u8 value through a lookup table.
+fn appendVectorU32Mapped(
+    buf: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    values: []const u8,
+    lookup: *const [256]u32,
+) !usize {
+    try alignAppend4(buf, allocator);
+    const start = buf.items.len;
+    try appendU32Le(buf, allocator, @intCast(values.len));
+    for (values) |v| {
+        try appendU32Le(buf, allocator, lookup[v]);
+    }
+    return start;
+}
+
+/// Builds a flatbuffer vector of SemanticObject tables and appends it to the buffer.
+/// Each SemanticObject contains only a `type` field (u8, VT offset 4).
+/// Returns the start position of the vector (the u32 length prefix).
+fn appendSemanticObjectsVector(
+    buf: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    types: []const u8,
+) !usize {
+    // Each SemanticObject is a flatbuffer table.
+    // Layout per object:
+    //   vtable (8 bytes): vtable_len=8 u16, table_data_len=8 u16, type_rel=4 u16, pad=0 u16
+    //   table  (8 bytes): vtable_back i32, type u8, 3 bytes padding
+    // Total: 16 bytes per object, 4-byte aligned.
+    //
+    // The vector is: [u32 count] [u32 offset_0] [u32 offset_1] ... then the table data.
+
+    try alignAppend4(buf, allocator);
+
+    // Reserve space for the offset vector: count + N offsets.
+    const vec_start = buf.items.len;
+    try appendU32Le(buf, allocator, @intCast(types.len));
+    // Placeholder offsets — we'll patch them after writing the tables.
+    const offsets_start = buf.items.len;
+    for (0..types.len) |_| {
+        try appendU32Le(buf, allocator, 0); // placeholder
+    }
+
+    // Write each SemanticObject table and patch its offset.
+    for (0..types.len) |i| {
+        try alignAppend4(buf, allocator);
+
+        // vtable: 8 bytes
+        const vtable_pos = buf.items.len;
+        var vtable: [8]u8 = undefined;
+        std.mem.writeInt(u16, vtable[0..2], 8, .little); // vtable_len
+        std.mem.writeInt(u16, vtable[2..4], 8, .little); // table_data_len
+        std.mem.writeInt(u16, vtable[4..6], 4, .little); // type field at offset 4 from table start
+        std.mem.writeInt(u16, vtable[6..8], 0, .little); // no more fields
+        try buf.appendSlice(allocator, &vtable);
+
+        // table: 8 bytes (vtable_back i32, type u8, 3 pad)
+        const table_pos = buf.items.len;
+        var table: [8]u8 = .{0} ** 8;
+        const vtable_back: i32 = @intCast(table_pos - vtable_pos);
+        std.mem.writeInt(i32, table[0..4], vtable_back, .little);
+        table[4] = types[i]; // SemanticSurfaceType enum value
+        try buf.appendSlice(allocator, &table);
+
+        // Patch the offset in the vector. Offsets in flatbuffer vectors of tables
+        // are u32 relative to the offset's own position.
+        const offset_pos = offsets_start + i * 4;
+        const rel: u32 = @intCast(table_pos - offset_pos);
+        std.mem.writeInt(u32, buf.items[offset_pos..][0..4], rel, .little);
+    }
+
+    return vec_start;
+}
+
+/// Allocates a 4-byte UOffset slot in the growable buffer and writes the geometry
+/// vtable entry to point to it. Returns the position of the slot so the caller can
+/// fill in the UOffset once the target data has been appended.
+/// Returns null if the vtable is too short to hold this field.
+fn allocateVtableUOffsetSlot(
+    buf: *std.ArrayList(u8),
+    alloc: std.mem.Allocator,
+    table_pos: usize,
+    vtable_offset: u16,
+) !?usize {
+    if (table_pos + 4 > buf.items.len) return error.InvalidFlatBuffer;
+    const vtable_back = try fb.readI32Le(buf.items, table_pos);
+    const table_isize: isize = @intCast(table_pos);
+    const vtable_isize = table_isize - @as(isize, vtable_back);
+    if (vtable_isize < 0) return error.InvalidFlatBuffer;
+    const vtable_pos_val: usize = @intCast(vtable_isize);
+    if (vtable_pos_val + 4 > buf.items.len) return error.InvalidFlatBuffer;
+
+    const vtable_len = try fb.readU16Le(buf.items, vtable_pos_val);
+    if (vtable_offset + 2 > vtable_len) return null; // Vtable too short.
+
+    // Append 4 zero bytes (placeholder UOffset).
+    try alignAppend4(buf, alloc);
+    const slot_pos = buf.items.len;
+    try appendU32Le(buf, alloc, 0);
+
+    // Set the vtable entry to point to our new slot (relative to table_pos).
+    const rel = slot_pos - table_pos;
+    if (rel > std.math.maxInt(u16)) return error.VtableEntryOverflow;
+    const entry_pos = vtable_pos_val + vtable_offset;
+    std.mem.writeInt(u16, buf.items[entry_pos..][0..2], @intCast(rel), .little);
+
+    return slot_pos;
+}
+
 fn buildObjectId(allocator: std.mem.Allocator, feature_id: []const u8) ![]u8 {
     const out = try allocator.alloc(u8, feature_id.len + 2);
     @memcpy(out[0..feature_id.len], feature_id);
@@ -1288,12 +1398,15 @@ fn patchCurrentFeatureGeometryLod22(
     feature_id: []const u8,
     vertices_xyz_world: []const f64,
     triangle_indices: []const u32,
+    semantic_types: []const u8,
     out_feature_bytes: *std.ArrayList(u8),
 ) !void {
     if (triangle_indices.len % 3 != 0) return error.InvalidTriangleIndexArray;
     if (vertices_xyz_world.len % 3 != 0) return error.InvalidVertexArray;
     const new_vertex_count = vertices_xyz_world.len / 3;
     if (new_vertex_count == 0) return error.InvalidVertexArray;
+    const tri_count = triangle_indices.len / 3;
+    if (semantic_types.len != tri_count) return error.InvalidSemanticTypesArray;
     for (triangle_indices) |idx| {
         if (idx >= new_vertex_count) return error.InvalidTriangleIndexArray;
     }
@@ -1337,7 +1450,6 @@ fn patchCurrentFeatureGeometryLod22(
 
     // Offset triangle indices so they reference the new vertices (after the original ones).
     const index_offset: u32 = @intCast(orig_vertex_count);
-    const tri_count = triangle_indices.len / 3;
     const solids_start = try appendVectorU32Values(out_feature_bytes, allocator, &.{1});
     const shells_start = try appendVectorU32Values(out_feature_bytes, allocator, &.{@intCast(tri_count)});
     const surfaces_start = try appendVectorU32Repeated(out_feature_bytes, allocator, tri_count, 1);
@@ -1349,9 +1461,10 @@ fn patchCurrentFeatureGeometryLod22(
     for (triangle_indices) |idx| {
         try appendU32Le(out_feature_bytes, allocator, idx + index_offset);
     }
-    // Semantics: one entry per surface, all null (u32 max = unassigned).
-    const semantics_start = try appendVectorU32Repeated(out_feature_bytes, allocator, tri_count, std.math.maxInt(u32));
 
+    // Resolve geometry table and check which semantic fields need vtable injection.
+    // We do this BEFORE appending semantic data so we can allocate UOffset slots
+    // that point forward to data appended later.
     const feature_table = try fb.sizePrefixedRootTable(out_feature_bytes.items);
     const vertices_field_pos = (try fb.tableFieldPos(out_feature_bytes.items, feature_table, VT_FEATURE_VERTICES)) orelse {
         return error.RewriteUnsupportedFeatureLayout;
@@ -1359,6 +1472,8 @@ fn patchCurrentFeatureGeometryLod22(
     try patchUOffset(out_feature_bytes.items, vertices_field_pos, vertices_vec_start);
 
     const geom_table = try findLod22SolidGeometryTable(out_feature_bytes.items, feature_id);
+
+    // Patch geometry structure fields (these already exist in the original vtable).
     inline for ([_]struct {
         vtable_offset: u16,
         target_start: usize,
@@ -1375,9 +1490,48 @@ fn patchCurrentFeatureGeometryLod22(
         try patchUOffset(out_feature_bytes.items, field_pos, entry.target_start);
     }
 
-    // Patch semantics if the geometry has them (optional field).
+    // If semantics_objects field is absent from the vtable, allocate a UOffset
+    // slot now (before appending data) so the UOffset can point forward.
+    const sem_objects_existing_field = try fb.tableFieldPos(out_feature_bytes.items, geom_table, VT_GEOMETRY_SEMANTICS_OBJECTS);
+    const sem_objects_injected_slot: ?usize = if (sem_objects_existing_field == null)
+        try allocateVtableUOffsetSlot(out_feature_bytes, allocator, geom_table, VT_GEOMETRY_SEMANTICS_OBJECTS)
+    else
+        null;
+
+    // Build semantic surface objects and per-triangle index mapping.
+    var unique_types: [256]bool = .{false} ** 256;
+    for (semantic_types) |t| unique_types[t] = true;
+
+    var type_to_obj_index: [256]u32 = .{std.math.maxInt(u32)} ** 256;
+    var obj_types: [256]u8 = undefined;
+    var obj_count: u32 = 0;
+    for (0..256) |t| {
+        if (unique_types[t]) {
+            type_to_obj_index[t] = obj_count;
+            obj_types[obj_count] = @intCast(t);
+            obj_count += 1;
+        }
+    }
+
+    // Write semantics index vector (per-triangle object indices).
+    const semantics_start = try appendVectorU32Mapped(out_feature_bytes, allocator, semantic_types, &type_to_obj_index);
+
+    // Build semantics_objects: a flatbuffer vector of SemanticObject tables.
+    const sem_objects_start = try appendSemanticObjectsVector(out_feature_bytes, allocator, obj_types[0..obj_count]);
+
+    // Patch semantics indices.
     if (try fb.tableFieldPos(out_feature_bytes.items, geom_table, VT_GEOMETRY_SEMANTICS)) |sem_field_pos| {
         try patchUOffset(out_feature_bytes.items, sem_field_pos, semantics_start);
+    }
+
+    // Patch semantics_objects vector.
+    if (sem_objects_existing_field) |sem_obj_field_pos| {
+        try patchUOffset(out_feature_bytes.items, sem_obj_field_pos, sem_objects_start);
+    } else if (sem_objects_injected_slot) |slot_pos| {
+        // Fill in the injected UOffset slot.
+        if (sem_objects_start <= slot_pos) return error.InvalidRewriteOffset;
+        const rel: u32 = @intCast(sem_objects_start - slot_pos);
+        std.mem.writeInt(u32, out_feature_bytes.items[slot_pos..][0..4], rel, .little);
     }
 
     const payload_len: u32 = @intCast(out_feature_bytes.items.len - 4);
@@ -1697,16 +1851,20 @@ export fn zfcb_writer_write_current_replaced_lod22(
     vertex_count: usize,
     triangle_indices_ptr: [*c]const u32,
     triangle_index_count: usize,
+    semantic_types_ptr: [*c]const u8,
+    semantic_types_count: usize,
 ) callconv(.c) c_int {
     const reader = reader_handle orelse return -1;
     const writer = writer_handle orelse return -1;
     if (feature_id_ptr == null or feature_id_len == 0) return -1;
     if (vertices_xyz_world_ptr == null or vertex_count == 0) return -1;
     if (triangle_indices_ptr == null or triangle_index_count == 0 or triangle_index_count % 3 != 0) return -1;
+    if (semantic_types_ptr == null or semantic_types_count != triangle_index_count / 3) return -1;
 
     const feature_id = feature_id_ptr[0..feature_id_len];
     const vertices_xyz_world = vertices_xyz_world_ptr[0 .. vertex_count * 3];
     const triangle_indices = triangle_indices_ptr[0..triangle_index_count];
+    const semantic_types = semantic_types_ptr[0..semantic_types_count];
 
     var rewritten_feature = std.ArrayList(u8){};
     defer rewritten_feature.deinit(c_allocator);
@@ -1717,6 +1875,7 @@ export fn zfcb_writer_write_current_replaced_lod22(
         feature_id,
         vertices_xyz_world,
         triangle_indices,
+        semantic_types,
         &rewritten_feature,
     ) catch return -1;
     writer.writeFeatureRaw(rewritten_feature.items) catch return -1;
