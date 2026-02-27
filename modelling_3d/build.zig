@@ -66,6 +66,18 @@ pub fn build(b: *std.Build) void {
         .file = b.path("src/RerunVisualization.cpp"),
         .flags = cpp_flags,
     });
+    exe.root_module.addCSourceFile(.{
+        .file = b.path("src/BooleanOps.cpp"),
+        .flags = cpp_flags,
+    });
+    exe.root_module.addCSourceFile(.{
+        .file = b.path("src/MeshConversion.cpp"),
+        .flags = cpp_flags,
+    });
+    exe.root_module.addCSourceFile(.{
+        .file = b.path("src/ModelLoaders.cpp"),
+        .flags = cpp_flags,
+    });
 
     // 2. Linking System Libraries
     // Note: Zig automatically picks up NIX_CFLAGS_COMPILE and NIX_LDFLAGS from the environment
