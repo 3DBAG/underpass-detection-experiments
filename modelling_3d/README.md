@@ -4,7 +4,7 @@ A project for 3D geometry intersection testing using Manifold and optional Rerun
 
 ### Limitations
 - Mesh processing:
-  - [ ] Untriangulate the output meshes
+  - [ ] Output meshes are triangulated
   - [ ] currently only processes the LoD2.2 geometries
   - [ ] geogram boolean difference method not implemented and untested
 
