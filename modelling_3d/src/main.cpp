@@ -112,7 +112,7 @@ int main(int argc, char* argv[]) {
         std::cerr << "Usage: " << argv[0]
                   << " <ogr_source> <cityjson_or_fcb_input> <output_path_or_-> <height_attribute> [id_attribute] [method]" << std::endl;
         std::cerr << "  id_attribute default: identificatie" << std::endl;
-        std::cerr << "  method: manifold (default), nef, pmp" << std::endl;
+        std::cerr << "  method: pmp (default), manifold, nef" << std::endl;
         std::cerr << "  output_path_or_-: output path for mesh (CityJSON input) or FCB (FCB input)" << std::endl;
         std::cerr << "  use '-' as input to read FCB from stdin; use '-' as output only with FCB input" << std::endl;
         return 1;
@@ -123,7 +123,7 @@ int main(int argc, char* argv[]) {
     const char* output_path = argv[3];
     std::string height_attribute = argv[4];
     std::string id_attribute = argc > 5 ? argv[5] : "identificatie";
-    std::string method_str = argc > 6 ? argv[6] : "manifold";
+    std::string method_str = argc > 6 ? argv[6] : "pmp";
     bool undo_offset = false;
     const bool model_from_stdin = std::string_view(model_path) == "-";
     const bool output_to_stdout = std::string_view(output_path) == "-";
