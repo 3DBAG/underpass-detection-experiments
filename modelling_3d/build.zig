@@ -45,7 +45,7 @@ pub fn build(b: *std.Build) void {
     });
 
     const exe = b.addExecutable(.{
-        .name = "test_3d_intersection",
+        .name = "add_underpass",
         .root_module = exe_mod,
     });
 

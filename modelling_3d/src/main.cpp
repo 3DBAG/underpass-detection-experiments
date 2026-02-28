@@ -108,25 +108,25 @@ static std::vector<uint8_t> classify_triangle_semantics(
 int main(int argc, char* argv[]) {
     auto t_program_start = Clock::now();
 
-    if (argc < 4) {
+    if (argc < 5) {
         std::cerr << "Usage: " << argv[0]
-                  << " <cityjson_or_fcb_file> <ogr_source> <height_attribute> [id_attribute] [method] [output_fcb]" << std::endl;
+                  << " <ogr_source> <cityjson_or_fcb_input> <output_path_or_-> <height_attribute> [id_attribute] [method]" << std::endl;
         std::cerr << "  id_attribute default: identificatie" << std::endl;
         std::cerr << "  method: manifold (default), nef, pmp" << std::endl;
-        std::cerr << "  output_fcb: path for FCB output (only used when input is .fcb); use '-' for stdout" << std::endl;
-        std::cerr << "  cityjson_or_fcb_file: use '-' to read FCB from stdin" << std::endl;
+        std::cerr << "  output_path_or_-: output path for mesh (CityJSON input) or FCB (FCB input)" << std::endl;
+        std::cerr << "  use '-' as input to read FCB from stdin; use '-' as output only with FCB input" << std::endl;
         return 1;
     }
 
-    const char* model_path = argv[1];
-    const char* ogr_source_path = argv[2];
-    std::string height_attribute = argv[3];
-    std::string id_attribute = argc > 4 ? argv[4] : "identificatie";
-    std::string method_str = argc > 5 ? argv[5] : "manifold";
+    const char* ogr_source_path = argv[1];
+    const char* model_path = argv[2];
+    const char* output_path = argv[3];
+    std::string height_attribute = argv[4];
+    std::string id_attribute = argc > 5 ? argv[5] : "identificatie";
+    std::string method_str = argc > 6 ? argv[6] : "manifold";
     bool undo_offset = false;
-    const char* output_fcb_path = argc > 6 ? argv[6] : nullptr;
     const bool model_from_stdin = std::string_view(model_path) == "-";
-    const bool output_to_stdout = output_fcb_path != nullptr && std::string_view(output_fcb_path) == "-";
+    const bool output_to_stdout = std::string_view(output_path) == "-";
     std::ostream& log_out = output_to_stdout ? static_cast<std::ostream&>(std::cerr) : static_cast<std::ostream&>(std::cout);
 
     BooleanMethod method = BooleanMethod::Manifold;
@@ -328,22 +328,20 @@ int main(int argc, char* argv[]) {
     } else {
         // FCB streaming mode: read features, process matching ones, write all to output.
         ZfcbWriterHandle fcb_writer = nullptr;
-        if (output_fcb_path != nullptr) {
-            auto t_output_write_start = Clock::now();
-            if (output_to_stdout) {
-                fcb_writer = zfcb_writer_open_from_reader_no_index_fd(fcb, stdout_fd(), 0);
-            } else {
-                fcb_writer = zfcb_writer_open_from_reader_no_index(fcb, output_fcb_path);
-            }
-            auto t_output_write_end = Clock::now();
-            output_write_ms += t_output_write_end - t_output_write_start;
-            if (fcb_writer == nullptr) {
-                std::cerr << "Failed to open FCB writer: " << (output_to_stdout ? "stdout" : output_fcb_path) << std::endl;
-                zfcb_reader_destroy(fcb);
-                return 1;
-            }
-            log_out << std::format("FCB output: {}", output_to_stdout ? "stdout" : output_fcb_path) << std::endl;
+        auto t_output_write_start = Clock::now();
+        if (output_to_stdout) {
+            fcb_writer = zfcb_writer_open_from_reader_no_index_fd(fcb, stdout_fd(), 0);
+        } else {
+            fcb_writer = zfcb_writer_open_from_reader_no_index(fcb, output_path);
         }
+        auto t_output_write_end = Clock::now();
+        output_write_ms += t_output_write_end - t_output_write_start;
+        if (fcb_writer == nullptr) {
+            std::cerr << "Failed to open FCB writer: " << (output_to_stdout ? "stdout" : output_path) << std::endl;
+            zfcb_reader_destroy(fcb);
+            return 1;
+        }
+        log_out << std::format("FCB output: {}", output_to_stdout ? "stdout" : output_path) << std::endl;
 
         std::unordered_map<std::string_view, std::vector<size_t>> features_by_exact_id;
         std::vector<size_t> valid_feature_indices;
@@ -656,7 +654,7 @@ int main(int argc, char* argv[]) {
 
     log_out << std::format("Processed features: {}, skipped: {}", processed_count, skipped_count) << std::endl;
 
-    if (use_fcb_input && output_fcb_path != nullptr) {
+    if (use_fcb_input) {
         // FCB output was already written during streaming.
         if (processed_count == 0) {
             std::cerr << "Warning: no features were modified; output FCB is a copy of input." << std::endl;
@@ -675,7 +673,7 @@ int main(int argc, char* argv[]) {
         }
 
         auto t_output_write_start = Clock::now();
-        manifold::ExportMesh("house_with_underpass.ply", combined_result_meshgl, {});
+        manifold::ExportMesh(output_path, combined_result_meshgl, {});
         auto t_output_write_end = Clock::now();
         output_write_ms += t_output_write_end - t_output_write_start;
     }
@@ -697,7 +695,7 @@ int main(int argc, char* argv[]) {
     log_out << std::format("  datastructure conversion: {:.3f}", ds_conversion_ms.count()) << std::endl;
     log_out << std::format("  intersecting: {:.3f}", intersection_ms.count()) << std::endl;
     log_out << std::format("  output writing: {:.3f}", output_write_ms_value) << std::endl;
-    if (use_fcb_input && output_fcb_path != nullptr) {
+    if (use_fcb_input) {
         log_out << std::format("    changed features: {:.3f}", output_write_fcb_changed_ms.count()) << std::endl;
         log_out << std::format("    pass-through features: {:.3f}", output_write_fcb_passthrough_ms.count()) << std::endl;
     }

@@ -73,7 +73,7 @@
 
           shellHook = ''
             export NIX_CFLAGS_COMPILE=$(echo "$NIX_CFLAGS_COMPILE" | sed 's/-fmacro-prefix-map=[^ ]*//g')
-            echo "Entering development environment for test-3d-intersection"
+            echo "Entering development environment for add_underpass"
             echo ""
             echo "To download 3dbag CityJSON test tile (id 9-444-728):"
             echo "  just download-tile"
@@ -84,7 +84,7 @@
             echo "  (To compile in release mode add: -Doptimize=ReleaseFast)"
             echo ""
             echo "To run the program with sample data:"
-            echo "  ./zig-out/bin/test_3d_intersection ./sample_data/9-444-728.city.json ./sample_data/amsterdam_beemsterstraat_42.gpkg hoogte identificatie manifold"
+            echo "  ./zig-out/bin/add_underpass ./sample_data/amsterdam_beemsterstraat_42.gpkg ./sample_data/9-444-728.city.json out.ply hoogte identificatie manifold"
             echo ""
             echo "  (a number of .ply files will appear in the current working directory)"
           '';
@@ -92,7 +92,7 @@
 
         # Package definition
         packages.default = pkgs.stdenv.mkDerivation {
-          pname = "test-3d-intersection";
+          pname = "add-underpass";
           version = "0.1.0";
 
           src = ./.;
@@ -117,7 +117,7 @@
           installPhase = ''
             runHook preInstall
             mkdir -p $out/bin
-            cp zig-out/bin/test_3d_intersection $out/bin/
+            cp zig-out/bin/add_underpass $out/bin/
             runHook postInstall
           '';
 
