@@ -54,29 +54,6 @@ zig build -Doptimize=ReleaseFast
 
 ## Usage
 
-### Getting sample data
-
-Download a 3DBAG CityJSON tile (default tile: `9-444-728`):
-```bash
-just download-tile
-# or specify a tile id:
-just download-tile 10-284-556
-```
-
-The tile will be saved to `sample_data/<tile_id>.city.json`.
-
-### Converting CityJSON to FlatCityBuf
-
-Install the `fcb` CLI tool:
-```bash
-cargo install fcb
-```
-
-Convert the downloaded CityJSON tile to FCB for faster streaming:
-```bash
-fcb ser -i sample_data/9-444-728.city.json -o sample_data/9-444-728.fcb
-```
-
 ### Running
 
 With CityJSON input (outputs a mesh file, e.g. PLY):
@@ -95,6 +72,34 @@ With FCB input and FCB output (preserves all metadata, only replaces LoD 2.2 geo
   sample_data/9-444-728_sm.fcb \
   sample_data/out.fcb \
   hoogte identificatie manifold
+```
+
+Arguments: `<ogr_source> <cityjson_or_fcb_input> <output_path_or_-> <height_attr> [id_attr] [method]`
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `ogr_source` | — | Input OGR datasource path |
+| `cityjson_or_fcb_input` | — | Input model path (`.city.json/.city.jsonl/.fcb`) or `-` for FCB stdin |
+| `output_path_or_-` | — | Output path (mesh path for CityJSON input, FCB path for FCB input) or `-` for FCB stdout |
+| `height_attr` | — | OGR height attribute name |
+| `id_attr` | `identificatie` | Feature ID attribute name |
+| `method` | `manifold` | Boolean method: `manifold`, `nef`, or `pmp` |
+
+### Converting CityJSON to FlatCityBuf
+
+Install the [`fcb` CLI tool](https://github.com/cityjson/flatcitybuf/tree/main):
+```bash
+cargo install fcb
+```
+
+Convert the downloaded CityJSON tile to FCB for faster streaming:
+```bash
+fcb ser -i sample_data/9-444-728_sm.city.json -o sample_data/9-444-728_sm.fcb
+```
+
+To go from FCB to CityJSONL:
+```bash
+fcb deser -i sample_data/out.fcb -o sample_data/out.city.jsonl
 ```
 
 ### FCB piping with stdin/stdout
@@ -125,24 +130,6 @@ fcb ser -i sample_data/9-444-728.city.jsonl -o - \
     - \
     hoogte identificatie pmp \
 | fcb deser -i - -o sample_data/out.city.jsonl
-```
-
-Arguments: `<ogr_source> <cityjson_or_fcb_input> <output_path_or_-> <height_attr> [id_attr] [method]`
-
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `ogr_source` | — | Input OGR datasource path |
-| `cityjson_or_fcb_input` | — | Input model path (`.city.json/.city.jsonl/.fcb`) or `-` for FCB stdin |
-| `output_path_or_-` | — | Output path (mesh path for CityJSON input, FCB path for FCB input) or `-` for FCB stdout |
-| `height_attr` | — | OGR height attribute name |
-| `id_attr` | `identificatie` | Feature ID attribute name |
-| `method` | `manifold` | Boolean method: `manifold`, `nef`, or `pmp` |
-
-### Converting FCB output back to CityJSONL
-
-To inspect or visualize the output (e.g. with [ninja](https://ninja.cityjson.org/)):
-```bash
-fcb deser -i sample_data/out.fcb -o sample_data/out.city.jsonl
 ```
 
 ## Project Structure
