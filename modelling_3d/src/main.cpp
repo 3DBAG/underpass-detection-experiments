@@ -162,6 +162,9 @@ int main(int argc, char* argv[]) {
     std::chrono::duration<double, std::milli> ds_conversion_ms{0.0};
     std::chrono::duration<double, std::milli> intersection_ms{0.0};
     std::chrono::duration<double, std::milli> output_write_ms{0.0};
+    std::chrono::duration<double, std::milli> output_write_fcb_changed_ms{0.0};
+    std::chrono::duration<double, std::milli> output_write_fcb_passthrough_ms{0.0};
+    std::chrono::duration<double, std::milli> fcb_stream_read_ms{0.0};
 
     if (!use_fcb_input) {
         for (size_t i = 0; i < polygon_features.size(); ++i) {
@@ -209,8 +212,6 @@ int main(int argc, char* argv[]) {
                 global_offset_y = verts[1];
                 global_offset_z = verts[2];
                 global_offset_set = true;
-                std::cout << std::format("Global offset set to ({}, {}, {})",
-                                         global_offset_x, global_offset_y, global_offset_z) << std::endl;
             }
 
             auto t_conversion_start = Clock::now();
@@ -333,7 +334,10 @@ int main(int argc, char* argv[]) {
         while (true) {
             const char* peek_id_ptr = nullptr;
             size_t peek_id_len = 0;
+            auto t_stream_read_start = Clock::now();
             int peek_result = zfcb_peek_next_id(fcb, &peek_id_ptr, &peek_id_len);
+            auto t_stream_read_end = Clock::now();
+            fcb_stream_read_ms += t_stream_read_end - t_stream_read_start;
             if (peek_result < 0) {
                 std::cerr << "FlatCityBuf stream error while peeking next feature id" << std::endl;
                 stream_error = true;
@@ -351,7 +355,9 @@ int main(int argc, char* argv[]) {
                     auto t_output_write_start = Clock::now();
                     int write_result = zfcb_writer_write_pending_raw(fcb, fcb_writer);
                     auto t_output_write_end = Clock::now();
-                    output_write_ms += t_output_write_end - t_output_write_start;
+                    auto d_output_write = t_output_write_end - t_output_write_start;
+                    output_write_ms += d_output_write;
+                    output_write_fcb_passthrough_ms += d_output_write;
                     if (write_result < 0) {
                         std::cerr << "FlatCityBuf stream error while writing pass-through feature" << std::endl;
                         stream_error = true;
@@ -361,7 +367,10 @@ int main(int argc, char* argv[]) {
                         break;
                     }
                 } else {
+                    auto t_stream_read_start = Clock::now();
                     int skip_result = zfcb_skip_next(fcb);
+                    auto t_stream_read_end = Clock::now();
+                    fcb_stream_read_ms += t_stream_read_end - t_stream_read_start;
                     if (skip_result < 0) {
                         std::cerr << "FlatCityBuf stream error while skipping feature" << std::endl;
                         stream_error = true;
@@ -374,7 +383,10 @@ int main(int argc, char* argv[]) {
                 continue;
             }
 
+            auto t_stream_read_start_next = Clock::now();
             int next_result = zfcb_next(fcb);
+            auto t_stream_read_end_next = Clock::now();
+            fcb_stream_read_ms += t_stream_read_end_next - t_stream_read_start_next;
             if (next_result < 0) {
                 std::cerr << "FlatCityBuf stream error while decoding feature" << std::endl;
                 stream_error = true;
@@ -401,7 +413,9 @@ int main(int argc, char* argv[]) {
                         auto t_output_write_start = Clock::now();
                         zfcb_writer_write_current_raw(fcb, fcb_writer);
                         auto t_output_write_end = Clock::now();
-                        output_write_ms += t_output_write_end - t_output_write_start;
+                        auto d_output_write = t_output_write_end - t_output_write_start;
+                        output_write_ms += d_output_write;
+                        output_write_fcb_passthrough_ms += d_output_write;
                     }
                     continue;
                 }
@@ -414,7 +428,10 @@ int main(int argc, char* argv[]) {
             }
 
             Surface_mesh house_sm;
+            auto t_stream_read_start_mesh = Clock::now();
             if (!load_fcb_feature_mesh(fcb, next_id, house_sm, global_offset_x, global_offset_y, global_offset_z)) {
+                auto t_stream_read_end_mesh = Clock::now();
+                fcb_stream_read_ms += t_stream_read_end_mesh - t_stream_read_start_mesh;
                 for (size_t feature_idx : matched_indices) {
                     seen_feature[feature_idx] = true;
                     const auto& feature = polygon_features[feature_idx];
@@ -427,10 +444,14 @@ int main(int argc, char* argv[]) {
                     auto t_output_write_start = Clock::now();
                     zfcb_writer_write_current_raw(fcb, fcb_writer);
                     auto t_output_write_end = Clock::now();
-                    output_write_ms += t_output_write_end - t_output_write_start;
+                    auto d_output_write = t_output_write_end - t_output_write_start;
+                    output_write_ms += d_output_write;
+                    output_write_fcb_passthrough_ms += d_output_write;
                 }
                 continue;
             }
+            auto t_stream_read_end_mesh = Clock::now();
+            fcb_stream_read_ms += t_stream_read_end_mesh - t_stream_read_start_mesh;
 
             // Track whether any polygon feature succeeded for this FCB feature.
             bool any_succeeded = false;
@@ -543,21 +564,27 @@ int main(int argc, char* argv[]) {
                         last_result_meshgl.triVerts.data(), last_result_meshgl.triVerts.size(),
                         semantics.data(), semantics.size());
                     auto t_output_write_end = Clock::now();
-                    output_write_ms += t_output_write_end - t_output_write_start;
+                    auto d_output_write = t_output_write_end - t_output_write_start;
+                    output_write_ms += d_output_write;
+                    output_write_fcb_changed_ms += d_output_write;
                     if (write_result < 0) {
                         std::cerr << std::format("Warning: failed to write modified feature '{}' to FCB, writing raw instead",
                                                  feature_id_str) << std::endl;
                         auto t_fallback_write_start = Clock::now();
                         zfcb_writer_write_current_raw(fcb, fcb_writer);
                         auto t_fallback_write_end = Clock::now();
-                        output_write_ms += t_fallback_write_end - t_fallback_write_start;
+                        auto d_output_write_fallback = t_fallback_write_end - t_fallback_write_start;
+                        output_write_ms += d_output_write_fallback;
+                        output_write_fcb_passthrough_ms += d_output_write_fallback;
                     }
                 } else {
                     // No successful boolean: write original feature.
                     auto t_output_write_start = Clock::now();
                     zfcb_writer_write_current_raw(fcb, fcb_writer);
                     auto t_output_write_end = Clock::now();
-                    output_write_ms += t_output_write_end - t_output_write_start;
+                    auto d_output_write = t_output_write_end - t_output_write_start;
+                    output_write_ms += d_output_write;
+                    output_write_fcb_passthrough_ms += d_output_write;
                 }
             }
         }
@@ -618,7 +645,8 @@ int main(int argc, char* argv[]) {
     }
 
     auto ogr_read_ms = std::chrono::duration<double, std::milli>(t_ogr_read_end - t_ogr_read_start).count();
-    auto model_read_ms = std::chrono::duration<double, std::milli>(t_model_read_end - t_model_read_start).count();
+    auto model_read_ms = std::chrono::duration<double, std::milli>(t_model_read_end - t_model_read_start).count() +
+                         fcb_stream_read_ms.count();
     auto output_write_ms_value = output_write_ms.count();
     auto total_ms = std::chrono::duration<double, std::milli>(Clock::now() - t_program_start).count();
     auto accounted_ms = model_read_ms + ogr_read_ms + ds_conversion_ms.count() + intersection_ms.count() + output_write_ms_value;
@@ -633,6 +661,10 @@ int main(int argc, char* argv[]) {
     std::cout << std::format("  datastructure conversion: {:.3f}", ds_conversion_ms.count()) << std::endl;
     std::cout << std::format("  intersecting: {:.3f}", intersection_ms.count()) << std::endl;
     std::cout << std::format("  output writing: {:.3f}", output_write_ms_value) << std::endl;
+    if (use_fcb_input && output_fcb_path != nullptr) {
+        std::cout << std::format("    changed features: {:.3f}", output_write_fcb_changed_ms.count()) << std::endl;
+        std::cout << std::format("    pass-through features: {:.3f}", output_write_fcb_passthrough_ms.count()) << std::endl;
+    }
     std::cout << std::format("  other: {:.3f}", other_ms) << std::endl;
     std::cout << std::format("  total: {:.3f}", total_ms) << std::endl;
 
