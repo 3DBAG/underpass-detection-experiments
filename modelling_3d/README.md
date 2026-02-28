@@ -1,6 +1,6 @@
 # add_underpass
 
-A project for 3D geometry intersection testing using Manifold and optional Rerun visualization.
+A project to carve out underpasses from 2.5D building models by using boolean mesh 
 
 ### Limitations
 - Mesh processing:
@@ -19,7 +19,9 @@ Build directly with Nix:
 ```bash
 nix build
 ```
-The executable will be at `./result/bin/add_underpass`
+The executable will be at `./result/bin/add_underpass`.
+
+This will always rebuild from scratch, so it's recommended to use the development environment for incremental builds.
 
 ### Development Build
 

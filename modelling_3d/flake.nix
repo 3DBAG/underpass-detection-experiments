@@ -1,5 +1,5 @@
 {
-  description = "A C++ project for 3D intersection testing";
+  description = "Carve out underpasses from 3D building models";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -69,8 +69,6 @@
           # Environment variables
           GDAL_DATA = "${pkgs.gdal}/share/gdal";
           PROJ_LIB = "${pkgs.proj}/share/proj";
-          # CMAKE_MODULE_PATH="${pkgs.geogram.dev}/lib/cmake";
-          # CMAKE_PREFIX_PATH="${manifoldPkg}/lib/cmake;${pkgs.clipper2}/lib/cmake";
 
           shellHook = ''
             export NIX_CFLAGS_COMPILE=$(echo "$NIX_CFLAGS_COMPILE" | sed 's/-fmacro-prefix-map=[^ ]*//g')
