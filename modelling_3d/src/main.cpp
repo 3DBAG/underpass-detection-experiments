@@ -161,6 +161,7 @@ int main(int argc, char* argv[]) {
     double global_offset_z = 0.0;
     std::chrono::duration<double, std::milli> ds_conversion_ms{0.0};
     std::chrono::duration<double, std::milli> intersection_ms{0.0};
+    std::chrono::duration<double, std::milli> output_write_ms{0.0};
 
     if (!use_fcb_input) {
         for (size_t i = 0; i < polygon_features.size(); ++i) {
@@ -295,7 +296,10 @@ int main(int argc, char* argv[]) {
         // FCB streaming mode: read features, process matching ones, write all to output.
         ZfcbWriterHandle fcb_writer = nullptr;
         if (output_fcb_path != nullptr) {
+            auto t_output_write_start = Clock::now();
             fcb_writer = zfcb_writer_open_from_reader_no_index(fcb, output_fcb_path);
+            auto t_output_write_end = Clock::now();
+            output_write_ms += t_output_write_end - t_output_write_start;
             if (fcb_writer == nullptr) {
                 std::cerr << "Failed to open FCB writer: " << output_fcb_path << std::endl;
                 zfcb_reader_destroy(fcb);
@@ -344,7 +348,10 @@ int main(int argc, char* argv[]) {
             if (exact_hint_it == features_by_exact_id.end()) {
                 // Non-matching feature: pass through raw to output.
                 if (fcb_writer != nullptr) {
+                    auto t_output_write_start = Clock::now();
                     int write_result = zfcb_writer_write_pending_raw(fcb, fcb_writer);
+                    auto t_output_write_end = Clock::now();
+                    output_write_ms += t_output_write_end - t_output_write_start;
                     if (write_result < 0) {
                         std::cerr << "FlatCityBuf stream error while writing pass-through feature" << std::endl;
                         stream_error = true;
@@ -391,7 +398,10 @@ int main(int argc, char* argv[]) {
                         ++skipped_count;
                     }
                     if (fcb_writer != nullptr) {
+                        auto t_output_write_start = Clock::now();
                         zfcb_writer_write_current_raw(fcb, fcb_writer);
+                        auto t_output_write_end = Clock::now();
+                        output_write_ms += t_output_write_end - t_output_write_start;
                     }
                     continue;
                 }
@@ -414,7 +424,10 @@ int main(int argc, char* argv[]) {
                 }
                 // Write unmodified feature to output.
                 if (fcb_writer != nullptr) {
+                    auto t_output_write_start = Clock::now();
                     zfcb_writer_write_current_raw(fcb, fcb_writer);
+                    auto t_output_write_end = Clock::now();
+                    output_write_ms += t_output_write_end - t_output_write_start;
                 }
                 continue;
             }
@@ -522,26 +535,38 @@ int main(int argc, char* argv[]) {
                         last_result_meshgl, last_house_min_z, last_underpass_z);
 
                     std::string feature_id_str(next_id);
+                    auto t_output_write_start = Clock::now();
                     int write_result = zfcb_writer_write_current_replaced_lod22(
                         fcb, fcb_writer,
                         feature_id_str.c_str(), feature_id_str.size(),
                         world_verts.data(), num_verts,
                         last_result_meshgl.triVerts.data(), last_result_meshgl.triVerts.size(),
                         semantics.data(), semantics.size());
+                    auto t_output_write_end = Clock::now();
+                    output_write_ms += t_output_write_end - t_output_write_start;
                     if (write_result < 0) {
                         std::cerr << std::format("Warning: failed to write modified feature '{}' to FCB, writing raw instead",
                                                  feature_id_str) << std::endl;
+                        auto t_fallback_write_start = Clock::now();
                         zfcb_writer_write_current_raw(fcb, fcb_writer);
+                        auto t_fallback_write_end = Clock::now();
+                        output_write_ms += t_fallback_write_end - t_fallback_write_start;
                     }
                 } else {
                     // No successful boolean: write original feature.
+                    auto t_output_write_start = Clock::now();
                     zfcb_writer_write_current_raw(fcb, fcb_writer);
+                    auto t_output_write_end = Clock::now();
+                    output_write_ms += t_output_write_end - t_output_write_start;
                 }
             }
         }
 
         if (fcb_writer != nullptr) {
+            auto t_output_write_start = Clock::now();
             zfcb_writer_destroy(fcb_writer);
+            auto t_output_write_end = Clock::now();
+            output_write_ms += t_output_write_end - t_output_write_start;
         }
 
         if (stream_error) {
@@ -568,7 +593,6 @@ int main(int argc, char* argv[]) {
 
     std::cout << std::format("Processed features: {}, skipped: {}", processed_count, skipped_count) << std::endl;
 
-    auto t_output_write_start = Clock::now();
     if (use_fcb_input && output_fcb_path != nullptr) {
         // FCB output was already written during streaming.
         if (processed_count == 0) {
@@ -587,21 +611,29 @@ int main(int argc, char* argv[]) {
             apply_meshgl_offset(combined_result_meshgl, global_offset_x, global_offset_y, global_offset_z);
         }
 
+        auto t_output_write_start = Clock::now();
         manifold::ExportMesh("house_with_underpass.ply", combined_result_meshgl, {});
+        auto t_output_write_end = Clock::now();
+        output_write_ms += t_output_write_end - t_output_write_start;
     }
-    auto t_output_write_end = Clock::now();
 
     auto ogr_read_ms = std::chrono::duration<double, std::milli>(t_ogr_read_end - t_ogr_read_start).count();
     auto model_read_ms = std::chrono::duration<double, std::milli>(t_model_read_end - t_model_read_start).count();
-    auto output_write_ms = std::chrono::duration<double, std::milli>(t_output_write_end - t_output_write_start).count();
-    auto total_ms = std::chrono::duration<double, std::milli>(t_output_write_end - t_program_start).count();
+    auto output_write_ms_value = output_write_ms.count();
+    auto total_ms = std::chrono::duration<double, std::milli>(Clock::now() - t_program_start).count();
+    auto accounted_ms = model_read_ms + ogr_read_ms + ds_conversion_ms.count() + intersection_ms.count() + output_write_ms_value;
+    auto other_ms = total_ms - accounted_ms;
+    if (other_ms < 0.0) {
+        other_ms = 0.0;
+    }
 
     std::cout << "Timing profile (ms):" << std::endl;
     std::cout << std::format("  model reading: {:.3f}", model_read_ms) << std::endl;
     std::cout << std::format("  ogr reading: {:.3f}", ogr_read_ms) << std::endl;
     std::cout << std::format("  datastructure conversion: {:.3f}", ds_conversion_ms.count()) << std::endl;
     std::cout << std::format("  intersecting: {:.3f}", intersection_ms.count()) << std::endl;
-    std::cout << std::format("  output writing: {:.3f}", output_write_ms) << std::endl;
+    std::cout << std::format("  output writing: {:.3f}", output_write_ms_value) << std::endl;
+    std::cout << std::format("  other: {:.3f}", other_ms) << std::endl;
     std::cout << std::format("  total: {:.3f}", total_ms) << std::endl;
 
     return 0;
