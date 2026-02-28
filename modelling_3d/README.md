@@ -58,15 +58,6 @@ zig build -Doptimize=ReleaseFast
 
 ### Running
 
-With CityJSON input (outputs a mesh file, e.g. PLY):
-```bash
-./zig-out/bin/add_underpass \
-  sample_data/amsterdam_beemsterstraat_42.gpkg \
-  sample_data/9-444-728.city.json \
-  sample_data/out.ply \
-  hoogte identificatie manifold
-```
-
 With FCB input and FCB output (preserves all metadata, only replaces LoD 2.2 geometry):
 ```bash
 ./zig-out/bin/add_underpass \
@@ -76,13 +67,13 @@ With FCB input and FCB output (preserves all metadata, only replaces LoD 2.2 geo
   hoogte identificatie manifold
 ```
 
-Arguments: `<ogr_source> <cityjson_or_fcb_input> <output_path_or_-> <height_attr> [id_attr] [method]`
+Arguments: `<ogr_source> <fcb_input> <fcb_output> <height_attr> [id_attr] [method]`
 
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `ogr_source` | — | Input OGR datasource path that contains 2D underpass polygons |
-| `cityjson_or_fcb_input` | — | Input path with 2.5D building model (`.city.json/.city.jsonl/.fcb`) or `-` for FCB stdin |
-| `output_path_or_-` | — | Output path (mesh path for CityJSON input, FCB path for FCB input) or `-` for FCB stdout |
+| `fcb_input` | — | Input path with 2.5D building model (`/.fcb`) or `-` for FCB stdin |
+| `fcb_output-` | — | Output path; FCB path or `-` for FCB stdout |
 | `height_attr` | — | OGR height attribute name |
 | `id_attr` | `identificatie` | OGR Feature ID attribute name. This is used to match with ID of the building models. |
 | `method` | `manifold` | Boolean method: `manifold`, `nef`, `pmp`, or `geogram` |
@@ -144,7 +135,13 @@ fcb ser -i sample_data/9-444-728.city.jsonl -o - \
 ├── flake.lock         # Nix flake lock file
 ├── justfile           # Task runner recipes
 ├── src/               # C++ source code
-│   ├── main.cpp               # Main entry point
+│   ├── BooleanOps.cpp         # Boolean operation backends (Manifold/CGAL/Geogram)
+│   ├── BooleanOps.h
+│   ├── MeshConversion.cpp     # Surface_mesh <-> Manifold MeshGL conversion helpers
+│   ├── MeshConversion.h
+│   ├── ModelLoaders.cpp       # Mesh loaders for FlatCityBuf features
+│   ├── ModelLoaders.h
+│   ├── main.cpp               # Main entry point (FCB streaming pipeline)
 │   ├── OGRVectorReader.cpp    # OGR/GDAL vector data reader
 │   ├── OGRVectorReader.h
 │   ├── PolygonExtruder.cpp    # Polygon extrusion to 3D
