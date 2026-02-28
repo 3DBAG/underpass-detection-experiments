@@ -112,7 +112,7 @@ int main(int argc, char* argv[]) {
         std::cerr << "Usage: " << argv[0]
                   << " <ogr_source> <cityjson_or_fcb_input> <output_path_or_-> <height_attribute> [id_attribute] [method]" << std::endl;
         std::cerr << "  id_attribute default: identificatie" << std::endl;
-        std::cerr << "  method: pmp (default), manifold, nef" << std::endl;
+        std::cerr << "  method: pmp (default), manifold, nef, geogram" << std::endl;
         std::cerr << "  output_path_or_-: output path for mesh (CityJSON input) or FCB (FCB input)" << std::endl;
         std::cerr << "  use '-' as input to read FCB from stdin; use '-' as output only with FCB input" << std::endl;
         return 1;
@@ -134,8 +134,10 @@ int main(int argc, char* argv[]) {
         method = BooleanMethod::CgalNef;
     } else if (method_str == "pmp") {
         method = BooleanMethod::CgalPMP;
+    } else if (method_str == "geogram") {
+        method = BooleanMethod::Geogram;
     } else if (method_str != "manifold") {
-        std::cerr << "Unknown method: " << method_str << " (use manifold, nef, or pmp)" << std::endl;
+        std::cerr << "Unknown method: " << method_str << " (use manifold, nef, pmp, or geogram)" << std::endl;
         return 1;
     }
 
@@ -305,6 +307,10 @@ int main(int argc, char* argv[]) {
                 result_meshgl = result.GetMeshGL();
             } else if (method == BooleanMethod::CgalNef) {
                 Surface_mesh result_sm = nef_boolean_difference(house_sm, underpass_sm);
+                CGAL::Polygon_mesh_processing::triangulate_faces(result_sm);
+                result_meshgl = surface_mesh_to_meshgl(result_sm, false);
+            } else if (method == BooleanMethod::Geogram) {
+                Surface_mesh result_sm = geogram_boolean_difference(house_sm, underpass_sm);
                 CGAL::Polygon_mesh_processing::triangulate_faces(result_sm);
                 result_meshgl = surface_mesh_to_meshgl(result_sm, false);
             } else {
@@ -547,6 +553,10 @@ int main(int argc, char* argv[]) {
                     result_meshgl = result.GetMeshGL();
                 } else if (method == BooleanMethod::CgalNef) {
                     Surface_mesh result_sm = nef_boolean_difference(house_sm, underpass_sm);
+                    CGAL::Polygon_mesh_processing::triangulate_faces(result_sm);
+                    result_meshgl = surface_mesh_to_meshgl(result_sm, false);
+                } else if (method == BooleanMethod::Geogram) {
+                    Surface_mesh result_sm = geogram_boolean_difference(house_sm, underpass_sm);
                     CGAL::Polygon_mesh_processing::triangulate_faces(result_sm);
                     result_meshgl = surface_mesh_to_meshgl(result_sm, false);
                 } else {

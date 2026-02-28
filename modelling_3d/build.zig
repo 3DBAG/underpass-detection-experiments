@@ -1,5 +1,49 @@
 const std = @import("std");
 
+fn addGeogramIncludePathFromNixFlags(b: *std.Build, module: *std.Build.Module) void {
+    if (std.process.getEnvVarOwned(b.allocator, "NIX_CFLAGS_COMPILE")) |nix_cflags| {
+        defer b.allocator.free(nix_cflags);
+
+        var it = std.mem.tokenizeAny(u8, nix_cflags, " \t\r\n");
+        var expect_path = false;
+        while (it.next()) |token| {
+            if (expect_path) {
+                if (std.mem.indexOf(u8, token, "geogram-") != null and std.mem.endsWith(u8, token, "/include")) {
+                    const geogram_include = std.fmt.allocPrint(b.allocator, "{s}/geogram1", .{token}) catch @panic("OOM");
+                    module.addSystemIncludePath(.{ .cwd_relative = geogram_include });
+                    return;
+                }
+                expect_path = false;
+                continue;
+            }
+
+            if (std.mem.eql(u8, token, "-isystem") or std.mem.eql(u8, token, "-I")) {
+                expect_path = true;
+                continue;
+            }
+
+            if (std.mem.startsWith(u8, token, "-isystem")) {
+                const path = token["-isystem".len..];
+                if (path.len > 0 and std.mem.indexOf(u8, path, "geogram-") != null and std.mem.endsWith(u8, path, "/include")) {
+                    const geogram_include = std.fmt.allocPrint(b.allocator, "{s}/geogram1", .{path}) catch @panic("OOM");
+                    module.addSystemIncludePath(.{ .cwd_relative = geogram_include });
+                    return;
+                }
+                continue;
+            }
+
+            if (std.mem.startsWith(u8, token, "-I")) {
+                const path = token[2..];
+                if (path.len > 0 and std.mem.indexOf(u8, path, "geogram-") != null and std.mem.endsWith(u8, path, "/include")) {
+                    const geogram_include = std.fmt.allocPrint(b.allocator, "{s}/geogram1", .{path}) catch @panic("OOM");
+                    module.addSystemIncludePath(.{ .cwd_relative = geogram_include });
+                    return;
+                }
+            }
+        }
+    } else |_| {}
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -48,6 +92,7 @@ pub fn build(b: *std.Build) void {
         .name = "add_underpass",
         .root_module = exe_mod,
     });
+    addGeogramIncludePathFromNixFlags(b, exe.root_module);
 
     // 1. C++ Setup
     exe.root_module.addCSourceFile(.{
@@ -82,6 +127,7 @@ pub fn build(b: *std.Build) void {
     // 2. Linking System Libraries
     // Note: Zig automatically picks up NIX_CFLAGS_COMPILE and NIX_LDFLAGS from the environment
     exe.root_module.linkSystemLibrary("manifold", .{});
+    exe.root_module.linkSystemLibrary("geogram", .{});
 
     // CGAL dependencies
     exe.root_module.linkSystemLibrary("gmp", .{});

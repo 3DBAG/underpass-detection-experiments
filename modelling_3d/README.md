@@ -6,7 +6,6 @@ A project for 3D geometry intersection testing using Manifold and optional Rerun
 - Mesh processing:
   - [ ] Output meshes are triangulated
   - [ ] currently only processes the LoD2.2 geometries
-  - [ ] geogram boolean difference method not implemented and untested
 
 ## Getting Started
 
@@ -83,7 +82,7 @@ Arguments: `<ogr_source> <cityjson_or_fcb_input> <output_path_or_-> <height_attr
 | `output_path_or_-` | — | Output path (mesh path for CityJSON input, FCB path for FCB input) or `-` for FCB stdout |
 | `height_attr` | — | OGR height attribute name |
 | `id_attr` | `identificatie` | Feature ID attribute name |
-| `method` | `manifold` | Boolean method: `manifold`, `nef`, or `pmp` |
+| `method` | `manifold` | Boolean method: `manifold`, `nef`, `pmp`, or `geogram` |
 
 ### Converting CityJSON to FlatCityBuf
 
