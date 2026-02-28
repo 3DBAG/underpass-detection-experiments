@@ -92,7 +92,7 @@ With FCB input and FCB output (preserves all metadata, only replaces LoD 2.2 geo
 ```bash
 ./zig-out/bin/add_underpass \
   sample_data/amsterdam_beemsterstraat_42.gpkg \
-  sample_data/9-444-728.fcb \
+  sample_data/9-444-728_sm.fcb \
   sample_data/out.fcb \
   hoogte identificatie manifold
 ```
@@ -110,7 +110,7 @@ FCB file -> stdout (pipe to deser):
 ```bash
 ./zig-out/bin/add_underpass \
   sample_data/amsterdam_beemsterstraat_42.gpkg \
-  sample_data/9-444-728.fcb \
+  sample_data/9-444-728_sm.fcb \
   - \
   hoogte identificatie pmp \
 | fcb deser -i - -o sample_data/out.city.jsonl
