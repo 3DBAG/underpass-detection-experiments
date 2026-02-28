@@ -1,11 +1,12 @@
 # add_underpass
 
-A project to carve out underpasses from 2.5D building models by using boolean mesh 
+A program to carve out underpasses from 2.5D building models by using boolean mesh operations. 2D underpass polygons are read from an OGR source and extruded using a height attribute. Then the boolean mesh difference between 2.5D building model and extruded underpass polygons is computed.
 
 ### Limitations
 - Mesh processing:
-  - [ ] Output meshes are triangulated
+  - [ ] Output meshes get triangulated, even if input has polygonal faces.
   - [ ] currently only processes the LoD2.2 geometries
+  - [ ] assumes input building features are structured as outputed by roofer/3DBAG.
 
 ## Getting Started
 
@@ -79,11 +80,11 @@ Arguments: `<ogr_source> <cityjson_or_fcb_input> <output_path_or_-> <height_attr
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `ogr_source` | — | Input OGR datasource path |
-| `cityjson_or_fcb_input` | — | Input model path (`.city.json/.city.jsonl/.fcb`) or `-` for FCB stdin |
+| `ogr_source` | — | Input OGR datasource path that contains 2D underpass polygons |
+| `cityjson_or_fcb_input` | — | Input path with 2.5D building model (`.city.json/.city.jsonl/.fcb`) or `-` for FCB stdin |
 | `output_path_or_-` | — | Output path (mesh path for CityJSON input, FCB path for FCB input) or `-` for FCB stdout |
 | `height_attr` | — | OGR height attribute name |
-| `id_attr` | `identificatie` | Feature ID attribute name |
+| `id_attr` | `identificatie` | OGR Feature ID attribute name. This is used to match with ID of the building models. |
 | `method` | `manifold` | Boolean method: `manifold`, `nef`, `pmp`, or `geogram` |
 
 ### Converting CityJSON to FlatCityBuf
@@ -157,12 +158,3 @@ fcb ser -i sample_data/9-444-728.city.jsonl -o - \
 │   └── include/
 └── sample_data/       # Sample input data
 ```
-
-## Dependencies
-
-Managed via Nix flake:
-- **manifold** - 3D geometry processing
-- **CGAL** - 3D geometry processing
-- **OGR** - Vector data reader
-- **rerun** - Visualization (optional)
-- **zityjson** - CityJSON parser (built-in)
