@@ -9,11 +9,11 @@ pub fn main() !void {
     var cj = try zj.CityJSON.init(allocator);
     defer cj.deinit();
 
-    try cj.load("twobuildings.city.json");
+    try cj.load("../sample_data/9-444-728.city.jsonl");
 
-    for (cj.objects.keys(), cj.objects.values()) |key, mesh| {
-        std.debug.print("Mesh {s} has {d} faces\n", .{ key, mesh.faces.items.len });
-        std.debug.print("Mesh {s} has {d} vertices\n", .{ key, mesh.vertices.items.len/3 });
+    for (cj.objects.keys(), cj.objects.values()) |key, object| {
+        std.debug.print("Object {s} has {d} faces\n", .{ key, object.geometries.len });
+        // std.debug.print("Object {s} has {d} vertices\n", .{ key, mesh.vertices.items.len/3 });
     }
 }
 

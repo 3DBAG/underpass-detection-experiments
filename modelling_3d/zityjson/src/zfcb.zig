@@ -20,9 +20,14 @@ const VT_FEATURE_VERTICES: u16 = 8;
 const VT_OBJECT_TYPE: u16 = 4;
 const VT_OBJECT_EXTENSION_TYPE: u16 = 6;
 const VT_OBJECT_ID: u16 = 8;
+const VT_OBJECT_GEOGRAPHICAL_EXTENT: u16 = 10;
 const VT_OBJECT_GEOMETRY: u16 = 12;
+const VT_OBJECT_GEOMETRY_INSTANCES: u16 = 14;
 const VT_OBJECT_ATTRIBUTES: u16 = 16;
 const VT_OBJECT_COLUMNS: u16 = 18;
+const VT_OBJECT_CHILDREN: u16 = 20;
+const VT_OBJECT_CHILDREN_ROLES: u16 = 22;
+const VT_OBJECT_PARENTS: u16 = 24;
 
 const VT_GEOMETRY_TYPE: u16 = 4;
 const VT_GEOMETRY_LOD: u16 = 6;
@@ -33,6 +38,7 @@ const VT_GEOMETRY_STRINGS: u16 = 14;
 const VT_GEOMETRY_BOUNDARIES: u16 = 16;
 const VT_GEOMETRY_SEMANTICS: u16 = 18;
 const VT_GEOMETRY_SEMANTICS_OBJECTS: u16 = 20;
+const VT_SEMANTIC_OBJECT_TYPE: u16 = 4;
 
 const NODE_ITEM_SIZE_BYTES: u64 = 40;
 
@@ -40,6 +46,9 @@ const EMPTY_COLUMNS: []const ColumnSchema = &[_]ColumnSchema{};
 const EMPTY_OBJECTS: []const ObjectView = &[_]ObjectView{};
 const EMPTY_VERTICES: []const [3]f64 = &[_][3]f64{};
 const EMPTY_U32: []const u32 = &[_]u32{};
+const EMPTY_U8: []const u8 = &[_]u8{};
+const EMPTY_STRINGS: []const []const u8 = &[_][]const u8{};
+const EMPTY_U32_MUT: []u32 = @constCast(&[_]u32{});
 
 pub const Transform = struct {
     scale: [3]f64 = .{ 1.0, 1.0, 1.0 },
@@ -160,6 +169,8 @@ pub const GeometryView = struct {
     surfaces: []const u32,
     strings: []const u32,
     boundaries: []const u32,
+    semantics: []const u32,
+    semantics_objects: []const u8,
 
     pub fn ringCount(self: GeometryView) usize {
         return self.strings.len;
@@ -213,6 +224,7 @@ pub const Reader = struct {
     scratch_columns: std.ArrayList(ColumnSchema) = .{},
     scratch_column_types: std.ArrayList(ColumnTypeByIndex) = .{},
     scratch_u32: std.ArrayList(u32) = .{},
+    scratch_u8: std.ArrayList(u8) = .{},
 
     pending_loaded: bool = false,
     pending_id_owned: ?[]u8 = null,
@@ -250,6 +262,7 @@ pub const Reader = struct {
         self.scratch_columns.deinit(self.allocator);
         self.scratch_column_types.deinit(self.allocator);
         self.scratch_u32.deinit(self.allocator);
+        self.scratch_u8.deinit(self.allocator);
 
         if (self.pending_id_owned) |id| self.allocator.free(id);
         if (self.owns_root_columns) self.allocator.free(self.root_columns);
@@ -377,6 +390,7 @@ pub const Reader = struct {
         self.scratch_columns.clearRetainingCapacity();
         self.scratch_column_types.clearRetainingCapacity();
         self.scratch_u32.clearRetainingCapacity();
+        self.scratch_u8.clearRetainingCapacity();
 
         const feature_table = try fb.sizePrefixedRootTable(self.feature_buf.items);
         const feature_id = try fb.getRequiredString(self.feature_buf.items, feature_table, VT_FEATURE_ID);
@@ -388,6 +402,7 @@ pub const Reader = struct {
         try self.scratch_geometries.ensureTotalCapacity(self.allocator, totals.geometry_count);
         try self.scratch_attributes.ensureTotalCapacity(self.allocator, totals.attribute_count);
         try self.scratch_u32.ensureTotalCapacity(self.allocator, totals.u32_count);
+        try self.scratch_u8.ensureTotalCapacity(self.allocator, totals.semantic_object_count);
 
         try self.decodeVertices(feature_table);
         try self.decodeObjects(feature_table);
@@ -404,6 +419,7 @@ pub const Reader = struct {
         geometry_count: usize = 0,
         attribute_count: usize = 0,
         u32_count: usize = 0,
+        semantic_object_count: usize = 0,
     };
 
     const ColumnTypeByIndex = struct {
@@ -459,10 +475,14 @@ pub const Reader = struct {
             VT_GEOMETRY_SURFACES,
             VT_GEOMETRY_STRINGS,
             VT_GEOMETRY_BOUNDARIES,
+            VT_GEOMETRY_SEMANTICS,
         }) |field| {
             if (try fb.getVectorInfo(self.feature_buf.items, geom_table, field)) |vec| {
                 totals.u32_count = try checkedAdd(totals.u32_count, vec.len);
             }
+        }
+        if (try fb.getVectorInfo(self.feature_buf.items, geom_table, VT_GEOMETRY_SEMANTICS_OBJECTS)) |vec| {
+            totals.semantic_object_count = try checkedAdd(totals.semantic_object_count, vec.len);
         }
     }
 
@@ -542,6 +562,8 @@ pub const Reader = struct {
         const surfaces = try self.appendVectorU32(self.feature_buf.items, geom_table, VT_GEOMETRY_SURFACES);
         const strings = try self.appendVectorU32(self.feature_buf.items, geom_table, VT_GEOMETRY_STRINGS);
         const boundaries = try self.appendVectorU32(self.feature_buf.items, geom_table, VT_GEOMETRY_BOUNDARIES);
+        const semantics = try self.appendVectorU32(self.feature_buf.items, geom_table, VT_GEOMETRY_SEMANTICS);
+        const semantics_objects = try self.appendSemanticObjectTypes(self.feature_buf.items, geom_table, VT_GEOMETRY_SEMANTICS_OBJECTS);
 
         try self.scratch_geometries.append(self.allocator, .{
             .geometry_type = geometry_type,
@@ -551,6 +573,8 @@ pub const Reader = struct {
             .surfaces = surfaces,
             .strings = strings,
             .boundaries = boundaries,
+            .semantics = semantics,
+            .semantics_objects = semantics_objects,
         });
     }
 
@@ -566,6 +590,20 @@ pub const Reader = struct {
             return self.scratch_u32.items[start..][0..vec.len];
         }
         return EMPTY_U32;
+    }
+
+    fn appendSemanticObjectTypes(self: *Reader, buf: []const u8, table_pos: usize, vtable_offset: u16) ![]const u8 {
+        if (try fb.getVectorInfo(buf, table_pos, vtable_offset)) |vec| {
+            const start = self.scratch_u8.items.len;
+            try self.scratch_u8.ensureTotalCapacity(self.allocator, start + vec.len);
+            for (0..vec.len) |i| {
+                const obj_table = try fb.vectorTableAt(buf, vec, i);
+                const semantic_type = try fb.getScalarU8Default(buf, obj_table, VT_SEMANTIC_OBJECT_TYPE, 0);
+                self.scratch_u8.appendAssumeCapacity(semantic_type);
+            }
+            return self.scratch_u8.items[start..][0..vec.len];
+        }
+        return EMPTY_U8;
     }
 
     fn decodeAttributes(self: *Reader, schema: []const ColumnSchema, attr_bytes: []const u8) !void {
@@ -1048,6 +1086,9 @@ const fb = struct {
 
 pub const Writer = struct {
     file: std.fs.File,
+    transform: Transform = .{},
+    feature_count_patch_pos: ?u64 = null,
+    written_feature_count: u64 = 0,
 
     pub fn openPathFromReader(reader: *const Reader, path: []const u8) !Writer {
         const file = if (std.fs.path.isAbsolute(path))
@@ -1058,16 +1099,25 @@ pub const Writer = struct {
 
         if (reader.preamble().len == 0) return error.MissingReaderPreamble;
         try file.writeAll(reader.preamble());
-        return .{ .file = file };
+        return .{
+            .file = file,
+            .transform = reader.transform,
+        };
     }
 
     pub fn deinit(self: *Writer) void {
+        if (self.feature_count_patch_pos) |pos| {
+            self.file.seekTo(pos) catch {};
+            var tmp: [8]u8 = undefined;
+            std.mem.writeInt(u64, &tmp, self.written_feature_count, .little);
+            _ = self.file.writeAll(&tmp) catch {};
+        }
         self.file.close();
     }
 
     /// Opens a writer that copies the header from the reader but strips the spatial
     /// index and attribute indexes from the preamble. Use this variant when features
-    /// may be modified (e.g. via patchCurrentFeatureGeometryLod22), since changed
+    /// may be modified (e.g. via FeatureBuilder-based rewrites), since changed
     /// feature byte lengths invalidate the original index offsets.
     pub fn openPathFromReaderNoIndex(reader: *const Reader, path: []const u8) !Writer {
         var file = if (std.fs.path.isAbsolute(path))
@@ -1137,19 +1187,58 @@ pub const Writer = struct {
         }
 
         try file.writeAll(buf[0..write_len]);
-        return .{ .file = file };
+        return .{
+            .file = file,
+            .transform = reader.transform,
+        };
+    }
+
+    pub fn openPathNewNoIndex(path: []const u8, transform: Transform, root_columns: []const ColumnSchema) !Writer {
+        const file = if (std.fs.path.isAbsolute(path))
+            try std.fs.createFileAbsolute(path, .{ .truncate = true })
+        else
+            try std.fs.cwd().createFile(path, .{ .truncate = true });
+        errdefer file.close();
+
+        const header = try buildHeaderNoIndex(std.heap.page_allocator, transform, root_columns);
+        defer std.heap.page_allocator.free(header.bytes);
+
+        try file.writeAll(&MAGIC_BYTES);
+        try file.writeAll(header.bytes);
+
+        const patch_pos = try checkedAddU64(8, header.feature_count_field_pos);
+        return .{
+            .file = file,
+            .transform = transform,
+            .feature_count_patch_pos = patch_pos,
+        };
     }
 
     pub fn writeFeatureRaw(self: *Writer, feature_bytes: []const u8) !void {
         try self.file.writeAll(feature_bytes);
+        if (self.feature_count_patch_pos != null) {
+            self.written_feature_count = try checkedAddU64(self.written_feature_count, 1);
+        }
+    }
+
+    pub fn writeFeatureBuilt(self: *Writer, allocator: std.mem.Allocator, feature: *const FeatureBuilder) !void {
+        var feature_bytes = std.ArrayList(u8){};
+        defer feature_bytes.deinit(allocator);
+        try feature.encodeFeature(&feature_bytes);
+        try self.writeFeatureRaw(feature_bytes.items);
     }
 };
 
-fn alignAppend4(buf: *std.ArrayList(u8), allocator: std.mem.Allocator) !void {
-    const rem = buf.items.len & 3;
+fn alignAppend(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, alignment: usize) !void {
+    std.debug.assert(alignment != 0 and std.math.isPowerOfTwo(alignment));
+    const rem = buf.items.len & (alignment - 1);
     if (rem == 0) return;
-    const pad = 4 - rem;
+    const pad = alignment - rem;
     try buf.appendNTimes(allocator, 0, pad);
+}
+
+fn alignAppend4(buf: *std.ArrayList(u8), allocator: std.mem.Allocator) !void {
+    try alignAppend(buf, allocator, 4);
 }
 
 fn appendU32Le(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, value: u32) !void {
@@ -1162,6 +1251,60 @@ fn appendI32Le(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, value: i32
     var tmp: [4]u8 = undefined;
     std.mem.writeInt(i32, &tmp, value, .little);
     try buf.appendSlice(allocator, &tmp);
+}
+
+fn appendU16Le(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, value: u16) !void {
+    var tmp: [2]u8 = undefined;
+    std.mem.writeInt(u16, &tmp, value, .little);
+    try buf.appendSlice(allocator, &tmp);
+}
+
+fn appendU64Le(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, value: u64) !void {
+    var tmp: [8]u8 = undefined;
+    std.mem.writeInt(u64, &tmp, value, .little);
+    try buf.appendSlice(allocator, &tmp);
+}
+
+fn appendF64Le(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, value: f64) !void {
+    try appendU64Le(buf, allocator, @bitCast(value));
+}
+
+fn appendString(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, value: []const u8) !usize {
+    try alignAppend4(buf, allocator);
+    const start = buf.items.len;
+    try appendU32Le(buf, allocator, @intCast(value.len));
+    try buf.appendSlice(allocator, value);
+    try buf.append(allocator, 0); // null terminator
+    return start;
+}
+
+fn appendVectorBytes(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, values: []const u8) !usize {
+    try alignAppend4(buf, allocator);
+    const start = buf.items.len;
+    try appendU32Le(buf, allocator, @intCast(values.len));
+    try buf.appendSlice(allocator, values);
+    return start;
+}
+
+fn appendVectorStrings(
+    buf: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    values: []const []const u8,
+) !usize {
+    try alignAppend4(buf, allocator);
+    const vec_start = buf.items.len;
+    try appendU32Le(buf, allocator, @intCast(values.len));
+    const offsets_start = buf.items.len;
+    for (0..values.len) |_| {
+        try appendU32Le(buf, allocator, 0);
+    }
+    for (values, 0..) |s, i| {
+        const str_start = try appendString(buf, allocator, s);
+        const offset_pos = offsets_start + i * 4;
+        const rel: u32 = @intCast(str_start - offset_pos);
+        std.mem.writeInt(u32, buf.items[offset_pos..][0..4], rel, .little);
+    }
+    return vec_start;
 }
 
 fn appendVectorU32Values(
@@ -1205,6 +1348,12 @@ fn quantizeCoordinate(value: f64, scale: f64, translate: f64) !i32 {
     return @intFromFloat(qf);
 }
 
+const QuantizedVertex = struct {
+    x: i32,
+    y: i32,
+    z: i32,
+};
+
 fn appendVectorVerticesQuantized(
     buf: *std.ArrayList(u8),
     allocator: std.mem.Allocator,
@@ -1228,28 +1377,73 @@ fn appendVectorVerticesQuantized(
     return start;
 }
 
+fn appendVectorVerticesQuantizedRaw(
+    buf: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    vertices: []const QuantizedVertex,
+) !usize {
+    try alignAppend4(buf, allocator);
+    const start = buf.items.len;
+    try appendU32Le(buf, allocator, @intCast(vertices.len));
+    for (vertices) |v| {
+        try appendI32Le(buf, allocator, v.x);
+        try appendI32Le(buf, allocator, v.y);
+        try appendI32Le(buf, allocator, v.z);
+    }
+    return start;
+}
+
+const TableField = struct {
+    vtable_offset: u16,
+    relative_offset: u16,
+};
+
+const TableInfo = struct {
+    vtable_pos: usize,
+    table_pos: usize,
+};
+
+fn appendTableSkeleton(
+    buf: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    table_alignment: usize,
+    table_data_len: u16,
+    vtable_len: u16,
+    fields: []const TableField,
+) !TableInfo {
+    if (table_data_len < 4 or vtable_len < 4) return error.InvalidFlatBuffer;
+    try alignAppend4(buf, allocator);
+
+    const vtable_pos = buf.items.len;
+    const vtable_bytes = try allocator.alloc(u8, vtable_len);
+    defer allocator.free(vtable_bytes);
+    @memset(vtable_bytes, 0);
+    std.mem.writeInt(u16, vtable_bytes[0..2], vtable_len, .little);
+    std.mem.writeInt(u16, vtable_bytes[2..4], table_data_len, .little);
+    for (fields) |field| {
+        if (field.vtable_offset + 2 > vtable_len) return error.InvalidFlatBuffer;
+        std.mem.writeInt(u16, vtable_bytes[field.vtable_offset..][0..2], field.relative_offset, .little);
+    }
+    try buf.appendSlice(allocator, vtable_bytes);
+
+    try alignAppend(buf, allocator, table_alignment);
+    const table_pos = buf.items.len;
+    try buf.appendNTimes(allocator, 0, table_data_len);
+    const vtable_back: i32 = @intCast(table_pos - vtable_pos);
+    std.mem.writeInt(i32, buf.items[table_pos..][0..4], vtable_back, .little);
+
+    return .{
+        .vtable_pos = vtable_pos,
+        .table_pos = table_pos,
+    };
+}
+
 fn patchUOffset(buf: []u8, field_pos: usize, target_pos: usize) !void {
     if (target_pos <= field_pos) return error.InvalidRewriteOffset;
     const rel = try checkedAdd(target_pos, 0) - field_pos;
     var tmp: [4]u8 = undefined;
     std.mem.writeInt(u32, &tmp, @intCast(rel), .little);
     @memcpy(buf[field_pos .. field_pos + 4], &tmp);
-}
-
-/// Appends a u32 vector where each element is mapped from a u8 value through a lookup table.
-fn appendVectorU32Mapped(
-    buf: *std.ArrayList(u8),
-    allocator: std.mem.Allocator,
-    values: []const u8,
-    lookup: *const [256]u32,
-) !usize {
-    try alignAppend4(buf, allocator);
-    const start = buf.items.len;
-    try appendU32Le(buf, allocator, @intCast(values.len));
-    for (values) |v| {
-        try appendU32Le(buf, allocator, lookup[v]);
-    }
-    return start;
 }
 
 /// Builds a flatbuffer vector of SemanticObject tables and appends it to the buffer.
@@ -1310,39 +1504,982 @@ fn appendSemanticObjectsVector(
     return vec_start;
 }
 
-/// Allocates a 4-byte UOffset slot in the growable buffer and writes the geometry
-/// vtable entry to point to it. Returns the position of the slot so the caller can
-/// fill in the UOffset once the target data has been appended.
-/// Returns null if the vtable is too short to hold this field.
-fn allocateVtableUOffsetSlot(
-    buf: *std.ArrayList(u8),
-    alloc: std.mem.Allocator,
+const FeatureGeometryData = struct {
+    geometry_type: GeometryType,
+    lod: ?[]const u8,
+    solids: []const u32,
+    has_solids: bool,
+    shells: []const u32,
+    has_shells: bool,
+    surfaces: []const u32,
+    has_surfaces: bool,
+    strings: []const u32,
+    has_strings: bool,
+    boundaries: []const u32,
+    has_boundaries: bool,
+    semantics: []const u32,
+    has_semantics: bool,
+    semantics_objects: []const u8,
+    has_semantics_objects: bool,
+
+    fn deinit(self: *FeatureGeometryData, allocator: std.mem.Allocator) void {
+        if (self.solids.len > 0) allocator.free(self.solids);
+        if (self.shells.len > 0) allocator.free(self.shells);
+        if (self.surfaces.len > 0) allocator.free(self.surfaces);
+        if (self.strings.len > 0) allocator.free(self.strings);
+        if (self.boundaries.len > 0) allocator.free(self.boundaries);
+        if (self.semantics.len > 0) allocator.free(self.semantics);
+        if (self.semantics_objects.len > 0) allocator.free(self.semantics_objects);
+        self.* = undefined;
+    }
+};
+
+const FeatureObjectData = struct {
+    id: []const u8,
+    object_type: ObjectType,
+    extension_type: ?[]const u8,
+    geometries: []FeatureGeometryData,
+    has_geometries: bool,
+    attributes_raw: []const u8,
+    has_attributes: bool,
+    columns: []const ColumnSchema,
+    has_columns: bool,
+    children: []const []const u8,
+    has_children: bool,
+    children_roles: []const []const u8,
+    has_children_roles: bool,
+    parents: []const []const u8,
+    has_parents: bool,
+
+    fn deinit(self: *FeatureObjectData, allocator: std.mem.Allocator) void {
+        for (self.geometries) |*geom| {
+            geom.deinit(allocator);
+        }
+        if (self.geometries.len > 0) allocator.free(self.geometries);
+        if (self.attributes_raw.len > 0) allocator.free(self.attributes_raw);
+        if (self.columns.len > 0) allocator.free(self.columns);
+        if (self.children.len > 0) {
+            for (self.children) |s| allocator.free(s);
+            allocator.free(self.children);
+        }
+        if (self.children_roles.len > 0) {
+            for (self.children_roles) |s| allocator.free(s);
+            allocator.free(self.children_roles);
+        }
+        if (self.parents.len > 0) {
+            for (self.parents) |s| allocator.free(s);
+            allocator.free(self.parents);
+        }
+        self.* = undefined;
+    }
+};
+
+const EMPTY_QUANTIZED_VERTICES: []QuantizedVertex = @constCast(&[_]QuantizedVertex{});
+const EMPTY_FEATURE_GEOMETRIES: []FeatureGeometryData = @constCast(&[_]FeatureGeometryData{});
+const EMPTY_FEATURE_OBJECTS: []FeatureObjectData = @constCast(&[_]FeatureObjectData{});
+
+const OwnedU32Vector = struct {
+    values: []const u32,
+    present: bool,
+};
+
+const OwnedU8Vector = struct {
+    values: []const u8,
+    present: bool,
+};
+
+const OwnedColumns = struct {
+    values: []const ColumnSchema,
+    present: bool,
+};
+
+const OwnedStrings = struct {
+    values: []const []const u8,
+    present: bool,
+};
+
+pub const FeatureBuilder = struct {
+    allocator: std.mem.Allocator,
+    transform: Transform,
+    feature_id: []const u8 = "",
+    vertices_q: []QuantizedVertex = EMPTY_QUANTIZED_VERTICES,
+    has_vertices: bool = false,
+    objects: []FeatureObjectData = EMPTY_FEATURE_OBJECTS,
+    has_objects: bool = false,
+
+    pub fn init(allocator: std.mem.Allocator, transform: Transform) FeatureBuilder {
+        return .{
+            .allocator = allocator,
+            .transform = transform,
+        };
+    }
+
+    pub fn deinit(self: *FeatureBuilder) void {
+        self.clear();
+    }
+
+    pub fn clear(self: *FeatureBuilder) void {
+        if (self.vertices_q.len > 0) self.allocator.free(self.vertices_q);
+        for (self.objects) |*obj| {
+            obj.deinit(self.allocator);
+        }
+        if (self.objects.len > 0) self.allocator.free(self.objects);
+        self.feature_id = "";
+        self.vertices_q = EMPTY_QUANTIZED_VERTICES;
+        self.has_vertices = false;
+        self.objects = EMPTY_FEATURE_OBJECTS;
+        self.has_objects = false;
+    }
+
+    pub fn loadCurrentFromReader(self: *FeatureBuilder, reader: *Reader) !void {
+        self.clear();
+
+        const feature_table = try fb.sizePrefixedRootTable(reader.feature_buf.items);
+        self.feature_id = try fb.getRequiredString(reader.feature_buf.items, feature_table, VT_FEATURE_ID);
+
+        if (try fb.getVectorInfo(reader.feature_buf.items, feature_table, VT_FEATURE_VERTICES)) |verts_vec| {
+            self.has_vertices = true;
+            if (verts_vec.len == 0) {
+                self.vertices_q = EMPTY_QUANTIZED_VERTICES;
+            } else {
+                const total_bytes = try checkedMul(verts_vec.len, 12);
+                const end = try checkedAdd(verts_vec.start, total_bytes);
+                if (end > reader.feature_buf.items.len) return error.InvalidFlatBuffer;
+                const verts = try self.allocator.alloc(QuantizedVertex, verts_vec.len);
+                errdefer self.allocator.free(verts);
+                for (0..verts_vec.len) |i| {
+                    const pos = try checkedAdd(verts_vec.start, try checkedMul(i, 12));
+                    verts[i] = .{
+                        .x = try fb.readI32Le(reader.feature_buf.items, pos),
+                        .y = try fb.readI32Le(reader.feature_buf.items, pos + 4),
+                        .z = try fb.readI32Le(reader.feature_buf.items, pos + 8),
+                    };
+                }
+                self.vertices_q = verts;
+            }
+        }
+
+        if (try fb.getVectorInfo(reader.feature_buf.items, feature_table, VT_FEATURE_OBJECTS)) |objects_vec| {
+            self.has_objects = true;
+            if (objects_vec.len == 0) {
+                self.objects = EMPTY_FEATURE_OBJECTS;
+                return;
+            }
+
+            const objects = try self.allocator.alloc(FeatureObjectData, objects_vec.len);
+            var built: usize = 0;
+            errdefer {
+                for (objects[0..built]) |*obj| obj.deinit(self.allocator);
+                self.allocator.free(objects);
+            }
+
+            for (0..objects_vec.len) |i| {
+                const obj_table = try fb.vectorTableAt(reader.feature_buf.items, objects_vec, i);
+                objects[i] = try decodeFeatureObject(self.allocator, reader.feature_buf.items, obj_table);
+                built += 1;
+            }
+            self.objects = objects;
+        }
+    }
+
+    pub fn replaceLod22Solid(
+        self: *FeatureBuilder,
+        feature_id: []const u8,
+        vertices_xyz_world: []const f64,
+        triangle_indices: []const u32,
+        semantic_types: []const u8,
+    ) !void {
+        if (triangle_indices.len % 3 != 0) return error.InvalidTriangleIndexArray;
+        if (vertices_xyz_world.len % 3 != 0) return error.InvalidVertexArray;
+        const new_vertex_count = vertices_xyz_world.len / 3;
+        if (new_vertex_count == 0) return error.InvalidVertexArray;
+        const tri_count = triangle_indices.len / 3;
+        if (semantic_types.len != tri_count) return error.InvalidSemanticTypesArray;
+        for (triangle_indices) |idx| {
+            if (idx >= new_vertex_count) return error.InvalidTriangleIndexArray;
+        }
+
+        if (!self.has_objects) return error.TargetObjectNotFound;
+        const object_id = try buildObjectId(self.allocator, feature_id);
+        defer self.allocator.free(object_id);
+
+        var target_geom: ?*FeatureGeometryData = null;
+        for (self.objects) |*obj| {
+            if (!std.mem.eql(u8, obj.id, object_id)) continue;
+            for (obj.geometries) |*geom| {
+                const solid_like = geom.geometry_type == .Solid or geom.geometry_type == .MultiSolid or geom.geometry_type == .CompositeSolid;
+                if (!solid_like) continue;
+                const lod = geom.lod orelse continue;
+                if (std.mem.eql(u8, lod, "2.2")) {
+                    target_geom = geom;
+                    break;
+                }
+            }
+            if (target_geom != null) break;
+            return error.TargetGeometryNotFound;
+        }
+        const geom = target_geom orelse return error.TargetObjectNotFound;
+
+        if (self.vertices_q.len > std.math.maxInt(u32)) return error.IntegerOverflow;
+        var quantized_to_index = std.AutoHashMap(QuantizedVertex, u32).init(self.allocator);
+        defer quantized_to_index.deinit();
+        for (self.vertices_q, 0..) |q, i| {
+            const gop = try quantized_to_index.getOrPut(q);
+            if (!gop.found_existing) gop.value_ptr.* = @intCast(i);
+        }
+
+        const unresolved = std.math.maxInt(u32);
+        const src_to_final = try self.allocator.alloc(u32, new_vertex_count);
+        defer self.allocator.free(src_to_final);
+        @memset(src_to_final, unresolved);
+
+        var appended_vertices = std.ArrayList(QuantizedVertex){};
+        defer appended_vertices.deinit(self.allocator);
+        var remapped_boundaries = std.ArrayList(u32){};
+        defer remapped_boundaries.deinit(self.allocator);
+        try remapped_boundaries.ensureTotalCapacity(self.allocator, triangle_indices.len);
+
+        for (triangle_indices) |src_idx_u32| {
+            const src_idx: usize = @intCast(src_idx_u32);
+            var final_idx = src_to_final[src_idx];
+            if (final_idx == unresolved) {
+                const q = QuantizedVertex{
+                    .x = try quantizeCoordinate(vertices_xyz_world[src_idx * 3], self.transform.scale[0], self.transform.translate[0]),
+                    .y = try quantizeCoordinate(vertices_xyz_world[src_idx * 3 + 1], self.transform.scale[1], self.transform.translate[1]),
+                    .z = try quantizeCoordinate(vertices_xyz_world[src_idx * 3 + 2], self.transform.scale[2], self.transform.translate[2]),
+                };
+                if (quantized_to_index.get(q)) |existing| {
+                    final_idx = existing;
+                } else {
+                    const next_index = try checkedAdd(self.vertices_q.len, appended_vertices.items.len);
+                    if (next_index > std.math.maxInt(u32)) return error.IntegerOverflow;
+                    final_idx = @intCast(next_index);
+                    try appended_vertices.append(self.allocator, q);
+                    try quantized_to_index.put(q, final_idx);
+                }
+                src_to_final[src_idx] = final_idx;
+            }
+            remapped_boundaries.appendAssumeCapacity(final_idx);
+        }
+
+        if (appended_vertices.items.len > 0) {
+            const total_vertex_count = try checkedAdd(self.vertices_q.len, appended_vertices.items.len);
+            const updated_vertices = try self.allocator.alloc(QuantizedVertex, total_vertex_count);
+            @memcpy(updated_vertices[0..self.vertices_q.len], self.vertices_q);
+            @memcpy(updated_vertices[self.vertices_q.len..], appended_vertices.items);
+            if (self.vertices_q.len > 0) self.allocator.free(self.vertices_q);
+            self.vertices_q = updated_vertices;
+        }
+        self.has_vertices = true;
+
+        var unique_types: [256]bool = .{false} ** 256;
+        for (semantic_types) |t| unique_types[t] = true;
+        var type_to_obj_index: [256]u32 = .{std.math.maxInt(u32)} ** 256;
+        var object_types = std.ArrayList(u8){};
+        defer object_types.deinit(self.allocator);
+        for (0..256) |t| {
+            if (unique_types[t]) {
+                type_to_obj_index[t] = @intCast(object_types.items.len);
+                try object_types.append(self.allocator, @intCast(t));
+            }
+        }
+
+        const solids = try self.allocator.alloc(u32, 1);
+        solids[0] = 1;
+        const shells = try self.allocator.alloc(u32, 1);
+        shells[0] = @intCast(tri_count);
+        const surfaces = try self.allocator.alloc(u32, tri_count);
+        @memset(surfaces, 1);
+        const strings = try self.allocator.alloc(u32, tri_count);
+        @memset(strings, 3);
+        const boundaries = try self.allocator.alloc(u32, remapped_boundaries.items.len);
+        @memcpy(boundaries, remapped_boundaries.items);
+
+        const semantics = try self.allocator.alloc(u32, semantic_types.len);
+        for (semantic_types, 0..) |t, i| {
+            semantics[i] = type_to_obj_index[t];
+        }
+        const semantics_objects = try self.allocator.alloc(u8, object_types.items.len);
+        @memcpy(semantics_objects, object_types.items);
+
+        if (geom.solids.len > 0) self.allocator.free(geom.solids);
+        if (geom.shells.len > 0) self.allocator.free(geom.shells);
+        if (geom.surfaces.len > 0) self.allocator.free(geom.surfaces);
+        if (geom.strings.len > 0) self.allocator.free(geom.strings);
+        if (geom.boundaries.len > 0) self.allocator.free(geom.boundaries);
+        if (geom.semantics.len > 0) self.allocator.free(geom.semantics);
+        if (geom.semantics_objects.len > 0) self.allocator.free(geom.semantics_objects);
+
+        geom.solids = solids;
+        geom.has_solids = true;
+        geom.shells = shells;
+        geom.has_shells = true;
+        geom.surfaces = surfaces;
+        geom.has_surfaces = true;
+        geom.strings = strings;
+        geom.has_strings = true;
+        geom.boundaries = boundaries;
+        geom.has_boundaries = true;
+        geom.semantics = semantics;
+        geom.has_semantics = true;
+        geom.semantics_objects = semantics_objects;
+        geom.has_semantics_objects = true;
+
+        try self.compactVertices();
+    }
+
+    fn compactVertices(self: *FeatureBuilder) !void {
+        if (self.vertices_q.len == 0) return;
+
+        const used = try self.allocator.alloc(bool, self.vertices_q.len);
+        defer self.allocator.free(used);
+        @memset(used, false);
+
+        for (self.objects) |obj| {
+            for (obj.geometries) |geom| {
+                if (!geom.has_boundaries) continue;
+                for (geom.boundaries) |idx| {
+                    if (idx >= self.vertices_q.len) return error.InvalidFlatBuffer;
+                    used[idx] = true;
+                }
+            }
+        }
+
+        var used_count: usize = 0;
+        for (used) |u| {
+            if (u) used_count += 1;
+        }
+        if (used_count == self.vertices_q.len) return;
+
+        const old_to_new = try self.allocator.alloc(u32, self.vertices_q.len);
+        defer self.allocator.free(old_to_new);
+        @memset(old_to_new, std.math.maxInt(u32));
+
+        const compacted_vertices = if (used_count == 0)
+            EMPTY_QUANTIZED_VERTICES
+        else
+            try self.allocator.alloc(QuantizedVertex, used_count);
+        var next_index: usize = 0;
+        for (self.vertices_q, 0..) |v, old_i| {
+            if (!used[old_i]) continue;
+            old_to_new[old_i] = @intCast(next_index);
+            compacted_vertices[next_index] = v;
+            next_index += 1;
+        }
+
+        for (self.objects) |*obj| {
+            for (obj.geometries) |*geom| {
+                if (!geom.has_boundaries) continue;
+                const remapped: []u32 = if (geom.boundaries.len == 0)
+                    EMPTY_U32_MUT
+                else
+                    try self.allocator.alloc(u32, geom.boundaries.len);
+                for (geom.boundaries, 0..) |old_idx, i| {
+                    const mapped = old_to_new[old_idx];
+                    if (mapped == std.math.maxInt(u32)) return error.InvalidFlatBuffer;
+                    remapped[i] = mapped;
+                }
+                if (geom.boundaries.len > 0) self.allocator.free(geom.boundaries);
+                geom.boundaries = remapped;
+            }
+        }
+
+        if (self.vertices_q.len > 0) self.allocator.free(self.vertices_q);
+        self.vertices_q = compacted_vertices;
+    }
+
+    pub fn encodeFeature(self: *const FeatureBuilder, out: *std.ArrayList(u8)) !void {
+        out.clearRetainingCapacity();
+        try out.appendNTimes(self.allocator, 0, 8);
+
+        const feature_table = try encodeFeatureTable(self.allocator, out, self);
+        if (feature_table <= 4) return error.InvalidFlatBuffer;
+        std.mem.writeInt(u32, out.items[4..8], @intCast(feature_table - 4), .little);
+        std.mem.writeInt(u32, out.items[0..4], @intCast(out.items.len - 4), .little);
+    }
+};
+
+fn decodeFeatureObject(allocator: std.mem.Allocator, buf: []const u8, obj_table: usize) !FeatureObjectData {
+    const object_id = try fb.getRequiredString(buf, obj_table, VT_OBJECT_ID);
+    const object_type: ObjectType = @enumFromInt(try fb.getScalarU8Default(buf, obj_table, VT_OBJECT_TYPE, 0));
+    const extension_type = try fb.getString(buf, obj_table, VT_OBJECT_EXTENSION_TYPE);
+
+    var geometries: []FeatureGeometryData = EMPTY_FEATURE_GEOMETRIES;
+    var has_geometries = false;
+    if (try fb.getVectorInfo(buf, obj_table, VT_OBJECT_GEOMETRY)) |geom_vec| {
+        has_geometries = true;
+        if (geom_vec.len > 0) {
+            geometries = try allocator.alloc(FeatureGeometryData, geom_vec.len);
+            var built: usize = 0;
+            errdefer {
+                for (geometries[0..built]) |*geom| geom.deinit(allocator);
+                allocator.free(geometries);
+            }
+            for (0..geom_vec.len) |i| {
+                const geom_table = try fb.vectorTableAt(buf, geom_vec, i);
+                geometries[i] = try decodeFeatureGeometry(allocator, buf, geom_table);
+                built += 1;
+            }
+        }
+    }
+
+    const attributes = try dupVectorBytesWithPresence(allocator, buf, obj_table, VT_OBJECT_ATTRIBUTES);
+    errdefer if (attributes.values.len > 0) allocator.free(attributes.values);
+    const columns = try dupColumnsWithPresence(allocator, buf, obj_table, VT_OBJECT_COLUMNS);
+    errdefer if (columns.values.len > 0) allocator.free(columns.values);
+    const children = try dupVectorStringsWithPresence(allocator, buf, obj_table, VT_OBJECT_CHILDREN);
+    errdefer {
+        if (children.values.len > 0) {
+            for (children.values) |s| allocator.free(s);
+            allocator.free(children.values);
+        }
+    }
+    const children_roles = try dupVectorStringsWithPresence(allocator, buf, obj_table, VT_OBJECT_CHILDREN_ROLES);
+    errdefer {
+        if (children_roles.values.len > 0) {
+            for (children_roles.values) |s| allocator.free(s);
+            allocator.free(children_roles.values);
+        }
+    }
+    const parents = try dupVectorStringsWithPresence(allocator, buf, obj_table, VT_OBJECT_PARENTS);
+    errdefer {
+        if (parents.values.len > 0) {
+            for (parents.values) |s| allocator.free(s);
+            allocator.free(parents.values);
+        }
+    }
+
+    return .{
+        .id = object_id,
+        .object_type = object_type,
+        .extension_type = extension_type,
+        .geometries = geometries,
+        .has_geometries = has_geometries,
+        .attributes_raw = attributes.values,
+        .has_attributes = attributes.present,
+        .columns = columns.values,
+        .has_columns = columns.present,
+        .children = children.values,
+        .has_children = children.present,
+        .children_roles = children_roles.values,
+        .has_children_roles = children_roles.present,
+        .parents = parents.values,
+        .has_parents = parents.present,
+    };
+}
+
+fn decodeFeatureGeometry(allocator: std.mem.Allocator, buf: []const u8, geom_table: usize) !FeatureGeometryData {
+    const geometry_type: GeometryType = @enumFromInt(try fb.getScalarU8Default(buf, geom_table, VT_GEOMETRY_TYPE, 0));
+    const lod = try fb.getString(buf, geom_table, VT_GEOMETRY_LOD);
+
+    const solids = try dupVectorU32WithPresence(allocator, buf, geom_table, VT_GEOMETRY_SOLIDS);
+    errdefer if (solids.values.len > 0) allocator.free(solids.values);
+    const shells = try dupVectorU32WithPresence(allocator, buf, geom_table, VT_GEOMETRY_SHELLS);
+    errdefer if (shells.values.len > 0) allocator.free(shells.values);
+    const surfaces = try dupVectorU32WithPresence(allocator, buf, geom_table, VT_GEOMETRY_SURFACES);
+    errdefer if (surfaces.values.len > 0) allocator.free(surfaces.values);
+    const strings = try dupVectorU32WithPresence(allocator, buf, geom_table, VT_GEOMETRY_STRINGS);
+    errdefer if (strings.values.len > 0) allocator.free(strings.values);
+    const boundaries = try dupVectorU32WithPresence(allocator, buf, geom_table, VT_GEOMETRY_BOUNDARIES);
+    errdefer if (boundaries.values.len > 0) allocator.free(boundaries.values);
+    const semantics = try dupVectorU32WithPresence(allocator, buf, geom_table, VT_GEOMETRY_SEMANTICS);
+    errdefer if (semantics.values.len > 0) allocator.free(semantics.values);
+    const semantics_objects = try dupSemanticObjectTypesWithPresence(allocator, buf, geom_table, VT_GEOMETRY_SEMANTICS_OBJECTS);
+    errdefer if (semantics_objects.values.len > 0) allocator.free(semantics_objects.values);
+
+    return .{
+        .geometry_type = geometry_type,
+        .lod = lod,
+        .solids = solids.values,
+        .has_solids = solids.present,
+        .shells = shells.values,
+        .has_shells = shells.present,
+        .surfaces = surfaces.values,
+        .has_surfaces = surfaces.present,
+        .strings = strings.values,
+        .has_strings = strings.present,
+        .boundaries = boundaries.values,
+        .has_boundaries = boundaries.present,
+        .semantics = semantics.values,
+        .has_semantics = semantics.present,
+        .semantics_objects = semantics_objects.values,
+        .has_semantics_objects = semantics_objects.present,
+    };
+}
+
+fn dupVectorU32WithPresence(
+    allocator: std.mem.Allocator,
+    buf: []const u8,
     table_pos: usize,
     vtable_offset: u16,
-) !?usize {
-    if (table_pos + 4 > buf.items.len) return error.InvalidFlatBuffer;
-    const vtable_back = try fb.readI32Le(buf.items, table_pos);
-    const table_isize: isize = @intCast(table_pos);
-    const vtable_isize = table_isize - @as(isize, vtable_back);
-    if (vtable_isize < 0) return error.InvalidFlatBuffer;
-    const vtable_pos_val: usize = @intCast(vtable_isize);
-    if (vtable_pos_val + 4 > buf.items.len) return error.InvalidFlatBuffer;
+) !OwnedU32Vector {
+    if (try fb.getVectorInfo(buf, table_pos, vtable_offset)) |vec| {
+        if (vec.len == 0) return .{ .values = EMPTY_U32, .present = true };
+        const out = try allocator.alloc(u32, vec.len);
+        for (0..vec.len) |i| {
+            const pos = try checkedAdd(vec.start, try checkedMul(i, 4));
+            out[i] = try fb.readU32Le(buf, pos);
+        }
+        return .{ .values = out, .present = true };
+    }
+    return .{ .values = EMPTY_U32, .present = false };
+}
 
-    const vtable_len = try fb.readU16Le(buf.items, vtable_pos_val);
-    if (vtable_offset + 2 > vtable_len) return null; // Vtable too short.
+fn dupVectorBytesWithPresence(
+    allocator: std.mem.Allocator,
+    buf: []const u8,
+    table_pos: usize,
+    vtable_offset: u16,
+) !OwnedU8Vector {
+    if (try fb.getVectorBytes(buf, table_pos, vtable_offset)) |bytes| {
+        if (bytes.len == 0) return .{ .values = EMPTY_U8, .present = true };
+        const out = try allocator.alloc(u8, bytes.len);
+        @memcpy(out, bytes);
+        return .{ .values = out, .present = true };
+    }
+    return .{ .values = EMPTY_U8, .present = false };
+}
 
-    // Append 4 zero bytes (placeholder UOffset).
-    try alignAppend4(buf, alloc);
-    const slot_pos = buf.items.len;
-    try appendU32Le(buf, alloc, 0);
+fn dupSemanticObjectTypesWithPresence(
+    allocator: std.mem.Allocator,
+    buf: []const u8,
+    table_pos: usize,
+    vtable_offset: u16,
+) !OwnedU8Vector {
+    if (try fb.getVectorInfo(buf, table_pos, vtable_offset)) |vec| {
+        if (vec.len == 0) return .{ .values = EMPTY_U8, .present = true };
+        const out = try allocator.alloc(u8, vec.len);
+        for (0..vec.len) |i| {
+            const obj_table = try fb.vectorTableAt(buf, vec, i);
+            out[i] = try fb.getScalarU8Default(buf, obj_table, VT_SEMANTIC_OBJECT_TYPE, 0);
+        }
+        return .{ .values = out, .present = true };
+    }
+    return .{ .values = EMPTY_U8, .present = false };
+}
 
-    // Set the vtable entry to point to our new slot (relative to table_pos).
-    const rel = slot_pos - table_pos;
-    if (rel > std.math.maxInt(u16)) return error.VtableEntryOverflow;
-    const entry_pos = vtable_pos_val + vtable_offset;
-    std.mem.writeInt(u16, buf.items[entry_pos..][0..2], @intCast(rel), .little);
+fn dupColumnsWithPresence(
+    allocator: std.mem.Allocator,
+    buf: []const u8,
+    table_pos: usize,
+    vtable_offset: u16,
+) !OwnedColumns {
+    if (try fb.getVectorInfo(buf, table_pos, vtable_offset)) |columns_vec| {
+        if (columns_vec.len == 0) return .{ .values = EMPTY_COLUMNS, .present = true };
+        const out = try allocator.alloc(ColumnSchema, columns_vec.len);
+        for (0..columns_vec.len) |i| {
+            const col_table = try fb.vectorTableAt(buf, columns_vec, i);
+            out[i] = .{
+                .index = try fb.getScalarU16Default(buf, col_table, VT_COLUMN_INDEX, 0),
+                .name = try fb.getRequiredString(buf, col_table, VT_COLUMN_NAME),
+                .column_type = @enumFromInt(try fb.getScalarU8Default(buf, col_table, VT_COLUMN_TYPE, 0)),
+            };
+        }
+        return .{ .values = out, .present = true };
+    }
+    return .{ .values = EMPTY_COLUMNS, .present = false };
+}
 
-    return slot_pos;
+fn dupVectorStringsWithPresence(
+    allocator: std.mem.Allocator,
+    buf: []const u8,
+    table_pos: usize,
+    vtable_offset: u16,
+) !OwnedStrings {
+    if (try fb.getVectorInfo(buf, table_pos, vtable_offset)) |vec| {
+        if (vec.len == 0) return .{ .values = EMPTY_STRINGS, .present = true };
+        const out = try allocator.alloc([]const u8, vec.len);
+        var built: usize = 0;
+        errdefer {
+            for (out[0..built]) |s| allocator.free(s);
+            allocator.free(out);
+        }
+        for (0..vec.len) |i| {
+            const slot = try checkedAdd(vec.start, try checkedMul(i, 4));
+            const str_pos = try fb.derefUOffset(buf, slot);
+            if (str_pos + 4 > buf.len) return error.InvalidFlatBuffer;
+            const str_len: usize = @intCast(try fb.readU32Le(buf, str_pos));
+            const start = try checkedAdd(str_pos, 4);
+            const end = try checkedAdd(start, str_len);
+            if (end > buf.len) return error.InvalidFlatBuffer;
+            out[i] = try allocator.dupe(u8, buf[start..end]);
+            built += 1;
+        }
+        return .{ .values = out, .present = true };
+    }
+    return .{ .values = EMPTY_STRINGS, .present = false };
+}
+
+fn encodeFeatureTable(
+    allocator: std.mem.Allocator,
+    buf: *std.ArrayList(u8),
+    feature: *const FeatureBuilder,
+) !usize {
+    const rel_id: u16 = 4;
+    const rel_objects: u16 = 8;
+    const rel_vertices: u16 = 12;
+    var fields: [3]TableField = undefined;
+    var field_count: usize = 0;
+    fields[field_count] = .{ .vtable_offset = VT_FEATURE_ID, .relative_offset = rel_id };
+    field_count += 1;
+    if (feature.has_objects) {
+        fields[field_count] = .{ .vtable_offset = VT_FEATURE_OBJECTS, .relative_offset = rel_objects };
+        field_count += 1;
+    }
+    if (feature.has_vertices) {
+        fields[field_count] = .{ .vtable_offset = VT_FEATURE_VERTICES, .relative_offset = rel_vertices };
+        field_count += 1;
+    }
+
+    const table = try appendTableSkeleton(buf, allocator, 4, 16, VT_FEATURE_VERTICES + 2, fields[0..field_count]);
+
+    const id_start = try appendString(buf, allocator, feature.feature_id);
+    try patchUOffset(buf.items, table.table_pos + rel_id, id_start);
+
+    if (feature.has_objects) {
+        try alignAppend4(buf, allocator);
+        const objects_start = buf.items.len;
+        try appendU32Le(buf, allocator, @intCast(feature.objects.len));
+        const offsets_start = buf.items.len;
+        for (0..feature.objects.len) |_| {
+            try appendU32Le(buf, allocator, 0);
+        }
+        for (feature.objects, 0..) |obj, i| {
+            const obj_table = try encodeObjectTable(allocator, buf, &obj);
+            const offset_pos = offsets_start + i * 4;
+            const rel: u32 = @intCast(obj_table - offset_pos);
+            std.mem.writeInt(u32, buf.items[offset_pos..][0..4], rel, .little);
+        }
+        try patchUOffset(buf.items, table.table_pos + rel_objects, objects_start);
+    }
+
+    if (feature.has_vertices) {
+        const vertices_start = try appendVectorVerticesQuantizedRaw(buf, allocator, feature.vertices_q);
+        try patchUOffset(buf.items, table.table_pos + rel_vertices, vertices_start);
+    }
+    return table.table_pos;
+}
+
+fn encodeObjectTable(
+    allocator: std.mem.Allocator,
+    buf: *std.ArrayList(u8),
+    object: *const FeatureObjectData,
+) !usize {
+    const rel_type: u16 = 4;
+    const rel_extension_type: u16 = 8;
+    const rel_id: u16 = 12;
+    const rel_geometry: u16 = 16;
+    const rel_attributes: u16 = 20;
+    const rel_columns: u16 = 24;
+    const rel_children: u16 = 28;
+    const rel_children_roles: u16 = 32;
+    const rel_parents: u16 = 36;
+
+    var fields: [9]TableField = undefined;
+    var field_count: usize = 0;
+    fields[field_count] = .{ .vtable_offset = VT_OBJECT_TYPE, .relative_offset = rel_type };
+    field_count += 1;
+    fields[field_count] = .{ .vtable_offset = VT_OBJECT_ID, .relative_offset = rel_id };
+    field_count += 1;
+    if (object.extension_type != null) {
+        fields[field_count] = .{ .vtable_offset = VT_OBJECT_EXTENSION_TYPE, .relative_offset = rel_extension_type };
+        field_count += 1;
+    }
+    if (object.has_geometries) {
+        fields[field_count] = .{ .vtable_offset = VT_OBJECT_GEOMETRY, .relative_offset = rel_geometry };
+        field_count += 1;
+    }
+    if (object.has_attributes) {
+        fields[field_count] = .{ .vtable_offset = VT_OBJECT_ATTRIBUTES, .relative_offset = rel_attributes };
+        field_count += 1;
+    }
+    if (object.has_columns) {
+        fields[field_count] = .{ .vtable_offset = VT_OBJECT_COLUMNS, .relative_offset = rel_columns };
+        field_count += 1;
+    }
+    if (object.has_children) {
+        fields[field_count] = .{ .vtable_offset = VT_OBJECT_CHILDREN, .relative_offset = rel_children };
+        field_count += 1;
+    }
+    if (object.has_children_roles) {
+        fields[field_count] = .{ .vtable_offset = VT_OBJECT_CHILDREN_ROLES, .relative_offset = rel_children_roles };
+        field_count += 1;
+    }
+    if (object.has_parents) {
+        fields[field_count] = .{ .vtable_offset = VT_OBJECT_PARENTS, .relative_offset = rel_parents };
+        field_count += 1;
+    }
+
+    const table = try appendTableSkeleton(buf, allocator, 4, 40, VT_OBJECT_PARENTS + 2, fields[0..field_count]);
+    buf.items[table.table_pos + rel_type] = @intFromEnum(object.object_type);
+
+    const id_start = try appendString(buf, allocator, object.id);
+    try patchUOffset(buf.items, table.table_pos + rel_id, id_start);
+
+    if (object.extension_type) |extension_type| {
+        const extension_start = try appendString(buf, allocator, extension_type);
+        try patchUOffset(buf.items, table.table_pos + rel_extension_type, extension_start);
+    }
+
+    if (object.has_geometries) {
+        try alignAppend4(buf, allocator);
+        const geometries_start = buf.items.len;
+        try appendU32Le(buf, allocator, @intCast(object.geometries.len));
+        const offsets_start = buf.items.len;
+        for (0..object.geometries.len) |_| {
+            try appendU32Le(buf, allocator, 0);
+        }
+        for (object.geometries, 0..) |geom, i| {
+            const geom_table = try encodeGeometryTable(allocator, buf, &geom);
+            const offset_pos = offsets_start + i * 4;
+            const rel: u32 = @intCast(geom_table - offset_pos);
+            std.mem.writeInt(u32, buf.items[offset_pos..][0..4], rel, .little);
+        }
+        try patchUOffset(buf.items, table.table_pos + rel_geometry, geometries_start);
+    }
+
+    if (object.has_attributes) {
+        const attributes_start = try appendVectorBytes(buf, allocator, object.attributes_raw);
+        try patchUOffset(buf.items, table.table_pos + rel_attributes, attributes_start);
+    }
+
+    if (object.has_columns) {
+        try alignAppend4(buf, allocator);
+        const columns_start = buf.items.len;
+        try appendU32Le(buf, allocator, @intCast(object.columns.len));
+        const offsets_start = buf.items.len;
+        for (0..object.columns.len) |_| {
+            try appendU32Le(buf, allocator, 0);
+        }
+        for (object.columns, 0..) |col, i| {
+            const col_table = try encodeColumnTable(allocator, buf, col);
+            const offset_pos = offsets_start + i * 4;
+            const rel: u32 = @intCast(col_table - offset_pos);
+            std.mem.writeInt(u32, buf.items[offset_pos..][0..4], rel, .little);
+        }
+        try patchUOffset(buf.items, table.table_pos + rel_columns, columns_start);
+    }
+    if (object.has_children) {
+        const children_start = try appendVectorStrings(buf, allocator, object.children);
+        try patchUOffset(buf.items, table.table_pos + rel_children, children_start);
+    }
+    if (object.has_children_roles) {
+        const children_roles_start = try appendVectorStrings(buf, allocator, object.children_roles);
+        try patchUOffset(buf.items, table.table_pos + rel_children_roles, children_roles_start);
+    }
+    if (object.has_parents) {
+        const parents_start = try appendVectorStrings(buf, allocator, object.parents);
+        try patchUOffset(buf.items, table.table_pos + rel_parents, parents_start);
+    }
+    return table.table_pos;
+}
+
+fn encodeGeometryTable(
+    allocator: std.mem.Allocator,
+    buf: *std.ArrayList(u8),
+    geometry: *const FeatureGeometryData,
+) !usize {
+    const rel_type: u16 = 4;
+    const rel_lod: u16 = 8;
+    const rel_solids: u16 = 12;
+    const rel_shells: u16 = 16;
+    const rel_surfaces: u16 = 20;
+    const rel_strings: u16 = 24;
+    const rel_boundaries: u16 = 28;
+    const rel_semantics: u16 = 32;
+    const rel_semantics_objects: u16 = 36;
+
+    var fields: [9]TableField = undefined;
+    var field_count: usize = 0;
+    fields[field_count] = .{ .vtable_offset = VT_GEOMETRY_TYPE, .relative_offset = rel_type };
+    field_count += 1;
+    if (geometry.lod != null) {
+        fields[field_count] = .{ .vtable_offset = VT_GEOMETRY_LOD, .relative_offset = rel_lod };
+        field_count += 1;
+    }
+    if (geometry.has_solids) {
+        fields[field_count] = .{ .vtable_offset = VT_GEOMETRY_SOLIDS, .relative_offset = rel_solids };
+        field_count += 1;
+    }
+    if (geometry.has_shells) {
+        fields[field_count] = .{ .vtable_offset = VT_GEOMETRY_SHELLS, .relative_offset = rel_shells };
+        field_count += 1;
+    }
+    if (geometry.has_surfaces) {
+        fields[field_count] = .{ .vtable_offset = VT_GEOMETRY_SURFACES, .relative_offset = rel_surfaces };
+        field_count += 1;
+    }
+    if (geometry.has_strings) {
+        fields[field_count] = .{ .vtable_offset = VT_GEOMETRY_STRINGS, .relative_offset = rel_strings };
+        field_count += 1;
+    }
+    if (geometry.has_boundaries) {
+        fields[field_count] = .{ .vtable_offset = VT_GEOMETRY_BOUNDARIES, .relative_offset = rel_boundaries };
+        field_count += 1;
+    }
+    if (geometry.has_semantics) {
+        fields[field_count] = .{ .vtable_offset = VT_GEOMETRY_SEMANTICS, .relative_offset = rel_semantics };
+        field_count += 1;
+    }
+    if (geometry.has_semantics_objects) {
+        fields[field_count] = .{ .vtable_offset = VT_GEOMETRY_SEMANTICS_OBJECTS, .relative_offset = rel_semantics_objects };
+        field_count += 1;
+    }
+
+    const table = try appendTableSkeleton(buf, allocator, 4, 40, VT_GEOMETRY_SEMANTICS_OBJECTS + 2, fields[0..field_count]);
+    buf.items[table.table_pos + rel_type] = @intFromEnum(geometry.geometry_type);
+
+    if (geometry.lod) |lod| {
+        const lod_start = try appendString(buf, allocator, lod);
+        try patchUOffset(buf.items, table.table_pos + rel_lod, lod_start);
+    }
+    if (geometry.has_solids) {
+        const start = try appendVectorU32Values(buf, allocator, geometry.solids);
+        try patchUOffset(buf.items, table.table_pos + rel_solids, start);
+    }
+    if (geometry.has_shells) {
+        const start = try appendVectorU32Values(buf, allocator, geometry.shells);
+        try patchUOffset(buf.items, table.table_pos + rel_shells, start);
+    }
+    if (geometry.has_surfaces) {
+        const start = try appendVectorU32Values(buf, allocator, geometry.surfaces);
+        try patchUOffset(buf.items, table.table_pos + rel_surfaces, start);
+    }
+    if (geometry.has_strings) {
+        const start = try appendVectorU32Values(buf, allocator, geometry.strings);
+        try patchUOffset(buf.items, table.table_pos + rel_strings, start);
+    }
+    if (geometry.has_boundaries) {
+        const start = try appendVectorU32Values(buf, allocator, geometry.boundaries);
+        try patchUOffset(buf.items, table.table_pos + rel_boundaries, start);
+    }
+    if (geometry.has_semantics) {
+        const start = try appendVectorU32Values(buf, allocator, geometry.semantics);
+        try patchUOffset(buf.items, table.table_pos + rel_semantics, start);
+    }
+    if (geometry.has_semantics_objects) {
+        const start = try appendSemanticObjectsVector(buf, allocator, geometry.semantics_objects);
+        try patchUOffset(buf.items, table.table_pos + rel_semantics_objects, start);
+    }
+    return table.table_pos;
+}
+
+fn encodeColumnTable(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), column: ColumnSchema) !usize {
+    const rel_index: u16 = 4;
+    const rel_name: u16 = 8;
+    const rel_type: u16 = 12;
+    const table = try appendTableSkeleton(
+        buf,
+        allocator,
+        4,
+        16,
+        VT_COLUMN_TYPE + 2,
+        &.{
+            .{ .vtable_offset = VT_COLUMN_INDEX, .relative_offset = rel_index },
+            .{ .vtable_offset = VT_COLUMN_NAME, .relative_offset = rel_name },
+            .{ .vtable_offset = VT_COLUMN_TYPE, .relative_offset = rel_type },
+        },
+    );
+    std.mem.writeInt(u16, buf.items[table.table_pos + rel_index ..][0..2], column.index, .little);
+    buf.items[table.table_pos + rel_type] = @intFromEnum(column.column_type);
+    const name_start = try appendString(buf, allocator, column.name);
+    try patchUOffset(buf.items, table.table_pos + rel_name, name_start);
+    return table.table_pos;
+}
+
+const HeaderBuild = struct {
+    bytes: []u8,
+    feature_count_field_pos: u64,
+};
+
+const HeaderTableBuild = struct {
+    table_pos: usize,
+    feature_count_field_pos: usize,
+};
+
+fn buildHeaderNoIndex(
+    allocator: std.mem.Allocator,
+    transform: Transform,
+    root_columns: []const ColumnSchema,
+) !HeaderBuild {
+    var header = std.ArrayList(u8){};
+    errdefer header.deinit(allocator);
+    try header.appendNTimes(allocator, 0, 8);
+
+    const table = try encodeHeaderTableNoIndex(allocator, &header, transform, root_columns);
+    if (table.table_pos <= 4) return error.InvalidFlatBuffer;
+
+    std.mem.writeInt(u32, header.items[4..8], @intCast(table.table_pos - 4), .little);
+    std.mem.writeInt(u32, header.items[0..4], @intCast(header.items.len - 4), .little);
+
+    const out = try header.toOwnedSlice(allocator);
+    return .{
+        .bytes = out,
+        .feature_count_field_pos = @intCast(table.feature_count_field_pos),
+    };
+}
+
+fn encodeHeaderTableNoIndex(
+    allocator: std.mem.Allocator,
+    buf: *std.ArrayList(u8),
+    transform: Transform,
+    root_columns: []const ColumnSchema,
+) !HeaderTableBuild {
+    const rel_columns: u16 = 4;
+    const rel_transform: u16 = 8;
+    const rel_feature_count: u16 = 56;
+    const rel_index_node_size: u16 = 64;
+
+    var fields: [4]TableField = undefined;
+    var field_count: usize = 0;
+    if (root_columns.len > 0) {
+        fields[field_count] = .{ .vtable_offset = VT_HEADER_COLUMNS, .relative_offset = rel_columns };
+        field_count += 1;
+    }
+    fields[field_count] = .{ .vtable_offset = VT_HEADER_TRANSFORM, .relative_offset = rel_transform };
+    field_count += 1;
+    fields[field_count] = .{ .vtable_offset = VT_HEADER_FEATURES_COUNT, .relative_offset = rel_feature_count };
+    field_count += 1;
+    fields[field_count] = .{ .vtable_offset = VT_HEADER_INDEX_NODE_SIZE, .relative_offset = rel_index_node_size };
+    field_count += 1;
+
+    const table = try appendTableSkeleton(buf, allocator, 8, 72, VT_HEADER_ATTRIBUTE_INDEX + 2, fields[0..field_count]);
+    var pos = table.table_pos + rel_transform;
+    inline for ([_]f64{
+        transform.scale[0],
+        transform.scale[1],
+        transform.scale[2],
+        transform.translate[0],
+        transform.translate[1],
+        transform.translate[2],
+    }) |v| {
+        std.mem.writeInt(u64, buf.items[pos..][0..8], @bitCast(v), .little);
+        pos += 8;
+    }
+    std.mem.writeInt(u64, buf.items[table.table_pos + rel_feature_count ..][0..8], 0, .little);
+    std.mem.writeInt(u16, buf.items[table.table_pos + rel_index_node_size ..][0..2], 0, .little);
+
+    if (root_columns.len > 0) {
+        try alignAppend4(buf, allocator);
+        const columns_start = buf.items.len;
+        try appendU32Le(buf, allocator, @intCast(root_columns.len));
+        const offsets_start = buf.items.len;
+        for (0..root_columns.len) |_| {
+            try appendU32Le(buf, allocator, 0);
+        }
+        for (root_columns, 0..) |column, i| {
+            const col_table = try encodeColumnTable(allocator, buf, column);
+            const offset_pos = offsets_start + i * 4;
+            const rel: u32 = @intCast(col_table - offset_pos);
+            std.mem.writeInt(u32, buf.items[offset_pos..][0..4], rel, .little);
+        }
+        try patchUOffset(buf.items, table.table_pos + rel_columns, columns_start);
+    }
+
+    return .{
+        .table_pos = table.table_pos,
+        .feature_count_field_pos = table.table_pos + rel_feature_count,
+    };
 }
 
 fn buildObjectId(allocator: std.mem.Allocator, feature_id: []const u8) ![]u8 {
@@ -1351,191 +2488,6 @@ fn buildObjectId(allocator: std.mem.Allocator, feature_id: []const u8) ![]u8 {
     out[feature_id.len] = '-';
     out[feature_id.len + 1] = '0';
     return out;
-}
-
-fn findLod22SolidGeometryTable(buf: []const u8, feature_id: []const u8) !usize {
-    const feature_table = try fb.sizePrefixedRootTable(buf);
-    const objects_vec = (try fb.getVectorInfo(buf, feature_table, VT_FEATURE_OBJECTS)) orelse {
-        return error.MissingRequiredField;
-    };
-
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const object_id = try buildObjectId(a, feature_id);
-
-    for (0..objects_vec.len) |obj_i| {
-        const obj_table = try fb.vectorTableAt(buf, objects_vec, obj_i);
-        const obj_id = try fb.getRequiredString(buf, obj_table, VT_OBJECT_ID);
-        if (!std.mem.eql(u8, obj_id, object_id)) continue;
-
-        const geom_vec = (try fb.getVectorInfo(buf, obj_table, VT_OBJECT_GEOMETRY)) orelse {
-            return error.MissingRequiredField;
-        };
-
-        for (0..geom_vec.len) |geom_i| {
-            const geom_table = try fb.vectorTableAt(buf, geom_vec, geom_i);
-            const geom_type_raw = try fb.getScalarU8Default(buf, geom_table, VT_GEOMETRY_TYPE, 0);
-            const geom_type: GeometryType = @enumFromInt(geom_type_raw);
-            const solid_like = geom_type == .Solid or geom_type == .MultiSolid or geom_type == .CompositeSolid;
-            if (!solid_like) continue;
-
-            const lod = (try fb.getString(buf, geom_table, VT_GEOMETRY_LOD)) orelse continue;
-            if (std.mem.eql(u8, lod, "2.2")) {
-                return geom_table;
-            }
-        }
-
-        return error.TargetGeometryNotFound;
-    }
-
-    return error.TargetObjectNotFound;
-}
-
-fn patchCurrentFeatureGeometryLod22(
-    allocator: std.mem.Allocator,
-    reader: *Reader,
-    feature_id: []const u8,
-    vertices_xyz_world: []const f64,
-    triangle_indices: []const u32,
-    semantic_types: []const u8,
-    out_feature_bytes: *std.ArrayList(u8),
-) !void {
-    if (triangle_indices.len % 3 != 0) return error.InvalidTriangleIndexArray;
-    if (vertices_xyz_world.len % 3 != 0) return error.InvalidVertexArray;
-    const new_vertex_count = vertices_xyz_world.len / 3;
-    if (new_vertex_count == 0) return error.InvalidVertexArray;
-    const tri_count = triangle_indices.len / 3;
-    if (semantic_types.len != tri_count) return error.InvalidSemanticTypesArray;
-    for (triangle_indices) |idx| {
-        if (idx >= new_vertex_count) return error.InvalidTriangleIndexArray;
-    }
-
-    out_feature_bytes.clearRetainingCapacity();
-    try out_feature_bytes.appendSlice(allocator, reader.feature_buf.items);
-
-    // Read original vertex data from the feature buffer so other geometries keep working.
-    const feature_table_orig = try fb.sizePrefixedRootTable(out_feature_bytes.items);
-    const orig_verts_vec = (try fb.getVectorInfo(out_feature_bytes.items, feature_table_orig, VT_FEATURE_VERTICES)) orelse {
-        return error.RewriteUnsupportedFeatureLayout;
-    };
-    const orig_vertex_count = orig_verts_vec.len;
-    const orig_verts_bytes = orig_vertex_count * 12; // 3 × i32 per vertex
-    const orig_verts_end = try checkedAdd(orig_verts_vec.start, orig_verts_bytes);
-    if (orig_verts_end > out_feature_bytes.items.len) return error.InvalidFlatBuffer;
-
-    // Save a copy of the original quantized vertices before we start appending,
-    // because appending may reallocate and invalidate the slice.
-    const orig_verts_copy = try allocator.alloc(u8, orig_verts_bytes);
-    defer allocator.free(orig_verts_copy);
-    @memcpy(orig_verts_copy, out_feature_bytes.items[orig_verts_vec.start..orig_verts_end]);
-
-    // Build combined vertex vector: original quantized vertices + new quantized vertices.
-    // This preserves vertex indices used by other geometries (LoD 1.2, 1.3, etc.).
-    try alignAppend4(out_feature_bytes, allocator);
-    const vertices_vec_start = out_feature_bytes.items.len;
-    const total_vertex_count = orig_vertex_count + new_vertex_count;
-    try appendU32Le(out_feature_bytes, allocator, @intCast(total_vertex_count));
-    // Copy original quantized vertices as-is.
-    try out_feature_bytes.appendSlice(allocator, orig_verts_copy);
-    // Append new vertices (quantized from world coordinates).
-    for (0..new_vertex_count) |i| {
-        const x = vertices_xyz_world[i * 3];
-        const y = vertices_xyz_world[i * 3 + 1];
-        const z = vertices_xyz_world[i * 3 + 2];
-        try appendI32Le(out_feature_bytes, allocator, try quantizeCoordinate(x, reader.transform.scale[0], reader.transform.translate[0]));
-        try appendI32Le(out_feature_bytes, allocator, try quantizeCoordinate(y, reader.transform.scale[1], reader.transform.translate[1]));
-        try appendI32Le(out_feature_bytes, allocator, try quantizeCoordinate(z, reader.transform.scale[2], reader.transform.translate[2]));
-    }
-
-    // Offset triangle indices so they reference the new vertices (after the original ones).
-    const index_offset: u32 = @intCast(orig_vertex_count);
-    const solids_start = try appendVectorU32Values(out_feature_bytes, allocator, &.{1});
-    const shells_start = try appendVectorU32Values(out_feature_bytes, allocator, &.{@intCast(tri_count)});
-    const surfaces_start = try appendVectorU32Repeated(out_feature_bytes, allocator, tri_count, 1);
-    const strings_start = try appendVectorU32Repeated(out_feature_bytes, allocator, tri_count, 3);
-    // Write offset triangle indices.
-    try alignAppend4(out_feature_bytes, allocator);
-    const boundaries_start = out_feature_bytes.items.len;
-    try appendU32Le(out_feature_bytes, allocator, @intCast(triangle_indices.len));
-    for (triangle_indices) |idx| {
-        try appendU32Le(out_feature_bytes, allocator, idx + index_offset);
-    }
-
-    // Resolve geometry table and check which semantic fields need vtable injection.
-    // We do this BEFORE appending semantic data so we can allocate UOffset slots
-    // that point forward to data appended later.
-    const feature_table = try fb.sizePrefixedRootTable(out_feature_bytes.items);
-    const vertices_field_pos = (try fb.tableFieldPos(out_feature_bytes.items, feature_table, VT_FEATURE_VERTICES)) orelse {
-        return error.RewriteUnsupportedFeatureLayout;
-    };
-    try patchUOffset(out_feature_bytes.items, vertices_field_pos, vertices_vec_start);
-
-    const geom_table = try findLod22SolidGeometryTable(out_feature_bytes.items, feature_id);
-
-    // Patch geometry structure fields (these already exist in the original vtable).
-    inline for ([_]struct {
-        vtable_offset: u16,
-        target_start: usize,
-    }{
-        .{ .vtable_offset = VT_GEOMETRY_SOLIDS, .target_start = solids_start },
-        .{ .vtable_offset = VT_GEOMETRY_SHELLS, .target_start = shells_start },
-        .{ .vtable_offset = VT_GEOMETRY_SURFACES, .target_start = surfaces_start },
-        .{ .vtable_offset = VT_GEOMETRY_STRINGS, .target_start = strings_start },
-        .{ .vtable_offset = VT_GEOMETRY_BOUNDARIES, .target_start = boundaries_start },
-    }) |entry| {
-        const field_pos = (try fb.tableFieldPos(out_feature_bytes.items, geom_table, entry.vtable_offset)) orelse {
-            return error.RewriteUnsupportedGeometryLayout;
-        };
-        try patchUOffset(out_feature_bytes.items, field_pos, entry.target_start);
-    }
-
-    // If semantics_objects field is absent from the vtable, allocate a UOffset
-    // slot now (before appending data) so the UOffset can point forward.
-    const sem_objects_existing_field = try fb.tableFieldPos(out_feature_bytes.items, geom_table, VT_GEOMETRY_SEMANTICS_OBJECTS);
-    const sem_objects_injected_slot: ?usize = if (sem_objects_existing_field == null)
-        try allocateVtableUOffsetSlot(out_feature_bytes, allocator, geom_table, VT_GEOMETRY_SEMANTICS_OBJECTS)
-    else
-        null;
-
-    // Build semantic surface objects and per-triangle index mapping.
-    var unique_types: [256]bool = .{false} ** 256;
-    for (semantic_types) |t| unique_types[t] = true;
-
-    var type_to_obj_index: [256]u32 = .{std.math.maxInt(u32)} ** 256;
-    var obj_types: [256]u8 = undefined;
-    var obj_count: u32 = 0;
-    for (0..256) |t| {
-        if (unique_types[t]) {
-            type_to_obj_index[t] = obj_count;
-            obj_types[obj_count] = @intCast(t);
-            obj_count += 1;
-        }
-    }
-
-    // Write semantics index vector (per-triangle object indices).
-    const semantics_start = try appendVectorU32Mapped(out_feature_bytes, allocator, semantic_types, &type_to_obj_index);
-
-    // Build semantics_objects: a flatbuffer vector of SemanticObject tables.
-    const sem_objects_start = try appendSemanticObjectsVector(out_feature_bytes, allocator, obj_types[0..obj_count]);
-
-    // Patch semantics indices.
-    if (try fb.tableFieldPos(out_feature_bytes.items, geom_table, VT_GEOMETRY_SEMANTICS)) |sem_field_pos| {
-        try patchUOffset(out_feature_bytes.items, sem_field_pos, semantics_start);
-    }
-
-    // Patch semantics_objects vector.
-    if (sem_objects_existing_field) |sem_obj_field_pos| {
-        try patchUOffset(out_feature_bytes.items, sem_obj_field_pos, sem_objects_start);
-    } else if (sem_objects_injected_slot) |slot_pos| {
-        // Fill in the injected UOffset slot.
-        if (sem_objects_start <= slot_pos) return error.InvalidRewriteOffset;
-        const rel: u32 = @intCast(sem_objects_start - slot_pos);
-        std.mem.writeInt(u32, out_feature_bytes.items[slot_pos..][0..4], rel, .little);
-    }
-
-    const payload_len: u32 = @intCast(out_feature_bytes.items.len - 4);
-    std.mem.writeInt(u32, out_feature_bytes.items[0..4], payload_len, .little);
 }
 
 // =============================================================================
@@ -1802,6 +2754,31 @@ export fn zfcb_writer_open_from_reader_no_index(
     return writer;
 }
 
+export fn zfcb_writer_open_new_no_index(
+    output_path: [*c]const u8,
+    scale_x: f64,
+    scale_y: f64,
+    scale_z: f64,
+    translate_x: f64,
+    translate_y: f64,
+    translate_z: f64,
+) callconv(.c) ?ZfcbWriterHandle {
+    const output_path_slice = std.mem.span(output_path);
+    const writer = c_allocator.create(Writer) catch return null;
+    writer.* = Writer.openPathNewNoIndex(
+        output_path_slice,
+        .{
+            .scale = .{ scale_x, scale_y, scale_z },
+            .translate = .{ translate_x, translate_y, translate_z },
+        },
+        EMPTY_COLUMNS,
+    ) catch {
+        c_allocator.destroy(writer);
+        return null;
+    };
+    return writer;
+}
+
 export fn zfcb_writer_destroy(writer_handle: ?ZfcbWriterHandle) callconv(.c) void {
     if (writer_handle) |writer| {
         writer.deinit();
@@ -1837,6 +2814,19 @@ export fn zfcb_writer_write_current_raw(
     return 0;
 }
 
+// Writes a complete size-prefixed feature payload (4-byte length + feature bytes).
+// Returns 0 on success, -1 on error.
+export fn zfcb_writer_write_feature_raw_bytes(
+    writer_handle: ?ZfcbWriterHandle,
+    feature_bytes: [*c]const u8,
+    feature_len: usize,
+) callconv(.c) c_int {
+    const writer = writer_handle orelse return -1;
+    if (feature_bytes == null or feature_len < 4) return -1;
+    writer.writeFeatureRaw(feature_bytes[0..feature_len]) catch return -1;
+    return 0;
+}
+
 // Replaces feature vertices and the target Solid/LoD2.2 geometry for object "<feature_id>-0".
 // triangle_indices is a flat triangle index list (multiple of 3).
 // Returns 0 on success, -1 on error.
@@ -1866,18 +2856,14 @@ export fn zfcb_writer_write_current_replaced_lod22(
     const triangle_indices = triangle_indices_ptr[0..triangle_index_count];
     const semantic_types = semantic_types_ptr[0..semantic_types_count];
 
+    var builder = FeatureBuilder.init(c_allocator, reader.transform);
+    defer builder.deinit();
+    builder.loadCurrentFromReader(reader) catch return -1;
+    builder.replaceLod22Solid(feature_id, vertices_xyz_world, triangle_indices, semantic_types) catch return -1;
+
     var rewritten_feature = std.ArrayList(u8){};
     defer rewritten_feature.deinit(c_allocator);
-
-    patchCurrentFeatureGeometryLod22(
-        c_allocator,
-        reader,
-        feature_id,
-        vertices_xyz_world,
-        triangle_indices,
-        semantic_types,
-        &rewritten_feature,
-    ) catch return -1;
+    builder.encodeFeature(&rewritten_feature) catch return -1;
     writer.writeFeatureRaw(rewritten_feature.items) catch return -1;
     return 0;
 }
@@ -1896,6 +2882,85 @@ fn openSampleReader(allocator: std.mem.Allocator) !Reader {
         return reader;
     }
     return error.FileNotFound;
+}
+
+fn buildSyntheticFeatureBuilder(
+    allocator: std.mem.Allocator,
+    transform: Transform,
+    include_unused_vertices: bool,
+) !FeatureBuilder {
+    var builder = FeatureBuilder.init(allocator, transform);
+    errdefer builder.deinit();
+
+    builder.feature_id = "synthetic-feature";
+    builder.has_vertices = true;
+    const vertex_count: usize = if (include_unused_vertices) 5 else 3;
+    builder.vertices_q = try allocator.alloc(QuantizedVertex, vertex_count);
+    builder.vertices_q[0] = .{ .x = 0, .y = 0, .z = 0 };
+    builder.vertices_q[1] = .{ .x = 10, .y = 0, .z = 0 };
+    builder.vertices_q[2] = .{ .x = 0, .y = 10, .z = 0 };
+    if (include_unused_vertices) {
+        builder.vertices_q[3] = .{ .x = 50, .y = 50, .z = 10 };
+        builder.vertices_q[4] = .{ .x = 100, .y = 100, .z = 20 };
+    }
+
+    builder.has_objects = true;
+    builder.objects = try allocator.alloc(FeatureObjectData, 1);
+    builder.objects[0] = .{
+        .id = "synthetic-feature-0",
+        .object_type = .Building,
+        .extension_type = null,
+        .geometries = try allocator.alloc(FeatureGeometryData, 1),
+        .has_geometries = true,
+        .attributes_raw = EMPTY_U8,
+        .has_attributes = false,
+        .columns = EMPTY_COLUMNS,
+        .has_columns = false,
+        .children = EMPTY_STRINGS,
+        .has_children = false,
+        .children_roles = EMPTY_STRINGS,
+        .has_children_roles = false,
+        .parents = EMPTY_STRINGS,
+        .has_parents = false,
+    };
+
+    const solids = try allocator.alloc(u32, 1);
+    solids[0] = 1;
+    const shells = try allocator.alloc(u32, 1);
+    shells[0] = 1;
+    const surfaces = try allocator.alloc(u32, 1);
+    surfaces[0] = 1;
+    const strings = try allocator.alloc(u32, 1);
+    strings[0] = 3;
+    const boundaries = try allocator.alloc(u32, 3);
+    boundaries[0] = 0;
+    boundaries[1] = 1;
+    boundaries[2] = 2;
+    const semantics = try allocator.alloc(u32, 1);
+    semantics[0] = 0;
+    const semantics_objects = try allocator.alloc(u8, 1);
+    semantics_objects[0] = 2;
+
+    builder.objects[0].geometries[0] = .{
+        .geometry_type = .Solid,
+        .lod = "2.2",
+        .solids = solids,
+        .has_solids = true,
+        .shells = shells,
+        .has_shells = true,
+        .surfaces = surfaces,
+        .has_surfaces = true,
+        .strings = strings,
+        .has_strings = true,
+        .boundaries = boundaries,
+        .has_boundaries = true,
+        .semantics = semantics,
+        .has_semantics = true,
+        .semantics_objects = semantics_objects,
+        .has_semantics_objects = true,
+    };
+
+    return builder;
 }
 
 test "stream fcb with peek and next" {
@@ -1963,4 +3028,171 @@ test "stream all features and aggregate geometry safely" {
     // Dataset-specific sanity check from sample_data/9-444-728.fcb.
     try std.testing.expectEqual(@as(u64, 6057), object_count);
     try std.testing.expect(attribute_count > 0);
+}
+
+test "feature builder encode/decode preserves geometry semantics" {
+    var builder = try buildSyntheticFeatureBuilder(std.testing.allocator, .{}, false);
+    defer builder.deinit();
+
+    var feature_bytes = std.ArrayList(u8){};
+    defer feature_bytes.deinit(std.testing.allocator);
+    try builder.encodeFeature(&feature_bytes);
+
+    var path_buf: [256]u8 = undefined;
+    const path = try std.fmt.bufPrint(
+        &path_buf,
+        "/tmp/zfcb_semantics_roundtrip_{d}.fcb",
+        .{std.time.milliTimestamp()},
+    );
+    defer std.fs.deleteFileAbsolute(path) catch {};
+
+    var writer = try Writer.openPathNewNoIndex(path, .{}, EMPTY_COLUMNS);
+    try writer.writeFeatureRaw(feature_bytes.items);
+    writer.deinit();
+
+    var reader = try Reader.openPath(std.testing.allocator, path);
+    defer reader.deinit();
+
+    try std.testing.expectEqual(@as(u64, 1), reader.featureCount());
+    const feature = (try reader.next()).?;
+    try std.testing.expectEqual(@as(usize, 1), feature.objects.len);
+    try std.testing.expectEqual(@as(usize, 1), feature.objects[0].geometries.len);
+    const geom = feature.objects[0].geometries[0];
+    try std.testing.expectEqual(@as(usize, 1), geom.semantics.len);
+    try std.testing.expectEqual(@as(usize, 1), geom.semantics_objects.len);
+    try std.testing.expectEqual(@as(u32, 0), geom.semantics[0]);
+    try std.testing.expectEqual(@as(u8, 2), geom.semantics_objects[0]);
+}
+
+test "feature builder replace lod22 compacts unused vertices" {
+    var builder = try buildSyntheticFeatureBuilder(std.testing.allocator, .{}, true);
+    defer builder.deinit();
+
+    const replacement_vertices = [_]f64{
+        0, 0, 0,
+        10, 0, 0,
+        0, 10, 0,
+        0, 10, 0, // duplicate
+        99, 99, 99, // unused
+    };
+    const replacement_triangles = [_]u32{ 0, 1, 2, 0, 2, 3 };
+    const replacement_semantics = [_]u8{ 1, 2 };
+
+    try builder.replaceLod22Solid(
+        "synthetic-feature",
+        &replacement_vertices,
+        &replacement_triangles,
+        &replacement_semantics,
+    );
+
+    const geom = builder.objects[0].geometries[0];
+    try std.testing.expectEqual(@as(usize, 2), geom.semantics.len);
+    try std.testing.expectEqual(@as(usize, 2), geom.semantics_objects.len);
+
+    const used = try std.testing.allocator.alloc(bool, builder.vertices_q.len);
+    defer std.testing.allocator.free(used);
+    @memset(used, false);
+    for (builder.objects) |obj| {
+        for (obj.geometries) |g| {
+            if (!g.has_boundaries) continue;
+            for (g.boundaries) |idx| {
+                used[idx] = true;
+            }
+        }
+    }
+    for (used) |u| {
+        try std.testing.expect(u);
+    }
+}
+
+test "feature builder encoded tables are aligned" {
+    var builder = try buildSyntheticFeatureBuilder(std.testing.allocator, .{}, false);
+    defer builder.deinit();
+
+    var feature_bytes = std.ArrayList(u8){};
+    defer feature_bytes.deinit(std.testing.allocator);
+    try builder.encodeFeature(&feature_bytes);
+
+    const feature_table = try fb.sizePrefixedRootTable(feature_bytes.items);
+    try std.testing.expectEqual(@as(usize, 0), feature_table & 3);
+
+    const objects_vec = (try fb.getVectorInfo(feature_bytes.items, feature_table, VT_FEATURE_OBJECTS)).?;
+    for (0..objects_vec.len) |obj_i| {
+        const obj_table = try fb.vectorTableAt(feature_bytes.items, objects_vec, obj_i);
+        try std.testing.expectEqual(@as(usize, 0), obj_table & 3);
+
+        if (try fb.getVectorInfo(feature_bytes.items, obj_table, VT_OBJECT_GEOMETRY)) |geom_vec| {
+            for (0..geom_vec.len) |geom_i| {
+                const geom_table = try fb.vectorTableAt(feature_bytes.items, geom_vec, geom_i);
+                try std.testing.expectEqual(@as(usize, 0), geom_table & 3);
+            }
+        }
+    }
+}
+
+test "feature builder preserves object parent child links" {
+    var reader = try openSampleReader(std.testing.allocator);
+    defer reader.deinit();
+    _ = (try reader.next()) orelse return error.MissingRequiredField;
+
+    var builder = FeatureBuilder.init(std.testing.allocator, reader.transform);
+    defer builder.deinit();
+    try builder.loadCurrentFromReader(&reader);
+
+    var feature_bytes = std.ArrayList(u8){};
+    defer feature_bytes.deinit(std.testing.allocator);
+    try builder.encodeFeature(&feature_bytes);
+
+    const feature_table = try fb.sizePrefixedRootTable(feature_bytes.items);
+    const objects_vec = (try fb.getVectorInfo(feature_bytes.items, feature_table, VT_FEATURE_OBJECTS)) orelse {
+        return error.MissingRequiredField;
+    };
+
+    var found_children = false;
+    var found_parents = false;
+    for (0..objects_vec.len) |obj_i| {
+        const obj_table = try fb.vectorTableAt(feature_bytes.items, objects_vec, obj_i);
+        const obj_id = try fb.getRequiredString(feature_bytes.items, obj_table, VT_OBJECT_ID);
+
+        if (std.mem.endsWith(u8, obj_id, "-0")) {
+            if (try fb.getVectorInfo(feature_bytes.items, obj_table, VT_OBJECT_PARENTS)) |parents_vec| {
+                if (parents_vec.len > 0) found_parents = true;
+            }
+        } else {
+            if (try fb.getVectorInfo(feature_bytes.items, obj_table, VT_OBJECT_CHILDREN)) |children_vec| {
+                if (children_vec.len > 0) found_children = true;
+            }
+        }
+    }
+
+    try std.testing.expect(found_children);
+    try std.testing.expect(found_parents);
+}
+
+test "writer open new no index patches feature count on close" {
+    var builder = try buildSyntheticFeatureBuilder(std.testing.allocator, .{}, false);
+    defer builder.deinit();
+
+    var path_buf: [256]u8 = undefined;
+    const path = try std.fmt.bufPrint(
+        &path_buf,
+        "/tmp/zfcb_new_writer_{d}.fcb",
+        .{std.time.milliTimestamp()},
+    );
+    defer std.fs.deleteFileAbsolute(path) catch {};
+
+    var writer = try Writer.openPathNewNoIndex(path, .{}, EMPTY_COLUMNS);
+    try writer.writeFeatureBuilt(std.testing.allocator, &builder);
+    try writer.writeFeatureBuilt(std.testing.allocator, &builder);
+    writer.deinit();
+
+    var reader = try Reader.openPath(std.testing.allocator, path);
+    defer reader.deinit();
+    try std.testing.expectEqual(@as(u64, 2), reader.featureCount());
+
+    var streamed_count: u64 = 0;
+    while (try reader.next()) |_| {
+        streamed_count += 1;
+    }
+    try std.testing.expectEqual(@as(u64, 2), streamed_count);
 }

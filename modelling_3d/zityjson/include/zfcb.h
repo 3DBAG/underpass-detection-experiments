@@ -108,6 +108,16 @@ ZfcbWriterHandle zfcb_writer_open_from_reader(ZfcbReaderHandle reader_handle, co
 // from the output header. Use this when features may be modified (changed byte lengths
 // would invalidate the original index offsets).
 ZfcbWriterHandle zfcb_writer_open_from_reader_no_index(ZfcbReaderHandle reader_handle, const char* output_path);
+// Open a new FlatCityBuf writer from scratch (no spatial/attribute indexes).
+// feature_count in the header is patched automatically on close.
+ZfcbWriterHandle zfcb_writer_open_new_no_index(
+    const char* output_path,
+    double scale_x,
+    double scale_y,
+    double scale_z,
+    double translate_x,
+    double translate_y,
+    double translate_z);
 void zfcb_writer_destroy(ZfcbWriterHandle writer_handle);
 
 // Write the pending (peeked but not yet decoded) raw feature bytes. Returns 1/0/-1.
@@ -115,6 +125,13 @@ int zfcb_writer_write_pending_raw(ZfcbReaderHandle reader_handle, ZfcbWriterHand
 
 // Write the current (decoded) feature's raw bytes. Returns 0/-1.
 int zfcb_writer_write_current_raw(ZfcbReaderHandle reader_handle, ZfcbWriterHandle writer_handle);
+
+// Write a full size-prefixed feature payload (4-byte length prefix + feature bytes).
+// Returns 0 on success, -1 on error.
+int zfcb_writer_write_feature_raw_bytes(
+    ZfcbWriterHandle writer_handle,
+    const uint8_t* feature_bytes,
+    size_t feature_len);
 
 // Write the current feature with its LoD 2.2 Solid geometry replaced by a triangle mesh.
 // vertices_xyz_world: flat xyz array (length = vertex_count * 3) in world coordinates.
