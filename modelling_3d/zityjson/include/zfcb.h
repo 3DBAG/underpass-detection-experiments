@@ -63,6 +63,9 @@ typedef enum {
 // Open / close streaming reader.
 // Returns NULL on failure.
 ZfcbReaderHandle zfcb_reader_open(const char* path);
+// Open reader from an existing Unix file descriptor.
+// close_on_destroy: non-zero => close(fd) in zfcb_reader_destroy, 0 => leave fd open.
+ZfcbReaderHandle zfcb_reader_open_fd(int fd, int close_on_destroy);
 void zfcb_reader_destroy(ZfcbReaderHandle handle);
 
 uint64_t zfcb_feature_count(ZfcbReaderHandle handle);
@@ -104,10 +107,22 @@ const uint32_t* zfcb_current_geometry_boundaries(ZfcbReaderHandle handle, size_t
 typedef struct Writer* ZfcbWriterHandle;
 
 ZfcbWriterHandle zfcb_writer_open_from_reader(ZfcbReaderHandle reader_handle, const char* output_path);
+// Unix fd variant of zfcb_writer_open_from_reader.
+// close_on_destroy: non-zero => close(fd) in zfcb_writer_destroy, 0 => leave fd open.
+ZfcbWriterHandle zfcb_writer_open_from_reader_fd(
+    ZfcbReaderHandle reader_handle,
+    int fd,
+    int close_on_destroy);
 // Like zfcb_writer_open_from_reader but strips the spatial and attribute indexes
 // from the output header. Use this when features may be modified (changed byte lengths
 // would invalidate the original index offsets).
 ZfcbWriterHandle zfcb_writer_open_from_reader_no_index(ZfcbReaderHandle reader_handle, const char* output_path);
+// Unix fd variant of zfcb_writer_open_from_reader_no_index.
+// close_on_destroy: non-zero => close(fd) in zfcb_writer_destroy, 0 => leave fd open.
+ZfcbWriterHandle zfcb_writer_open_from_reader_no_index_fd(
+    ZfcbReaderHandle reader_handle,
+    int fd,
+    int close_on_destroy);
 // Open a new FlatCityBuf writer from scratch (no spatial/attribute indexes).
 // feature_count in the header is patched automatically on close.
 ZfcbWriterHandle zfcb_writer_open_new_no_index(

@@ -5,6 +5,10 @@
 #include <string_view>
 #include <unordered_map>
 #include <vector>
+#include <cstdio>
+#if defined(_WIN32)
+#include <io.h>
+#endif
 
 #include <manifold/manifold.h>
 #include <manifold/meshIO.h>
@@ -21,6 +25,22 @@
 #include "RerunVisualization.h"
 
 using Clock = std::chrono::steady_clock;
+
+static int stdin_fd() {
+#if defined(_WIN32)
+    return _fileno(stdin);
+#else
+    return fileno(stdin);
+#endif
+}
+
+static int stdout_fd() {
+#if defined(_WIN32)
+    return _fileno(stdout);
+#else
+    return fileno(stdout);
+#endif
+}
 
 // SemanticSurfaceType enum values matching FCB geometry.fbs
 namespace SemanticSurfaceType {
@@ -93,7 +113,8 @@ int main(int argc, char* argv[]) {
                   << " <cityjson_or_fcb_file> <ogr_source> <height_attribute> [id_attribute] [method] [output_fcb]" << std::endl;
         std::cerr << "  id_attribute default: identificatie" << std::endl;
         std::cerr << "  method: manifold (default), nef, pmp" << std::endl;
-        std::cerr << "  output_fcb: path for FCB output (only used when input is .fcb)" << std::endl;
+        std::cerr << "  output_fcb: path for FCB output (only used when input is .fcb); use '-' for stdout" << std::endl;
+        std::cerr << "  cityjson_or_fcb_file: use '-' to read FCB from stdin" << std::endl;
         return 1;
     }
 
@@ -104,6 +125,9 @@ int main(int argc, char* argv[]) {
     std::string method_str = argc > 5 ? argv[5] : "manifold";
     bool undo_offset = false;
     const char* output_fcb_path = argc > 6 ? argv[6] : nullptr;
+    const bool model_from_stdin = std::string_view(model_path) == "-";
+    const bool output_to_stdout = output_fcb_path != nullptr && std::string_view(output_fcb_path) == "-";
+    std::ostream& log_out = output_to_stdout ? static_cast<std::ostream&>(std::cerr) : static_cast<std::ostream&>(std::cout);
 
     BooleanMethod method = BooleanMethod::Manifold;
     if (method_str == "nef") {
@@ -115,25 +139,33 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    const bool use_fcb_input = is_fcb_path(model_path);
+    const bool use_fcb_input = model_from_stdin || is_fcb_path(model_path);
+    if (output_to_stdout && !use_fcb_input) {
+        std::cerr << "Output '-' (stdout) is only supported when input is FlatCityBuf." << std::endl;
+        return 1;
+    }
 
     ogr::VectorReader reader;
     auto t_ogr_read_start = Clock::now();
     reader.open(ogr_source_path);
     auto polygon_features = reader.read_polygon_features(id_attribute, height_attribute);
     auto t_ogr_read_end = Clock::now();
-    std::cout << std::format("Read {} polygon features", polygon_features.size()) << std::endl;
-    std::cout << std::format("Model input: {} ({})",
-                             model_path,
+    log_out << std::format("Read {} polygon features", polygon_features.size()) << std::endl;
+    log_out << std::format("Model input: {} ({})",
+                             model_from_stdin ? "stdin" : model_path,
                              use_fcb_input ? "FlatCityBuf stream" : "CityJSON") << std::endl;
 
     CityJSONHandle cj = nullptr;
     ZfcbReaderHandle fcb = nullptr;
     auto t_model_read_start = Clock::now();
     if (use_fcb_input) {
-        fcb = zfcb_reader_open(model_path);
+        if (model_from_stdin) {
+            fcb = zfcb_reader_open_fd(stdin_fd(), 0);
+        } else {
+            fcb = zfcb_reader_open(model_path);
+        }
         if (fcb == nullptr) {
-            std::cerr << "Failed to open FlatCityBuf stream: " << model_path << std::endl;
+            std::cerr << "Failed to open FlatCityBuf stream: " << (model_from_stdin ? "stdin" : model_path) << std::endl;
             return 1;
         }
     } else {
@@ -298,15 +330,19 @@ int main(int argc, char* argv[]) {
         ZfcbWriterHandle fcb_writer = nullptr;
         if (output_fcb_path != nullptr) {
             auto t_output_write_start = Clock::now();
-            fcb_writer = zfcb_writer_open_from_reader_no_index(fcb, output_fcb_path);
+            if (output_to_stdout) {
+                fcb_writer = zfcb_writer_open_from_reader_no_index_fd(fcb, stdout_fd(), 0);
+            } else {
+                fcb_writer = zfcb_writer_open_from_reader_no_index(fcb, output_fcb_path);
+            }
             auto t_output_write_end = Clock::now();
             output_write_ms += t_output_write_end - t_output_write_start;
             if (fcb_writer == nullptr) {
-                std::cerr << "Failed to open FCB writer: " << output_fcb_path << std::endl;
+                std::cerr << "Failed to open FCB writer: " << (output_to_stdout ? "stdout" : output_fcb_path) << std::endl;
                 zfcb_reader_destroy(fcb);
                 return 1;
             }
-            std::cout << std::format("FCB output: {}", output_fcb_path) << std::endl;
+            log_out << std::format("FCB output: {}", output_to_stdout ? "stdout" : output_fcb_path) << std::endl;
         }
 
         std::unordered_map<std::string_view, std::vector<size_t>> features_by_exact_id;
@@ -423,7 +459,7 @@ int main(int argc, char* argv[]) {
                 global_offset_y = verts[1];
                 global_offset_z = verts[2];
                 global_offset_set = true;
-                std::cout << std::format("Global offset set to ({}, {}, {})",
+                log_out << std::format("Global offset set to ({}, {}, {})",
                                          global_offset_x, global_offset_y, global_offset_z) << std::endl;
             }
 
@@ -618,7 +654,7 @@ int main(int argc, char* argv[]) {
         cityjson_destroy(cj);
     }
 
-    std::cout << std::format("Processed features: {}, skipped: {}", processed_count, skipped_count) << std::endl;
+    log_out << std::format("Processed features: {}, skipped: {}", processed_count, skipped_count) << std::endl;
 
     if (use_fcb_input && output_fcb_path != nullptr) {
         // FCB output was already written during streaming.
@@ -631,7 +667,7 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        std::cout << std::format("Final mesh - triangles: {}, vertices: {}",
+        log_out << std::format("Final mesh - triangles: {}, vertices: {}",
                                  combined_result_meshgl.NumTri(), combined_result_meshgl.NumVert()) << std::endl;
 
         if (undo_offset && global_offset_set) {
@@ -655,18 +691,18 @@ int main(int argc, char* argv[]) {
         other_ms = 0.0;
     }
 
-    std::cout << "Timing profile (ms):" << std::endl;
-    std::cout << std::format("  model reading: {:.3f}", model_read_ms) << std::endl;
-    std::cout << std::format("  ogr reading: {:.3f}", ogr_read_ms) << std::endl;
-    std::cout << std::format("  datastructure conversion: {:.3f}", ds_conversion_ms.count()) << std::endl;
-    std::cout << std::format("  intersecting: {:.3f}", intersection_ms.count()) << std::endl;
-    std::cout << std::format("  output writing: {:.3f}", output_write_ms_value) << std::endl;
+    log_out << "Timing profile (ms):" << std::endl;
+    log_out << std::format("  model reading: {:.3f}", model_read_ms) << std::endl;
+    log_out << std::format("  ogr reading: {:.3f}", ogr_read_ms) << std::endl;
+    log_out << std::format("  datastructure conversion: {:.3f}", ds_conversion_ms.count()) << std::endl;
+    log_out << std::format("  intersecting: {:.3f}", intersection_ms.count()) << std::endl;
+    log_out << std::format("  output writing: {:.3f}", output_write_ms_value) << std::endl;
     if (use_fcb_input && output_fcb_path != nullptr) {
-        std::cout << std::format("    changed features: {:.3f}", output_write_fcb_changed_ms.count()) << std::endl;
-        std::cout << std::format("    pass-through features: {:.3f}", output_write_fcb_passthrough_ms.count()) << std::endl;
+        log_out << std::format("    changed features: {:.3f}", output_write_fcb_changed_ms.count()) << std::endl;
+        log_out << std::format("    pass-through features: {:.3f}", output_write_fcb_passthrough_ms.count()) << std::endl;
     }
-    std::cout << std::format("  other: {:.3f}", other_ms) << std::endl;
-    std::cout << std::format("  total: {:.3f}", total_ms) << std::endl;
+    log_out << std::format("  other: {:.3f}", other_ms) << std::endl;
+    log_out << std::format("  total: {:.3f}", total_ms) << std::endl;
 
     return 0;
 }

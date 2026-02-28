@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 pub const MAGIC_BYTES = [_]u8{ 'f', 'c', 'b', 1, 'f', 'c', 'b', 0 };
 pub const HEADER_MAX_BUFFER_SIZE: usize = 512 * 1024 * 1024; // 512MB
@@ -205,6 +206,7 @@ pub const FeatureView = struct {
 pub const Reader = struct {
     allocator: std.mem.Allocator,
     file: std.fs.File,
+    owns_file: bool = true,
 
     transform: Transform = .{},
     feature_count: u64 = 0,
@@ -242,9 +244,14 @@ pub const Reader = struct {
         else
             try std.fs.cwd().openFile(path, .{ .mode = .read_only });
 
+        return openFile(allocator, file, true);
+    }
+
+    pub fn openFile(allocator: std.mem.Allocator, file: std.fs.File, owns_file: bool) !Reader {
         var reader = Reader{
             .allocator = allocator,
             .file = file,
+            .owns_file = owns_file,
         };
         errdefer reader.deinit();
         try reader.readHeader();
@@ -252,7 +259,9 @@ pub const Reader = struct {
     }
 
     pub fn deinit(self: *Reader) void {
-        self.file.close();
+        if (self.owns_file) {
+            self.file.close();
+        }
 
         self.feature_buf.deinit(self.allocator);
         self.scratch_vertices.deinit(self.allocator);
@@ -1086,6 +1095,7 @@ const fb = struct {
 
 pub const Writer = struct {
     file: std.fs.File,
+    owns_file: bool = true,
     transform: Transform = .{},
     feature_count_patch_pos: ?u64 = null,
     written_feature_count: u64 = 0,
@@ -1097,10 +1107,18 @@ pub const Writer = struct {
             try std.fs.cwd().createFile(path, .{ .truncate = true });
         errdefer file.close();
 
+        return openFileFromReader(reader, file, true);
+    }
+
+    pub fn openFileFromReader(reader: *const Reader, file: std.fs.File, owns_file: bool) !Writer {
+        if (owns_file) {
+            errdefer file.close();
+        }
         if (reader.preamble().len == 0) return error.MissingReaderPreamble;
         try file.writeAll(reader.preamble());
         return .{
             .file = file,
+            .owns_file = owns_file,
             .transform = reader.transform,
         };
     }
@@ -1112,7 +1130,9 @@ pub const Writer = struct {
             std.mem.writeInt(u64, &tmp, self.written_feature_count, .little);
             _ = self.file.writeAll(&tmp) catch {};
         }
-        self.file.close();
+        if (self.owns_file) {
+            self.file.close();
+        }
     }
 
     /// Opens a writer that copies the header from the reader but strips the spatial
@@ -1126,6 +1146,13 @@ pub const Writer = struct {
             try std.fs.cwd().createFile(path, .{ .truncate = true });
         errdefer file.close();
 
+        return openFileFromReaderNoIndex(reader, file, true);
+    }
+
+    pub fn openFileFromReaderNoIndex(reader: *const Reader, file: std.fs.File, owns_file: bool) !Writer {
+        if (owns_file) {
+            errdefer file.close();
+        }
         if (reader.header_buf.len < 8) return error.MissingReaderPreamble;
 
         const header_size = reader.headerSize();
@@ -1189,6 +1216,7 @@ pub const Writer = struct {
         try file.writeAll(buf[0..write_len]);
         return .{
             .file = file,
+            .owns_file = owns_file,
             .transform = reader.transform,
         };
     }
@@ -1209,6 +1237,7 @@ pub const Writer = struct {
         const patch_pos = try checkedAddU64(8, header.feature_count_field_pos);
         return .{
             .file = file,
+            .owns_file = true,
             .transform = transform,
             .feature_count_patch_pos = patch_pos,
         };
@@ -2510,10 +2539,29 @@ fn getCurrentGeometry(reader: *Reader, object_index: usize, geometry_index: usiz
     return &obj.geometries[geometry_index];
 }
 
+fn fileFromFd(fd: c_int) ?std.fs.File {
+    if (fd < 0) return null;
+    if (builtin.os.tag == .windows) return null;
+    const handle: std.fs.File.Handle = @as(std.posix.fd_t, @intCast(fd));
+    return .{ .handle = handle };
+}
+
 export fn zfcb_reader_open(path: [*c]const u8) callconv(.c) ?ZfcbReaderHandle {
     const path_slice = std.mem.span(path);
     const reader = c_allocator.create(Reader) catch return null;
     reader.* = Reader.openPath(c_allocator, path_slice) catch {
+        c_allocator.destroy(reader);
+        return null;
+    };
+    return reader;
+}
+
+// Opens a reader from an existing Unix file descriptor.
+// close_on_destroy: non-zero => close(fd) in zfcb_reader_destroy, 0 => leave open.
+export fn zfcb_reader_open_fd(fd: c_int, close_on_destroy: c_int) callconv(.c) ?ZfcbReaderHandle {
+    const file = fileFromFd(fd) orelse return null;
+    const reader = c_allocator.create(Reader) catch return null;
+    reader.* = Reader.openFile(c_allocator, file, close_on_destroy != 0) catch {
         c_allocator.destroy(reader);
         return null;
     };
@@ -2739,6 +2787,25 @@ export fn zfcb_writer_open_from_reader(
     return writer;
 }
 
+// Opens a writer from an existing Unix file descriptor and copies the full
+// preamble from reader (including indexes).
+// close_on_destroy: non-zero => close(fd) in zfcb_writer_destroy, 0 => leave open.
+export fn zfcb_writer_open_from_reader_fd(
+    reader_handle: ?ZfcbReaderHandle,
+    fd: c_int,
+    close_on_destroy: c_int,
+) callconv(.c) ?ZfcbWriterHandle {
+    const reader = reader_handle orelse return null;
+    const file = fileFromFd(fd) orelse return null;
+
+    const writer = c_allocator.create(Writer) catch return null;
+    writer.* = Writer.openFileFromReader(reader, file, close_on_destroy != 0) catch {
+        c_allocator.destroy(writer);
+        return null;
+    };
+    return writer;
+}
+
 export fn zfcb_writer_open_from_reader_no_index(
     reader_handle: ?ZfcbReaderHandle,
     output_path: [*c]const u8,
@@ -2748,6 +2815,25 @@ export fn zfcb_writer_open_from_reader_no_index(
 
     const writer = c_allocator.create(Writer) catch return null;
     writer.* = Writer.openPathFromReaderNoIndex(reader, output_path_slice) catch {
+        c_allocator.destroy(writer);
+        return null;
+    };
+    return writer;
+}
+
+// Opens a writer from an existing Unix file descriptor and writes a header with
+// no spatial/attribute indexes.
+// close_on_destroy: non-zero => close(fd) in zfcb_writer_destroy, 0 => leave open.
+export fn zfcb_writer_open_from_reader_no_index_fd(
+    reader_handle: ?ZfcbReaderHandle,
+    fd: c_int,
+    close_on_destroy: c_int,
+) callconv(.c) ?ZfcbWriterHandle {
+    const reader = reader_handle orelse return null;
+    const file = fileFromFd(fd) orelse return null;
+
+    const writer = c_allocator.create(Writer) catch return null;
+    writer.* = Writer.openFileFromReaderNoIndex(reader, file, close_on_destroy != 0) catch {
         c_allocator.destroy(writer);
         return null;
     };
