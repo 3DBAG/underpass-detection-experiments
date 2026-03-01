@@ -342,8 +342,8 @@ int main(int argc, char* argv[]) {
             ds_conversion_ms += t_conversion_end - t_conversion_start;
 
             manifold::MeshGL result_meshgl;
-            auto t_intersection_start = Clock::now();
             if (method == BooleanMethod::Manifold) {
+                auto t_conversion_start_local = Clock::now();
                 auto house_meshgl = surface_mesh_to_meshgl(house_sm, false);
                 auto underpass_meshgl = surface_mesh_to_meshgl(underpass_sm, false);
                 if (house_meshgl.NumTri() == 0 || underpass_meshgl.NumTri() == 0) {
@@ -355,6 +355,8 @@ int main(int argc, char* argv[]) {
 
                 manifold::Manifold house(house_meshgl);
                 manifold::Manifold underpass(underpass_meshgl);
+                auto t_conversion_end_local = Clock::now();
+                ds_conversion_ms += t_conversion_end_local - t_conversion_start_local;
                 if (house.Status() != manifold::Manifold::Error::NoError ||
                     underpass.Status() != manifold::Manifold::Error::NoError) {
                     std::cerr << std::format("Skipping feature {} (id='{}'): invalid manifold input",
@@ -363,27 +365,49 @@ int main(int argc, char* argv[]) {
                     continue;
                 }
 
+                auto t_intersection_start_local = Clock::now();
                 auto result = house - underpass;
+                auto t_intersection_end_local = Clock::now();
+                intersection_ms += t_intersection_end_local - t_intersection_start_local;
                 if (result.Status() != manifold::Manifold::Error::NoError) {
                     std::cerr << std::format("Skipping feature {} (id='{}'): manifold boolean failed",
                                              feature_idx, feature.id) << std::endl;
                     ++skipped_count;
                     continue;
                 }
+                t_conversion_start_local = Clock::now();
                 result_meshgl = result.GetMeshGL();
+                t_conversion_end_local = Clock::now();
+                ds_conversion_ms += t_conversion_end_local - t_conversion_start_local;
             } else if (method == BooleanMethod::CgalNef) {
-                Surface_mesh result_sm = nef_boolean_difference(house_sm, underpass_sm);
+                BooleanOpTiming timing;
+                Surface_mesh result_sm = nef_boolean_difference(house_sm, underpass_sm, &timing);
+                intersection_ms += timing.boolean_ms;
+                ds_conversion_ms += timing.conversion_ms;
+                auto t_conversion_start_local = Clock::now();
                 CGAL::Polygon_mesh_processing::triangulate_faces(result_sm);
                 result_meshgl = surface_mesh_to_meshgl(result_sm, false);
+                auto t_conversion_end_local = Clock::now();
+                ds_conversion_ms += t_conversion_end_local - t_conversion_start_local;
             } else if (method == BooleanMethod::Geogram) {
-                Surface_mesh result_sm = geogram_boolean_difference(house_sm, underpass_sm);
+                BooleanOpTiming timing;
+                Surface_mesh result_sm = geogram_boolean_difference(house_sm, underpass_sm, &timing);
+                intersection_ms += timing.boolean_ms;
+                ds_conversion_ms += timing.conversion_ms;
+                auto t_conversion_start_local = Clock::now();
                 result_meshgl = surface_mesh_to_meshgl(result_sm, false);
+                auto t_conversion_end_local = Clock::now();
+                ds_conversion_ms += t_conversion_end_local - t_conversion_start_local;
             } else {
-                Surface_mesh result_sm = corefine_boolean_difference(house_sm, underpass_sm);
+                BooleanOpTiming timing;
+                Surface_mesh result_sm = corefine_boolean_difference(house_sm, underpass_sm, &timing);
+                intersection_ms += timing.boolean_ms;
+                ds_conversion_ms += timing.conversion_ms;
+                auto t_conversion_start_local = Clock::now();
                 result_meshgl = surface_mesh_to_meshgl(result_sm, false);
+                auto t_conversion_end_local = Clock::now();
+                ds_conversion_ms += t_conversion_end_local - t_conversion_start_local;
             }
-            auto t_intersection_end = Clock::now();
-            intersection_ms += t_intersection_end - t_intersection_start;
 
             if (result_meshgl.NumTri() == 0) {
                 std::cerr << std::format("Skipping feature {} (id='{}'): boolean produced empty mesh",

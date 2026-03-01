@@ -1,5 +1,6 @@
 #include "BooleanOps.h"
 
+#include <chrono>
 #include <iostream>
 
 #include <CGAL/Exact_predicates_exact_constructions_kernel.h>
@@ -15,6 +16,7 @@
 using Exact_kernel = CGAL::Exact_predicates_exact_constructions_kernel;
 using Nef_polyhedron = CGAL::Nef_polyhedron_3<Exact_kernel>;
 using Exact_surface_mesh = CGAL::Surface_mesh<Exact_kernel::Point_3>;
+using Clock = std::chrono::steady_clock;
 
 static Exact_surface_mesh surface_mesh_to_exact(const Surface_mesh& sm) {
     Exact_surface_mesh esm;
@@ -146,61 +148,140 @@ static Surface_mesh geogram_mesh_to_surface_mesh(const GEO::Mesh& geo_mesh) {
     return sm;
 }
 
-Surface_mesh nef_boolean_difference(const Surface_mesh& mesh_a, const Surface_mesh& mesh_b) {
+Surface_mesh nef_boolean_difference(
+    const Surface_mesh& mesh_a,
+    const Surface_mesh& mesh_b,
+    BooleanOpTiming* timing) {
+    auto t_conversion_start = Clock::now();
     auto exact_a = surface_mesh_to_exact(mesh_a);
     auto exact_b = surface_mesh_to_exact(mesh_b);
 
     Nef_polyhedron nef_a(exact_a);
     Nef_polyhedron nef_b(exact_b);
+    auto t_conversion_end = Clock::now();
+    if (timing != nullptr) {
+        timing->conversion_ms += t_conversion_end - t_conversion_start;
+    }
 
+    auto t_boolean_start = Clock::now();
     Nef_polyhedron nef_result = nef_b - nef_a;
+    auto t_boolean_end = Clock::now();
+    if (timing != nullptr) {
+        timing->boolean_ms += t_boolean_end - t_boolean_start;
+    }
 
+    t_conversion_start = Clock::now();
     Exact_surface_mesh exact_result;
     CGAL::convert_nef_polyhedron_to_polygon_mesh(nef_result, exact_result);
-
-    return exact_to_surface_mesh(exact_result);
+    Surface_mesh result = exact_to_surface_mesh(exact_result);
+    t_conversion_end = Clock::now();
+    if (timing != nullptr) {
+        timing->conversion_ms += t_conversion_end - t_conversion_start;
+    }
+    return result;
 }
 
-Surface_mesh nef_boolean_difference(const Surface_mesh& mesh_a, const std::vector<Surface_mesh>& meshes_b) {
+Surface_mesh nef_boolean_difference(
+    const Surface_mesh& mesh_a,
+    const std::vector<Surface_mesh>& meshes_b,
+    BooleanOpTiming* timing) {
+    auto t_conversion_start = Clock::now();
     auto exact_a = surface_mesh_to_exact(mesh_a);
     Nef_polyhedron nef_result(exact_a);
+    auto t_conversion_end = Clock::now();
+    if (timing != nullptr) {
+        timing->conversion_ms += t_conversion_end - t_conversion_start;
+    }
 
     for (const auto& mesh_b : meshes_b) {
+        t_conversion_start = Clock::now();
         auto exact_b = surface_mesh_to_exact(mesh_b);
         Nef_polyhedron nef_b(exact_b);
+        t_conversion_end = Clock::now();
+        if (timing != nullptr) {
+            timing->conversion_ms += t_conversion_end - t_conversion_start;
+        }
+
+        auto t_boolean_start = Clock::now();
         nef_result = nef_result - nef_b;
+        auto t_boolean_end = Clock::now();
+        if (timing != nullptr) {
+            timing->boolean_ms += t_boolean_end - t_boolean_start;
+        }
+    }
+
+    t_conversion_start = Clock::now();
+    Exact_surface_mesh exact_result;
+    CGAL::convert_nef_polyhedron_to_polygon_mesh(nef_result, exact_result);
+    Surface_mesh result = exact_to_surface_mesh(exact_result);
+    t_conversion_end = Clock::now();
+    if (timing != nullptr) {
+        timing->conversion_ms += t_conversion_end - t_conversion_start;
+    }
+    return result;
+}
+
+Surface_mesh corefine_boolean_difference(
+    const Surface_mesh& mesh_a,
+    const Surface_mesh& mesh_b,
+    BooleanOpTiming* timing) {
+    auto t_conversion_start = Clock::now();
+    auto exact_a = surface_mesh_to_exact(mesh_a);
+    auto exact_b = surface_mesh_to_exact(mesh_b);
+    auto t_conversion_end = Clock::now();
+    if (timing != nullptr) {
+        timing->conversion_ms += t_conversion_end - t_conversion_start;
     }
 
     Exact_surface_mesh exact_result;
-    CGAL::convert_nef_polyhedron_to_polygon_mesh(nef_result, exact_result);
-
-    return exact_to_surface_mesh(exact_result);
-}
-
-Surface_mesh corefine_boolean_difference(const Surface_mesh& mesh_a, const Surface_mesh& mesh_b) {
-    auto exact_a = surface_mesh_to_exact(mesh_a);
-    auto exact_b = surface_mesh_to_exact(mesh_b);
-
-    Exact_surface_mesh exact_result;
+    auto t_boolean_start = Clock::now();
     bool success = CGAL::Polygon_mesh_processing::corefine_and_compute_difference(
         exact_a, exact_b, exact_result);
+    auto t_boolean_end = Clock::now();
+    if (timing != nullptr) {
+        timing->boolean_ms += t_boolean_end - t_boolean_start;
+    }
 
     if (!success) {
         std::cerr << "Warning: corefine_and_compute_difference failed" << std::endl;
     }
 
-    return exact_to_surface_mesh(exact_result);
+    t_conversion_start = Clock::now();
+    Surface_mesh result = exact_to_surface_mesh(exact_result);
+    t_conversion_end = Clock::now();
+    if (timing != nullptr) {
+        timing->conversion_ms += t_conversion_end - t_conversion_start;
+    }
+    return result;
 }
 
-Surface_mesh corefine_boolean_difference(const Surface_mesh& mesh_a, const std::vector<Surface_mesh>& meshes_b) {
+Surface_mesh corefine_boolean_difference(
+    const Surface_mesh& mesh_a,
+    const std::vector<Surface_mesh>& meshes_b,
+    BooleanOpTiming* timing) {
+    auto t_conversion_start = Clock::now();
     auto exact_a = surface_mesh_to_exact(mesh_a);
+    auto t_conversion_end = Clock::now();
+    if (timing != nullptr) {
+        timing->conversion_ms += t_conversion_end - t_conversion_start;
+    }
 
     for (const auto& mesh_b : meshes_b) {
+        t_conversion_start = Clock::now();
         auto exact_b = surface_mesh_to_exact(mesh_b);
+        t_conversion_end = Clock::now();
+        if (timing != nullptr) {
+            timing->conversion_ms += t_conversion_end - t_conversion_start;
+        }
 
         Exact_surface_mesh exact_result;
+        auto t_boolean_start = Clock::now();
         bool success = CGAL::Polygon_mesh_processing::corefine_and_compute_difference(
             exact_a, exact_b, exact_result);
+        auto t_boolean_end = Clock::now();
+        if (timing != nullptr) {
+            timing->boolean_ms += t_boolean_end - t_boolean_start;
+        }
 
         if (!success) {
             std::cerr << "Warning: corefine_and_compute_difference failed" << std::endl;
@@ -208,34 +289,88 @@ Surface_mesh corefine_boolean_difference(const Surface_mesh& mesh_a, const std::
         exact_a = std::move(exact_result);
     }
 
-    return exact_to_surface_mesh(exact_a);
+    t_conversion_start = Clock::now();
+    Surface_mesh result = exact_to_surface_mesh(exact_a);
+    t_conversion_end = Clock::now();
+    if (timing != nullptr) {
+        timing->conversion_ms += t_conversion_end - t_conversion_start;
+    }
+    return result;
 }
 
-Surface_mesh geogram_boolean_difference(const Surface_mesh& mesh_a, const Surface_mesh& mesh_b) {
+Surface_mesh geogram_boolean_difference(
+    const Surface_mesh& mesh_a,
+    const Surface_mesh& mesh_b,
+    BooleanOpTiming* timing) {
     ensure_geogram_initialized();
 
     GEO::Mesh geo_a;
     GEO::Mesh geo_b;
+    auto t_conversion_start = Clock::now();
     surface_mesh_to_geogram_mesh(mesh_a, geo_a);
     surface_mesh_to_geogram_mesh(mesh_b, geo_b);
+    auto t_conversion_end = Clock::now();
+    if (timing != nullptr) {
+        timing->conversion_ms += t_conversion_end - t_conversion_start;
+    }
     GEO::Mesh geo_result;
+    auto t_boolean_start = Clock::now();
     GEO::mesh_difference(geo_result, geo_a, geo_b, GEO::MESH_BOOL_OPS_DEFAULT);
+    auto t_boolean_end = Clock::now();
+    if (timing != nullptr) {
+        timing->boolean_ms += t_boolean_end - t_boolean_start;
+    }
 
-    return geogram_mesh_to_surface_mesh(geo_result);
+    t_conversion_start = Clock::now();
+    Surface_mesh result = geogram_mesh_to_surface_mesh(geo_result);
+    t_conversion_end = Clock::now();
+    if (timing != nullptr) {
+        timing->conversion_ms += t_conversion_end - t_conversion_start;
+    }
+    return result;
 }
 
-Surface_mesh geogram_boolean_difference(const Surface_mesh& mesh_a, const std::vector<Surface_mesh>& meshes_b) {
+Surface_mesh geogram_boolean_difference(
+    const Surface_mesh& mesh_a,
+    const std::vector<Surface_mesh>& meshes_b,
+    BooleanOpTiming* timing) {
     ensure_geogram_initialized();
 
     GEO::Mesh geo_current;
+    auto t_conversion_start = Clock::now();
     surface_mesh_to_geogram_mesh(mesh_a, geo_current);
+    auto t_conversion_end = Clock::now();
+    if (timing != nullptr) {
+        timing->conversion_ms += t_conversion_end - t_conversion_start;
+    }
     for (const auto& mesh_b : meshes_b) {
         GEO::Mesh geo_b;
+        t_conversion_start = Clock::now();
         surface_mesh_to_geogram_mesh(mesh_b, geo_b);
+        t_conversion_end = Clock::now();
+        if (timing != nullptr) {
+            timing->conversion_ms += t_conversion_end - t_conversion_start;
+        }
         GEO::Mesh geo_result;
+        auto t_boolean_start = Clock::now();
         GEO::mesh_difference(geo_result, geo_current, geo_b, GEO::MESH_BOOL_OPS_DEFAULT);
+        auto t_boolean_end = Clock::now();
+        if (timing != nullptr) {
+            timing->boolean_ms += t_boolean_end - t_boolean_start;
+        }
+        t_conversion_start = Clock::now();
         geo_current.copy(geo_result);
+        t_conversion_end = Clock::now();
+        if (timing != nullptr) {
+            timing->conversion_ms += t_conversion_end - t_conversion_start;
+        }
     }
 
-    return geogram_mesh_to_surface_mesh(geo_current);
+    t_conversion_start = Clock::now();
+    Surface_mesh result = geogram_mesh_to_surface_mesh(geo_current);
+    t_conversion_end = Clock::now();
+    if (timing != nullptr) {
+        timing->conversion_ms += t_conversion_end - t_conversion_start;
+    }
+    return result;
 }
