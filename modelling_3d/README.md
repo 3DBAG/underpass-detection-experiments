@@ -135,9 +135,12 @@ fcb ser -i sample_data/9-444-728.city.jsonl -o - \
 ├── flake.lock         # Nix flake lock file
 ├── justfile           # Task runner recipes
 ├── src/               # C++ source code
-│   ├── BooleanOps.cpp         # Boolean operation backends (Manifold/CGAL/Geogram)
 │   ├── BooleanOps.h
-│   ├── MeshConversion.cpp     # Surface_mesh <-> Manifold MeshGL conversion helpers
+│   ├── BooleanOpsNef.cpp      # CGAL Nef backend
+│   ├── BooleanOpsPMP.cpp      # CGAL PMP corefinement backend
+│   ├── BooleanOpsGeogram.cpp  # Geogram backend
+│   ├── BooleanOpsManifold.cpp # Manifold backend
+│   ├── MeshConversion.cpp     # Surface_mesh conversions (exact + MeshGL helpers)
 │   ├── MeshConversion.h
 │   ├── ModelLoaders.cpp       # Mesh loaders for FlatCityBuf features
 │   ├── ModelLoaders.h

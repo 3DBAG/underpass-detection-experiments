@@ -2,9 +2,60 @@
 
 #include <stdexcept>
 #include <limits>
+#include <vector>
 
 #include <CGAL/Polygon_mesh_processing/triangulate_faces.h>
 #include <CGAL/Polygon_mesh_processing/compute_normal.h>
+
+Exact_surface_mesh surface_mesh_to_exact(const Surface_mesh& sm) {
+    Exact_surface_mesh esm;
+
+    std::vector<Exact_surface_mesh::Vertex_index> vertex_map;
+    vertex_map.reserve(sm.number_of_vertices());
+
+    for (auto v : sm.vertices()) {
+        const auto& pt = sm.point(v);
+        Exact_kernel::Point_3 exact_pt(pt.x(), pt.y(), pt.z());
+        vertex_map.push_back(esm.add_vertex(exact_pt));
+    }
+
+    for (auto f : sm.faces()) {
+        std::vector<Exact_surface_mesh::Vertex_index> face_vertices;
+        for (auto v : sm.vertices_around_face(sm.halfedge(f))) {
+            face_vertices.push_back(vertex_map[v]);
+        }
+        esm.add_face(face_vertices);
+    }
+
+    return esm;
+}
+
+Surface_mesh exact_to_surface_mesh(const Exact_surface_mesh& esm) {
+    Surface_mesh sm;
+
+    std::vector<Surface_mesh::Vertex_index> vertex_map;
+    vertex_map.reserve(esm.number_of_vertices());
+
+    for (auto v : esm.vertices()) {
+        const auto& pt = esm.point(v);
+        K::Point_3 approx_pt(
+            CGAL::to_double(pt.x()),
+            CGAL::to_double(pt.y()),
+            CGAL::to_double(pt.z())
+        );
+        vertex_map.push_back(sm.add_vertex(approx_pt));
+    }
+
+    for (auto f : esm.faces()) {
+        std::vector<Surface_mesh::Vertex_index> face_vertices;
+        for (auto v : esm.vertices_around_face(esm.halfedge(f))) {
+            face_vertices.push_back(vertex_map[v]);
+        }
+        sm.add_face(face_vertices);
+    }
+
+    return sm;
+}
 
 manifold::MeshGL surface_mesh_to_meshgl(Surface_mesh& sm, bool compute_normals, bool flip_normals) {
     manifold::MeshGL meshgl;

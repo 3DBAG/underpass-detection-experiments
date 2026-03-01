@@ -11,11 +11,11 @@
 #endif
 
 #include <manifold/manifold.h>
-#include <manifold/meshIO.h>
 
 #include <CGAL/Polygon_mesh_processing/triangulate_faces.h>
 
 #include "BooleanOps.h"
+#include "BooleanOpsManifold.h"
 #include "MeshConversion.h"
 #include "ModelLoaders.h"
 #include "zfcb.h"
@@ -343,42 +343,26 @@ int main(int argc, char* argv[]) {
 
             manifold::MeshGL result_meshgl;
             if (method == BooleanMethod::Manifold) {
-                auto t_conversion_start_local = Clock::now();
-                auto house_meshgl = surface_mesh_to_meshgl(house_sm, false);
-                auto underpass_meshgl = surface_mesh_to_meshgl(underpass_sm, false);
-                if (house_meshgl.NumTri() == 0 || underpass_meshgl.NumTri() == 0) {
-                    std::cerr << std::format("Skipping feature {} (id='{}'): empty house or underpass mesh",
-                                             feature_idx, feature.id) << std::endl;
+                BooleanOpTiming timing;
+                ManifoldBooleanError error = ManifoldBooleanError::None;
+                bool success = manifold_boolean_difference(
+                    house_sm, underpass_sm, result_meshgl, &timing, &error);
+                intersection_ms += timing.boolean_ms;
+                ds_conversion_ms += timing.conversion_ms;
+                if (!success) {
+                    if (error == ManifoldBooleanError::EmptyInputMesh) {
+                        std::cerr << std::format("Skipping feature {} (id='{}'): empty house or underpass mesh",
+                                                 feature_idx, feature.id) << std::endl;
+                    } else if (error == ManifoldBooleanError::InvalidInput) {
+                        std::cerr << std::format("Skipping feature {} (id='{}'): invalid manifold input",
+                                                 feature_idx, feature.id) << std::endl;
+                    } else {
+                        std::cerr << std::format("Skipping feature {} (id='{}'): manifold boolean failed",
+                                                 feature_idx, feature.id) << std::endl;
+                    }
                     ++skipped_count;
                     continue;
                 }
-
-                manifold::Manifold house(house_meshgl);
-                manifold::Manifold underpass(underpass_meshgl);
-                auto t_conversion_end_local = Clock::now();
-                ds_conversion_ms += t_conversion_end_local - t_conversion_start_local;
-                if (house.Status() != manifold::Manifold::Error::NoError ||
-                    underpass.Status() != manifold::Manifold::Error::NoError) {
-                    std::cerr << std::format("Skipping feature {} (id='{}'): invalid manifold input",
-                                             feature_idx, feature.id) << std::endl;
-                    ++skipped_count;
-                    continue;
-                }
-
-                auto t_intersection_start_local = Clock::now();
-                auto result = house - underpass;
-                auto t_intersection_end_local = Clock::now();
-                intersection_ms += t_intersection_end_local - t_intersection_start_local;
-                if (result.Status() != manifold::Manifold::Error::NoError) {
-                    std::cerr << std::format("Skipping feature {} (id='{}'): manifold boolean failed",
-                                             feature_idx, feature.id) << std::endl;
-                    ++skipped_count;
-                    continue;
-                }
-                t_conversion_start_local = Clock::now();
-                result_meshgl = result.GetMeshGL();
-                t_conversion_end_local = Clock::now();
-                ds_conversion_ms += t_conversion_end_local - t_conversion_start_local;
             } else if (method == BooleanMethod::CgalNef) {
                 BooleanOpTiming timing;
                 Surface_mesh result_sm = nef_boolean_difference(house_sm, underpass_sm, &timing);
@@ -518,7 +502,7 @@ int main(int argc, char* argv[]) {
     log_out << std::format("  model reading: {:.3f}", model_read_ms) << std::endl;
     log_out << std::format("  ogr reading: {:.3f}", ogr_read_ms) << std::endl;
     log_out << std::format("  datastructure conversion: {:.3f}", ds_conversion_ms.count()) << std::endl;
-    log_out << std::format("  intersecting: {:.3f}", intersection_ms.count()) << std::endl;
+    log_out << std::format("  boolean ops: {:.3f}", intersection_ms.count()) << std::endl;
     log_out << std::format("  output writing: {:.3f}", output_write_ms_value) << std::endl;
     log_out << std::format("    changed features: {:.3f}", output_write_fcb_changed_ms.count()) << std::endl;
     log_out << std::format("    pass-through features: {:.3f}", output_write_fcb_passthrough_ms.count()) << std::endl;

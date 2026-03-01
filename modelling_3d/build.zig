@@ -100,7 +100,19 @@ pub fn build(b: *std.Build) void {
         .flags = cpp_flags,
     });
     exe.root_module.addCSourceFile(.{
-        .file = b.path("src/BooleanOps.cpp"),
+        .file = b.path("src/BooleanOpsNef.cpp"),
+        .flags = cpp_flags,
+    });
+    exe.root_module.addCSourceFile(.{
+        .file = b.path("src/BooleanOpsPMP.cpp"),
+        .flags = cpp_flags,
+    });
+    exe.root_module.addCSourceFile(.{
+        .file = b.path("src/BooleanOpsGeogram.cpp"),
+        .flags = cpp_flags,
+    });
+    exe.root_module.addCSourceFile(.{
+        .file = b.path("src/BooleanOpsManifold.cpp"),
         .flags = cpp_flags,
     });
     exe.root_module.addCSourceFile(.{
