@@ -27,6 +27,25 @@
 
 namespace ogr {
 
+void VectorReader::set_spatial_filter_rect(double min_x,
+                                           double min_y,
+                                           double max_x,
+                                           double max_y) {
+  has_spatial_filter_ = true;
+  spatial_filter_extent_ = {min_x, min_y, 0, max_x, max_y, 0};
+  if (poLayer_ != nullptr) {
+    poLayer_->SetSpatialFilterRect(min_x, min_y, max_x, max_y);
+  }
+}
+
+void VectorReader::clear_spatial_filter() {
+  has_spatial_filter_ = false;
+  spatial_filter_extent_ = {0, 0, 0, 0, 0, 0};
+  if (poLayer_ != nullptr) {
+    poLayer_->SetSpatialFilter(nullptr);
+  }
+}
+
 void VectorReader::open(const std::string& source) {
   if (GDALGetDriverCount() == 0) {
     GDALAllRegister();
@@ -62,6 +81,15 @@ void VectorReader::open(const std::string& source) {
 
   if (poLayer_ == nullptr) {
     throw std::runtime_error("[VectorReader] Could not get the selected layer");
+  }
+
+  if (has_spatial_filter_) {
+    poLayer_->SetSpatialFilterRect(spatial_filter_extent_[0],
+                                   spatial_filter_extent_[1],
+                                   spatial_filter_extent_[3],
+                                   spatial_filter_extent_[4]);
+  } else {
+    poLayer_->SetSpatialFilter(nullptr);
   }
 
   // Compute layer extent

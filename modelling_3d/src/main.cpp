@@ -139,14 +139,6 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    ogr::VectorReader reader;
-    auto t_ogr_read_start = Clock::now();
-    reader.open(ogr_source_path);
-    auto polygon_features = reader.read_polygon_features(id_attribute, height_attribute);
-    auto t_ogr_read_end = Clock::now();
-    log_out << std::format("Read {} OGR features", polygon_features.size()) << std::endl;
-    log_out << std::format("Model input: {} (FlatCityBuf stream)", model_from_stdin ? "stdin" : model_path) << std::endl;
-
     ZfcbReaderHandle fcb = nullptr;
     auto t_model_read_start = Clock::now();
     if (model_from_stdin) {
@@ -159,6 +151,28 @@ int main(int argc, char* argv[]) {
         return 1;
     }
     auto t_model_read_end = Clock::now();
+
+    double fcb_extent_min[3] = {0.0, 0.0, 0.0};
+    double fcb_extent_max[3] = {0.0, 0.0, 0.0};
+    int extent_result = zfcb_reader_header_geographical_extent(fcb, fcb_extent_min, fcb_extent_max);
+    if (extent_result < 0) {
+        std::cerr << "Failed to read FlatCityBuf header geographical_extent; cannot apply OGR extent filter" << std::endl;
+        zfcb_reader_destroy(fcb);
+        return 1;
+    }
+
+    ogr::VectorReader reader;
+    auto t_ogr_read_start = Clock::now();
+    reader.open(ogr_source_path);
+    reader.set_spatial_filter_rect(
+        fcb_extent_min[0], fcb_extent_min[1], fcb_extent_max[0], fcb_extent_max[1]);
+    log_out << std::format(
+        "Applied OGR spatial filter from FCB extent XY: [{:.3f}, {:.3f}] -> [{:.3f}, {:.3f}]",
+        fcb_extent_min[0], fcb_extent_min[1], fcb_extent_max[0], fcb_extent_max[1]) << std::endl;
+    auto polygon_features = reader.read_polygon_features(id_attribute, height_attribute);
+    auto t_ogr_read_end = Clock::now();
+    log_out << std::format("Read {} OGR features", polygon_features.size()) << std::endl;
+    log_out << std::format("Model input: {} (FlatCityBuf stream)", model_from_stdin ? "stdin" : model_path) << std::endl;
 
     bool ignore_holes = false;
     size_t processed_count = 0;

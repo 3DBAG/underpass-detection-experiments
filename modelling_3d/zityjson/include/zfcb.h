@@ -70,6 +70,17 @@ void zfcb_reader_destroy(ZfcbReaderHandle handle);
 
 uint64_t zfcb_feature_count(ZfcbReaderHandle handle);
 
+// Get world-coordinate axis-aligned extent from Header.geographical_extent on an
+// already opened reader.
+// out_min_xyz/out_max_xyz must each point to an array of at least 3 doubles.
+// Returns:
+//   1 => success, extent available
+//  -1 => error (invalid args/handle or missing header extent)
+int zfcb_reader_header_geographical_extent(
+    ZfcbReaderHandle handle,
+    double* out_min_xyz,
+    double* out_max_xyz);
+
 // Streaming iteration.
 // peek/skip/next return:
 //   1 => success with data (for peek/next) or feature skipped (skip)

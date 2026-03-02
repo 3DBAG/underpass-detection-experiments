@@ -72,6 +72,11 @@ class VectorReader {
   // Configuration setters (call before open())
   void set_layer_id(int id) { layer_id_ = id; }
   void set_layer_name(const std::string& name) { layer_name_ = name; }
+  void set_spatial_filter_rect(double min_x,
+                               double min_y,
+                               double max_x,
+                               double max_y);
+  void clear_spatial_filter();
 
   // Getters
   const Extent& layer_extent() const { return layer_extent_; }
@@ -90,6 +95,8 @@ class VectorReader {
   int layer_count_ = 0;
   int layer_id_ = 0;
   std::string layer_name_;
+  bool has_spatial_filter_ = false;
+  Extent spatial_filter_extent_ = {0, 0, 0, 0, 0, 0};
   Extent layer_extent_ = {0, 0, 0, 0, 0, 0};
 };
 

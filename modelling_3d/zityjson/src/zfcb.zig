@@ -9,6 +9,7 @@ const VT_HEADER_COLUMNS: u16 = 8;
 const VT_HEADER_FEATURES_COUNT: u16 = 12;
 const VT_HEADER_INDEX_NODE_SIZE: u16 = 14;
 const VT_HEADER_ATTRIBUTE_INDEX: u16 = 16;
+const VT_HEADER_GEOGRAPHICAL_EXTENT: u16 = 18;
 
 const VT_COLUMN_INDEX: u16 = 4;
 const VT_COLUMN_NAME: u16 = 6;
@@ -210,6 +211,8 @@ pub const Reader = struct {
 
     transform: Transform = .{},
     feature_count: u64 = 0,
+    has_geographical_extent: bool = false,
+    geographical_extent: [6]f64 = .{ 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 },
 
     header_buf: []u8 = &[_]u8{},
     owns_header_buf: bool = false,
@@ -287,6 +290,11 @@ pub const Reader = struct {
         return self.transform;
     }
 
+    pub fn headerGeographicalExtent(self: *const Reader) ?[6]f64 {
+        if (!self.has_geographical_extent) return null;
+        return self.geographical_extent;
+    }
+
     pub fn rootColumns(self: *const Reader) []const ColumnSchema {
         return self.root_columns;
     }
@@ -336,6 +344,13 @@ pub const Reader = struct {
         const header_table = try fb.sizePrefixedRootTable(self.header_buf);
         self.transform = try readHeaderTransform(self.header_buf, header_table);
         self.feature_count = try fb.getScalarU64Default(self.header_buf, header_table, VT_HEADER_FEATURES_COUNT, 0);
+        if (try readHeaderGeographicalExtent(self.header_buf, header_table)) |extent| {
+            self.has_geographical_extent = true;
+            self.geographical_extent = extent;
+        } else {
+            self.has_geographical_extent = false;
+            self.geographical_extent = .{ 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+        }
         const index_node_size = try fb.getScalarU16Default(self.header_buf, header_table, VT_HEADER_INDEX_NODE_SIZE, 16);
 
         try self.loadRootColumns(header_table);
@@ -892,6 +907,21 @@ fn readHeaderTransform(header_buf: []const u8, header_table: usize) !Transform {
         };
     }
     return .{};
+}
+
+fn readHeaderGeographicalExtent(header_buf: []const u8, header_table: usize) !?[6]f64 {
+    if (try fb.tableFieldPos(header_buf, header_table, VT_HEADER_GEOGRAPHICAL_EXTENT)) |field_pos| {
+        if (field_pos + 48 > header_buf.len) return error.InvalidFlatBuffer;
+        return .{
+            try fb.readF64Le(header_buf, field_pos + 0),
+            try fb.readF64Le(header_buf, field_pos + 8),
+            try fb.readF64Le(header_buf, field_pos + 16),
+            try fb.readF64Le(header_buf, field_pos + 24),
+            try fb.readF64Le(header_buf, field_pos + 32),
+            try fb.readF64Le(header_buf, field_pos + 40),
+        };
+    }
+    return null;
 }
 
 fn packedRtreeIndexSize(feature_count: u64, node_size: u16) !u64 {
@@ -2578,6 +2608,29 @@ export fn zfcb_reader_destroy(handle: ?ZfcbReaderHandle) callconv(.c) void {
 export fn zfcb_feature_count(handle: ?ZfcbReaderHandle) callconv(.c) u64 {
     const reader = handle orelse return 0;
     return reader.featureCount();
+}
+
+// Returns:
+//   1 => success, extent available
+//  -1 => error (invalid args/handle or missing header geographical_extent)
+export fn zfcb_reader_header_geographical_extent(
+    handle: ?ZfcbReaderHandle,
+    out_min_xyz: [*c]f64,
+    out_max_xyz: [*c]f64,
+) callconv(.c) c_int {
+    if (out_min_xyz == null or out_max_xyz == null) return -1;
+    const reader = handle orelse return -1;
+
+    if (reader.headerGeographicalExtent()) |extent| {
+        out_min_xyz[0] = extent[0];
+        out_min_xyz[1] = extent[1];
+        out_min_xyz[2] = extent[2];
+        out_max_xyz[0] = extent[3];
+        out_max_xyz[1] = extent[4];
+        out_max_xyz[2] = extent[5];
+        return 1;
+    }
+    return -1;
 }
 
 // Returns: 1 when an ID is available, 0 at EOF, -1 on error.
