@@ -327,98 +327,104 @@ int main(int argc, char* argv[]) {
         auto t_stream_read_end_mesh = Clock::now();
         fcb_stream_read_ms += t_stream_read_end_mesh - t_stream_read_start_mesh;
 
-        // Track whether any polygon feature succeeded for this FCB feature.
+        // Merge all matched underpasses first, then run a single boolean difference.
         bool any_succeeded = false;
         manifold::MeshGL last_result_meshgl;
-        double last_house_min_z = 0.0;
+        const double last_house_min_z = mesh_min_z(house_sm);
         double last_underpass_z = 0.0;
-
-        for (size_t feature_idx : matched_indices) {
-            seen_feature[feature_idx] = true;
-            const auto& feature = polygon_features[feature_idx];
-
-            auto t_conversion_start = Clock::now();
-            const double house_min_z_local = mesh_min_z(house_sm);
-            if (!std::isfinite(house_min_z_local)) {
+        if (!std::isfinite(last_house_min_z)) {
+            for (size_t feature_idx : matched_indices) {
+                seen_feature[feature_idx] = true;
+                const auto& feature = polygon_features[feature_idx];
                 std::cerr << std::format("Skipping feature {} (id='{}'): could not determine house min z",
                                          feature_idx, feature.id) << std::endl;
                 ++skipped_count;
-                continue;
             }
-            auto offset_polygon = make_offset_polygon(
-                feature.polygon,
-                global_offset_x,
-                global_offset_y,
-                global_offset_z);
-            auto underpass_sm = extrusion::extrude_polygon(
-                offset_polygon, house_min_z_local-0.1, feature.extrusion_height + 0.1, ignore_holes);
-            auto t_conversion_end = Clock::now();
-            ds_conversion_ms += t_conversion_end - t_conversion_start;
+        } else {
+            std::vector<Surface_mesh> underpass_meshes;
+            underpass_meshes.reserve(matched_indices.size());
+            size_t merged_feature_count = 0;
 
-            manifold::MeshGL result_meshgl;
-            if (method == BooleanMethod::Manifold) {
-                BooleanOpTiming timing;
-                ManifoldBooleanError error = ManifoldBooleanError::None;
-                bool success = manifold_boolean_difference(
-                    house_sm, underpass_sm, result_meshgl, &timing, &error);
-                intersection_ms += timing.boolean_ms;
-                ds_conversion_ms += timing.conversion_ms;
-                if (!success) {
-                    if (error == ManifoldBooleanError::EmptyInputMesh) {
-                        std::cerr << std::format("Skipping feature {} (id='{}'): empty house or underpass mesh",
-                                                 feature_idx, feature.id) << std::endl;
-                    } else if (error == ManifoldBooleanError::InvalidInput) {
-                        std::cerr << std::format("Skipping feature {} (id='{}'): invalid manifold input",
-                                                 feature_idx, feature.id) << std::endl;
-                    } else {
-                        std::cerr << std::format("Skipping feature {} (id='{}'): manifold boolean failed",
-                                                 feature_idx, feature.id) << std::endl;
-                    }
+            for (size_t feature_idx : matched_indices) {
+                seen_feature[feature_idx] = true;
+                const auto& feature = polygon_features[feature_idx];
+
+                auto t_conversion_start = Clock::now();
+                auto offset_polygon = make_offset_polygon(
+                    feature.polygon,
+                    global_offset_x,
+                    global_offset_y,
+                    global_offset_z);
+                auto underpass_sm = extrusion::extrude_polygon(
+                    offset_polygon, last_house_min_z - 0.1, feature.extrusion_height + 0.1, ignore_holes);
+                auto t_conversion_end = Clock::now();
+                ds_conversion_ms += t_conversion_end - t_conversion_start;
+
+                if (underpass_sm.number_of_faces() == 0) {
+                    std::cerr << std::format("Skipping feature {} (id='{}'): underpass extrusion produced empty mesh",
+                                             feature_idx, feature.id) << std::endl;
                     ++skipped_count;
                     continue;
                 }
-            } else if (method == BooleanMethod::CgalNef) {
-                BooleanOpTiming timing;
-                Surface_mesh result_sm = nef_boolean_difference(house_sm, underpass_sm, &timing);
-                intersection_ms += timing.boolean_ms;
-                ds_conversion_ms += timing.conversion_ms;
-                auto t_conversion_start_local = Clock::now();
-                CGAL::Polygon_mesh_processing::triangulate_faces(result_sm);
-                result_meshgl = surface_mesh_to_meshgl(result_sm, false);
-                auto t_conversion_end_local = Clock::now();
-                ds_conversion_ms += t_conversion_end_local - t_conversion_start_local;
-            } else if (method == BooleanMethod::Geogram) {
-                BooleanOpTiming timing;
-                Surface_mesh result_sm = geogram_boolean_difference(house_sm, underpass_sm, &timing);
-                intersection_ms += timing.boolean_ms;
-                ds_conversion_ms += timing.conversion_ms;
-                auto t_conversion_start_local = Clock::now();
-                result_meshgl = surface_mesh_to_meshgl(result_sm, false);
-                auto t_conversion_end_local = Clock::now();
-                ds_conversion_ms += t_conversion_end_local - t_conversion_start_local;
-            } else {
-                BooleanOpTiming timing;
-                Surface_mesh result_sm = corefine_boolean_difference(house_sm, underpass_sm, &timing);
-                intersection_ms += timing.boolean_ms;
-                ds_conversion_ms += timing.conversion_ms;
-                auto t_conversion_start_local = Clock::now();
-                result_meshgl = surface_mesh_to_meshgl(result_sm, false);
-                auto t_conversion_end_local = Clock::now();
-                ds_conversion_ms += t_conversion_end_local - t_conversion_start_local;
+
+                underpass_meshes.push_back(std::move(underpass_sm));
+                last_underpass_z = feature.extrusion_height - global_offset_z;
+                ++merged_feature_count;
             }
 
-            if (result_meshgl.NumTri() == 0) {
-                std::cerr << std::format("Skipping feature {} (id='{}'): boolean produced empty mesh",
-                                         feature_idx, feature.id) << std::endl;
-                ++skipped_count;
-                continue;
-            }
+            if (!underpass_meshes.empty()) {
+                BooleanOpTiming timing;
+                bool success = true;
+                if (method == BooleanMethod::Manifold) {
+                    ManifoldBooleanError error = ManifoldBooleanError::None;
+                    success = manifold_boolean_difference(
+                        house_sm, underpass_meshes, last_result_meshgl, &timing, &error);
+                    if (!success) {
+                        if (error == ManifoldBooleanError::EmptyInputMesh) {
+                            std::cerr << std::format("Skipping {} merged features (id='{}'): empty mesh for manifold boolean",
+                                                     merged_feature_count, std::string(next_id)) << std::endl;
+                        } else if (error == ManifoldBooleanError::InvalidInput) {
+                            std::cerr << std::format("Skipping {} merged features (id='{}'): invalid manifold input",
+                                                     merged_feature_count, std::string(next_id)) << std::endl;
+                        } else {
+                            std::cerr << std::format("Skipping {} merged features (id='{}'): manifold boolean failed",
+                                                     merged_feature_count, std::string(next_id)) << std::endl;
+                        }
+                    }
+                } else if (method == BooleanMethod::CgalNef) {
+                    Surface_mesh result_sm = nef_boolean_difference(house_sm, underpass_meshes, &timing);
+                    auto t_conversion_start_local = Clock::now();
+                    CGAL::Polygon_mesh_processing::triangulate_faces(result_sm);
+                    last_result_meshgl = surface_mesh_to_meshgl(result_sm, false);
+                    auto t_conversion_end_local = Clock::now();
+                    ds_conversion_ms += t_conversion_end_local - t_conversion_start_local;
+                } else if (method == BooleanMethod::Geogram) {
+                    Surface_mesh result_sm = geogram_boolean_difference(house_sm, underpass_meshes, &timing);
+                    auto t_conversion_start_local = Clock::now();
+                    last_result_meshgl = surface_mesh_to_meshgl(result_sm, false);
+                    auto t_conversion_end_local = Clock::now();
+                    ds_conversion_ms += t_conversion_end_local - t_conversion_start_local;
+                } else {
+                    Surface_mesh result_sm = corefine_boolean_difference(house_sm, underpass_meshes, &timing);
+                    auto t_conversion_start_local = Clock::now();
+                    last_result_meshgl = surface_mesh_to_meshgl(result_sm, false);
+                    auto t_conversion_end_local = Clock::now();
+                    ds_conversion_ms += t_conversion_end_local - t_conversion_start_local;
+                }
+                intersection_ms += timing.boolean_ms;
+                ds_conversion_ms += timing.conversion_ms;
 
-            last_result_meshgl = std::move(result_meshgl);
-            last_house_min_z = house_min_z_local;
-            last_underpass_z = feature.extrusion_height - global_offset_z;
-            any_succeeded = true;
-            ++processed_count;
+                if (success && last_result_meshgl.NumTri() > 0) {
+                    any_succeeded = true;
+                    processed_count += merged_feature_count;
+                } else {
+                    if (success) {
+                        std::cerr << std::format("Skipping {} merged features (id='{}'): boolean produced empty mesh",
+                                                 merged_feature_count, std::string(next_id)) << std::endl;
+                    }
+                    skipped_count += merged_feature_count;
+                }
+            }
         }
 
         // Write the feature to FCB output.

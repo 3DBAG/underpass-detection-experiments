@@ -88,39 +88,6 @@ Surface_mesh geogram_mesh_to_surface_mesh(const GEO::Mesh& geo_mesh) {
     return sm;
 }
 
-
-Surface_mesh geogram_boolean_difference(
-    const Surface_mesh& mesh_a,
-    const Surface_mesh& mesh_b,
-    BooleanOpTiming* timing) {
-    ensure_geogram_initialized();
-
-    GEO::Mesh geo_a;
-    GEO::Mesh geo_b;
-    auto t_conversion_start = Clock::now();
-    surface_mesh_to_geogram_mesh(mesh_a, geo_a);
-    surface_mesh_to_geogram_mesh(mesh_b, geo_b);
-    auto t_conversion_end = Clock::now();
-    if (timing != nullptr) {
-        timing->conversion_ms += t_conversion_end - t_conversion_start;
-    }
-    GEO::Mesh geo_result;
-    auto t_boolean_start = Clock::now();
-    GEO::mesh_difference(geo_result, geo_a, geo_b, GEO::MESH_BOOL_OPS_DEFAULT);
-    auto t_boolean_end = Clock::now();
-    if (timing != nullptr) {
-        timing->boolean_ms += t_boolean_end - t_boolean_start;
-    }
-
-    t_conversion_start = Clock::now();
-    Surface_mesh result = geogram_mesh_to_surface_mesh(geo_result);
-    t_conversion_end = Clock::now();
-    if (timing != nullptr) {
-        timing->conversion_ms += t_conversion_end - t_conversion_start;
-    }
-    return result;
-}
-
 Surface_mesh geogram_boolean_difference(
     const Surface_mesh& mesh_a,
     const std::vector<Surface_mesh>& meshes_b,

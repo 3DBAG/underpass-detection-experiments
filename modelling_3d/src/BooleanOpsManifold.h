@@ -14,7 +14,7 @@ enum class ManifoldBooleanError {
 
 bool manifold_boolean_difference(
     Surface_mesh& house_sm,
-    Surface_mesh& underpass_sm,
+    std::vector<Surface_mesh>& underpass_sms,
     manifold::MeshGL& result_meshgl,
     BooleanOpTiming* timing = nullptr,
     ManifoldBooleanError* error = nullptr);

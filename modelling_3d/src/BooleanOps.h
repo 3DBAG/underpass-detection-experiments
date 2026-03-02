@@ -26,28 +26,16 @@ struct BooleanOpTiming {
 // Nef polyhedra boolean difference
 Surface_mesh nef_boolean_difference(
     const Surface_mesh& mesh_a,
-    const Surface_mesh& mesh_b,
-    BooleanOpTiming* timing = nullptr);
-Surface_mesh nef_boolean_difference(
-    const Surface_mesh& mesh_a,
     const std::vector<Surface_mesh>& meshes_b,
     BooleanOpTiming* timing = nullptr);
 
 // PMP corefinement boolean difference
 Surface_mesh corefine_boolean_difference(
     const Surface_mesh& mesh_a,
-    const Surface_mesh& mesh_b,
-    BooleanOpTiming* timing = nullptr);
-Surface_mesh corefine_boolean_difference(
-    const Surface_mesh& mesh_a,
     const std::vector<Surface_mesh>& meshes_b,
     BooleanOpTiming* timing = nullptr);
 
 // Geogram mesh boolean difference
-Surface_mesh geogram_boolean_difference(
-    const Surface_mesh& mesh_a,
-    const Surface_mesh& mesh_b,
-    BooleanOpTiming* timing = nullptr);
 Surface_mesh geogram_boolean_difference(
     const Surface_mesh& mesh_a,
     const std::vector<Surface_mesh>& meshes_b,
