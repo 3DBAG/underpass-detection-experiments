@@ -21,9 +21,89 @@
 
 #include <ogrsf_frmts.h>
 
+#include <iomanip>
 #include <iostream>
 #include <limits>
+#include <sstream>
 #include <stdexcept>
+#include <string_view>
+
+namespace {
+
+std::string quote_identifier(std::string_view ident) {
+  std::string out;
+  out.reserve(ident.size() + 2);
+  out.push_back('"');
+  for (char ch : ident) {
+    if (ch == '"') {
+      out.push_back('"');
+      out.push_back('"');
+    } else {
+      out.push_back(ch);
+    }
+  }
+  out.push_back('"');
+  return out;
+}
+
+std::string quote_qualified_name(std::string_view name) {
+  if (name.empty()) {
+    return {};
+  }
+
+  std::string out;
+  size_t start = 0;
+  while (start <= name.size()) {
+    size_t dot = name.find('.', start);
+    std::string_view part = (dot == std::string_view::npos)
+                                ? name.substr(start)
+                                : name.substr(start, dot - start);
+    if (!out.empty()) {
+      out.push_back('.');
+    }
+    out += quote_identifier(part);
+    if (dot == std::string_view::npos) {
+      break;
+    }
+    start = dot + 1;
+  }
+  return out;
+}
+
+std::string make_pg_bbox_query(OGRLayer* layer,
+                               const std::string& id_attribute,
+                               const std::string& height_attribute,
+                               double min_x,
+                               double min_y,
+                               double max_x,
+                               double max_y) {
+  std::string layer_name = layer != nullptr && layer->GetName() != nullptr
+                               ? layer->GetName()
+                               : std::string();
+
+  std::string geom_col = "geom";
+  if (layer != nullptr) {
+    OGRFeatureDefn* defn = layer->GetLayerDefn();
+    if (defn != nullptr && defn->GetGeomFieldCount() > 0) {
+      OGRGeomFieldDefn* geom_defn = defn->GetGeomFieldDefn(0);
+      if (geom_defn != nullptr && geom_defn->GetNameRef() != nullptr &&
+          geom_defn->GetNameRef()[0] != '\0') {
+        geom_col = geom_defn->GetNameRef();
+      }
+    }
+  }
+
+  std::ostringstream sql;
+  sql << std::setprecision(17);
+  sql << "SELECT " << quote_identifier(id_attribute) << ", "
+      << quote_identifier(height_attribute) << ", " << quote_identifier(geom_col)
+      << " FROM " << quote_qualified_name(layer_name) << " WHERE "
+      << quote_identifier(geom_col) << " && ST_MakeEnvelope(" << min_x << ", "
+      << min_y << ", " << max_x << ", " << max_y << ")";
+  return sql.str();
+}
+
+}  // namespace
 
 namespace ogr {
 
@@ -92,21 +172,30 @@ void VectorReader::open(const std::string& source) {
     poLayer_->SetSpatialFilter(nullptr);
   }
 
-  // Compute layer extent
+  // Compute layer extent from fast metadata path only.
+  // On database-backed layers (e.g. PostGIS), forcing extent computation can
+  // trigger a full-table scan and stall startup.
   OGREnvelope extent;
-  auto error = poLayer_->GetExtent(&extent);
-  if (error) {
-    throw std::runtime_error(
-        "[VectorReader] Could not get the extent of the layer");
+  auto error = poLayer_->GetExtent(&extent, false);
+  if (!error) {
+    layer_extent_ = {extent.MinX, extent.MinY, 0, extent.MaxX, extent.MaxY, 0};
+  } else {
+    layer_extent_ = {0, 0, 0, 0, 0, 0};
   }
-  layer_extent_ = {extent.MinX, extent.MinY, 0, extent.MaxX, extent.MaxY, 0};
 }
 
 void VectorReader::read_polygon(OGRPolygon* poPolygon,
                                 std::vector<LinearRing>& polygons) {
+  if (poPolygon == nullptr) {
+    return;
+  }
+
   LinearRing gf_polygon;
   OGRPoint poPoint;
   auto ogr_ering = poPolygon->getExteriorRing();
+  if (ogr_ering == nullptr) {
+    return;
+  }
 
   // Ensure we output CCW exterior ring
   if (ogr_ering->isClockwise()) {
@@ -122,6 +211,9 @@ void VectorReader::read_polygon(OGRPolygon* poPolygon,
   // Read interior rings (holes)
   for (int i = 0; i < poPolygon->getNumInteriorRings(); ++i) {
     auto ogr_iring = poPolygon->getInteriorRing(i);
+    if (ogr_iring == nullptr) {
+      continue;
+    }
     // Ensure we output CW interior ring
     if (!ogr_iring->isClockwise()) {
       ogr_iring->reversePoints();
@@ -142,9 +234,16 @@ void VectorReader::read_polygon_feature(
     const std::string& id,
     double extrusion_height,
     std::vector<PolygonFeature>& features) {
+  if (poPolygon == nullptr) {
+    return;
+  }
+
   LinearRing polygon;
   OGRPoint poPoint;
   auto ogr_ering = poPolygon->getExteriorRing();
+  if (ogr_ering == nullptr) {
+    return;
+  }
 
   // Ensure we output CCW exterior ring
   if (ogr_ering->isClockwise()) {
@@ -159,6 +258,9 @@ void VectorReader::read_polygon_feature(
   // Read interior rings (holes)
   for (int i = 0; i < poPolygon->getNumInteriorRings(); ++i) {
     auto ogr_iring = poPolygon->getInteriorRing(i);
+    if (ogr_iring == nullptr) {
+      continue;
+    }
     // Ensure we output CW interior ring
     if (!ogr_iring->isClockwise()) {
       ogr_iring->reversePoints();
@@ -222,10 +324,28 @@ std::vector<VectorReader::PolygonFeature> VectorReader::read_polygon_features(
   }
 
   std::vector<PolygonFeature> features;
-  poLayer_->ResetReading();
+  OGRLayer* read_layer = poLayer_;
+  OGRLayer* sql_layer = nullptr;
+  if (has_spatial_filter_ && poDS_ != nullptr && poDS_->GetDriver() != nullptr &&
+      poDS_->GetDriver()->GetDescription() != nullptr &&
+      std::string_view(poDS_->GetDriver()->GetDescription()) == "PostgreSQL") {
+    const std::string sql = make_pg_bbox_query(poLayer_,
+                                               id_attribute,
+                                               height_attribute,
+                                               spatial_filter_extent_[0],
+                                               spatial_filter_extent_[1],
+                                               spatial_filter_extent_[3],
+                                               spatial_filter_extent_[4]);
+    sql_layer = poDS_->ExecuteSQL(sql.c_str(), nullptr, nullptr);
+    if (sql_layer != nullptr) {
+      read_layer = sql_layer;
+    }
+  }
+
+  read_layer->ResetReading();
 
   OGRFeature* poFeature;
-  while ((poFeature = poLayer_->GetNextFeature()) != nullptr) {
+  while ((poFeature = read_layer->GetNextFeature()) != nullptr) {
     OGRGeometry* poGeometry = poFeature->GetGeometryRef();
     if (poGeometry == nullptr) {
       OGRFeature::DestroyFeature(poFeature);
@@ -256,6 +376,10 @@ std::vector<VectorReader::PolygonFeature> VectorReader::read_polygon_features(
     }
 
     OGRFeature::DestroyFeature(poFeature);
+  }
+
+  if (sql_layer != nullptr) {
+    poDS_->ReleaseResultSet(sql_layer);
   }
 
   return features;

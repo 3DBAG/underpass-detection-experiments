@@ -162,10 +162,10 @@ int main(int argc, char* argv[]) {
     }
 
     ogr::VectorReader reader;
-    auto t_ogr_read_start = Clock::now();
-    reader.open(ogr_source_path);
     reader.set_spatial_filter_rect(
         fcb_extent_min[0], fcb_extent_min[1], fcb_extent_max[0], fcb_extent_max[1]);
+    auto t_ogr_read_start = Clock::now();
+    reader.open(ogr_source_path);
     log_out << std::format(
         "Applied OGR spatial filter from FCB extent XY: [{:.3f}, {:.3f}] -> [{:.3f}, {:.3f}]",
         fcb_extent_min[0], fcb_extent_min[1], fcb_extent_max[0], fcb_extent_max[1]) << std::endl;
