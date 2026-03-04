@@ -1,6 +1,7 @@
 #ifndef MODEL_LOADERS_H
 #define MODEL_LOADERS_H
 
+#include <string>
 #include <string_view>
 
 #include "BooleanOps.h"
@@ -28,7 +29,8 @@ bool load_fcb_feature_mesh(
     Surface_mesh& sm,
     double offset_x,
     double offset_y,
-    double offset_z);
+    double offset_z,
+    std::string* out_b3_val3dity_lod22 = nullptr);
 
 ogr::LinearRing make_offset_polygon(
     const ogr::LinearRing& polygon,

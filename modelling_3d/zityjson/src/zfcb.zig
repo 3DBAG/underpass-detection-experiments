@@ -2731,6 +2731,42 @@ export fn zfcb_current_object_geometry_count(handle: ?ZfcbReaderHandle, object_i
     return obj.geometries.len;
 }
 
+// Returns:
+//   1 => attribute found and returned
+//   0 => attribute not found
+//  -1 => invalid args/handle/object index or attribute exists but is not a string
+export fn zfcb_current_object_string_attribute(
+    handle: ?ZfcbReaderHandle,
+    object_index: usize,
+    attr_name_ptr: [*c]const u8,
+    attr_name_len: usize,
+    out_value: *[*c]const u8,
+    out_len: *usize,
+) callconv(.c) c_int {
+    out_value.* = null;
+    out_len.* = 0;
+
+    if (attr_name_ptr == null) return -1;
+
+    const reader = handle orelse return -1;
+    const obj = getCurrentObject(reader, object_index) orelse return -1;
+    const attr_name = attr_name_ptr[0..attr_name_len];
+
+    for (obj.attributes) |attr| {
+        if (!std.mem.eql(u8, attr.name, attr_name)) continue;
+        switch (attr.value) {
+            .string => |value| {
+                out_value.* = value.ptr;
+                out_len.* = value.len;
+                return 1;
+            },
+            else => return -1,
+        }
+    }
+
+    return 0;
+}
+
 export fn zfcb_current_geometry_type(
     handle: ?ZfcbReaderHandle,
     object_index: usize,

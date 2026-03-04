@@ -88,7 +88,12 @@ bool load_fcb_feature_mesh(
     Surface_mesh& sm,
     double offset_x,
     double offset_y,
-    double offset_z) {
+    double offset_z,
+    std::string* out_b3_val3dity_lod22) {
+    if (out_b3_val3dity_lod22 != nullptr) {
+        out_b3_val3dity_lod22->clear();
+    }
+
     size_t vertex_count = zfcb_current_vertex_count(fcb);
     const double* vertices = zfcb_current_vertices(fcb);
     if (vertices == nullptr || vertex_count == 0) {
@@ -104,8 +109,9 @@ bool load_fcb_feature_mesh(
             vertices[v * 3 + 2] - offset_z)));
     }
 
-    std::string object_id = std::string(feature_id) + "-0";
+    const std::string object_id = std::string(feature_id) + "-0";
     ssize_t object_index = -1;
+    ssize_t feature_object_index = -1;
     size_t object_count = zfcb_current_object_count(fcb);
     for (size_t obj_idx = 0; obj_idx < object_count; ++obj_idx) {
         const char* current_obj_id_ptr = nullptr;
@@ -116,9 +122,32 @@ bool load_fcb_feature_mesh(
         std::string_view current_obj_id(current_obj_id_ptr, current_obj_id_len);
         if (current_obj_id == object_id) {
             object_index = static_cast<ssize_t>(obj_idx);
+        }
+        if (current_obj_id == feature_id) {
+            feature_object_index = static_cast<ssize_t>(obj_idx);
+        }
+        if (object_index >= 0 &&
+            (out_b3_val3dity_lod22 == nullptr || feature_object_index >= 0)) {
             break;
         }
     }
+
+    if (out_b3_val3dity_lod22 != nullptr && feature_object_index >= 0) {
+        constexpr std::string_view kB3Val3dityLod22 = "b3_val3dity_lod22";
+        const char* attr_value_ptr = nullptr;
+        size_t attr_value_len = 0;
+        int attr_result = zfcb_current_object_string_attribute(
+            fcb,
+            static_cast<size_t>(feature_object_index),
+            kB3Val3dityLod22.data(),
+            kB3Val3dityLod22.size(),
+            &attr_value_ptr,
+            &attr_value_len);
+        if (attr_result == 1 && attr_value_ptr != nullptr) {
+            *out_b3_val3dity_lod22 = std::string(attr_value_ptr, attr_value_len);
+        }
+    }
+
     if (object_index < 0) {
         return false;
     }

@@ -305,12 +305,13 @@ int main(int argc, char* argv[]) {
         }
 
         Surface_mesh house_sm;
+        std::string fcb_b3_val3dity_lod22;
         bool house_mesh_loaded = false;
         std::string house_mesh_error;
         auto t_stream_read_start_mesh = Clock::now();
         try {
             house_mesh_loaded = load_fcb_feature_mesh(
-                fcb, next_id, house_sm, global_offset_x, global_offset_y, global_offset_z);
+                fcb, next_id, house_sm, global_offset_x, global_offset_y, global_offset_z, &fcb_b3_val3dity_lod22);
         } catch (const std::exception& e) {
             house_mesh_error = e.what();
             house_mesh_loaded = false;
@@ -318,6 +319,9 @@ int main(int argc, char* argv[]) {
             house_mesh_error = "unknown exception";
             house_mesh_loaded = false;
         }
+        const std::string val3dity_suffix = fcb_b3_val3dity_lod22.empty()
+            ? std::string{}
+            : std::format(" (b3_val3dity_lod22='{}')", fcb_b3_val3dity_lod22);
         if (!house_mesh_loaded) {
             auto t_stream_read_end_mesh = Clock::now();
             fcb_stream_read_ms += t_stream_read_end_mesh - t_stream_read_start_mesh;
@@ -325,11 +329,11 @@ int main(int argc, char* argv[]) {
                 seen_feature[feature_idx] = true;
                 const auto& feature = polygon_features[feature_idx];
                 if (house_mesh_error.empty()) {
-                    std::cerr << std::format("Skipping feature {} (id='{}'): could not build FlatCityBuf mesh",
-                                             feature_idx, feature.id) << std::endl;
+                    std::cerr << std::format("Skipping feature {} (id='{}'): could not build FlatCityBuf mesh{}",
+                                             feature_idx, feature.id, val3dity_suffix) << std::endl;
                 } else {
-                    std::cerr << std::format("Skipping feature {} (id='{}'): failed to build FlatCityBuf mesh ({})",
-                                             feature_idx, feature.id, house_mesh_error) << std::endl;
+                    std::cerr << std::format("Skipping feature {} (id='{}'): failed to build FlatCityBuf mesh ({}){}",
+                                             feature_idx, feature.id, house_mesh_error, val3dity_suffix) << std::endl;
                 }
                 ++skipped_count;
             }
@@ -354,8 +358,8 @@ int main(int argc, char* argv[]) {
             for (size_t feature_idx : matched_indices) {
                 seen_feature[feature_idx] = true;
                 const auto& feature = polygon_features[feature_idx];
-                std::cerr << std::format("Skipping feature {} (id='{}'): could not determine house min z",
-                                         feature_idx, feature.id) << std::endl;
+                std::cerr << std::format("Skipping feature {} (id='{}'): could not determine house min z{}",
+                                         feature_idx, feature.id, val3dity_suffix) << std::endl;
                 ++skipped_count;
             }
         } else {
@@ -380,15 +384,15 @@ int main(int argc, char* argv[]) {
                 } catch (const std::exception& e) {
                     auto t_conversion_end = Clock::now();
                     ds_conversion_ms += t_conversion_end - t_conversion_start;
-                    std::cerr << std::format("Skipping feature {} (id='{}'): underpass extrusion failed ({})",
-                                             feature_idx, feature.id, e.what()) << std::endl;
+                    std::cerr << std::format("Skipping feature {} (id='{}'): underpass extrusion failed ({}){}",
+                                             feature_idx, feature.id, e.what(), val3dity_suffix) << std::endl;
                     ++skipped_count;
                     continue;
                 } catch (...) {
                     auto t_conversion_end = Clock::now();
                     ds_conversion_ms += t_conversion_end - t_conversion_start;
-                    std::cerr << std::format("Skipping feature {} (id='{}'): underpass extrusion failed (unknown exception)",
-                                             feature_idx, feature.id) << std::endl;
+                    std::cerr << std::format("Skipping feature {} (id='{}'): underpass extrusion failed (unknown exception){}",
+                                             feature_idx, feature.id, val3dity_suffix) << std::endl;
                     ++skipped_count;
                     continue;
                 }
@@ -396,8 +400,8 @@ int main(int argc, char* argv[]) {
                 ds_conversion_ms += t_conversion_end - t_conversion_start;
 
                 if (underpass_sm.number_of_faces() == 0) {
-                    std::cerr << std::format("Skipping feature {} (id='{}'): underpass extrusion produced empty mesh",
-                                             feature_idx, feature.id) << std::endl;
+                    std::cerr << std::format("Skipping feature {} (id='{}'): underpass extrusion produced empty mesh{}",
+                                             feature_idx, feature.id, val3dity_suffix) << std::endl;
                     ++skipped_count;
                     continue;
                 }
@@ -416,14 +420,14 @@ int main(int argc, char* argv[]) {
                         house_sm, underpass_meshes, last_result_meshgl, &timing, &error);
                     if (!success) {
                         if (error == ManifoldBooleanError::EmptyInputMesh) {
-                            std::cerr << std::format("Skipping {} merged features (id='{}'): empty mesh for manifold boolean",
-                                                     merged_feature_count, std::string(next_id)) << std::endl;
+                            std::cerr << std::format("Skipping {} merged features (id='{}'): empty mesh for manifold boolean{}",
+                                                     merged_feature_count, std::string(next_id), val3dity_suffix) << std::endl;
                         } else if (error == ManifoldBooleanError::InvalidInput) {
-                            std::cerr << std::format("Skipping {} merged features (id='{}'): invalid manifold input",
-                                                     merged_feature_count, std::string(next_id)) << std::endl;
+                            std::cerr << std::format("Skipping {} merged features (id='{}'): invalid manifold input{}",
+                                                     merged_feature_count, std::string(next_id), val3dity_suffix) << std::endl;
                         } else {
-                            std::cerr << std::format("Skipping {} merged features (id='{}'): manifold boolean failed",
-                                                     merged_feature_count, std::string(next_id)) << std::endl;
+                            std::cerr << std::format("Skipping {} merged features (id='{}'): manifold boolean failed{}",
+                                                     merged_feature_count, std::string(next_id), val3dity_suffix) << std::endl;
                         }
                     }
                 } else if (method == BooleanMethod::CgalNef) {
@@ -454,8 +458,8 @@ int main(int argc, char* argv[]) {
                     processed_count += merged_feature_count;
                 } else {
                     if (success) {
-                        std::cerr << std::format("Skipping {} merged features (id='{}'): boolean produced empty mesh",
-                                                 merged_feature_count, std::string(next_id)) << std::endl;
+                        std::cerr << std::format("Skipping {} merged features (id='{}'): boolean produced empty mesh{}",
+                                                 merged_feature_count, std::string(next_id), val3dity_suffix) << std::endl;
                     }
                     skipped_count += merged_feature_count;
                 }

@@ -99,6 +99,17 @@ size_t zfcb_current_object_count(ZfcbReaderHandle handle);
 int zfcb_current_object_id(ZfcbReaderHandle handle, size_t object_index, const char** out_id, size_t* out_len);
 uint8_t zfcb_current_object_type(ZfcbReaderHandle handle, size_t object_index);
 size_t zfcb_current_object_geometry_count(ZfcbReaderHandle handle, size_t object_index);
+// Returns:
+//   1 => attribute found and returned
+//   0 => attribute not found
+//  -1 => invalid args/handle/object index or attribute exists but is not a string
+int zfcb_current_object_string_attribute(
+    ZfcbReaderHandle handle,
+    size_t object_index,
+    const char* attr_name,
+    size_t attr_name_len,
+    const char** out_value,
+    size_t* out_len);
 
 uint8_t zfcb_current_geometry_type(ZfcbReaderHandle handle, size_t object_index, size_t geometry_index);
 int zfcb_current_geometry_lod(
