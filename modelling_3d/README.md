@@ -5,8 +5,10 @@ A program to carve out underpasses from 2.5D building models by using boolean me
 ### Limitations
 - Mesh processing:
   - [ ] Output meshes get triangulated, even if input has polygonal faces.
-  - [ ] currently only processes the LoD2.2 geometries
   - [ ] assumes input building features are structured as outputed by roofer/3DBAG.
+    - [ ] currently only processes the LoD "2.2" geometries
+    - [ ] hardcoded to look for the object id BAGID+"-0" of each feature
+  - [ ] May crash with problematic input geometries (most robust atm: manifold method in debug mode)
 
 ## Getting Started
 
