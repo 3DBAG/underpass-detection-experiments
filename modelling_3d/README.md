@@ -67,6 +67,15 @@ With FCB input and FCB output (preserves all metadata, only replaces LoD 2.2 geo
   hoogte identificatie manifold
 ```
 
+With PostgreSQL/PostGIS as OGR source:
+```bash
+./zig-out/bin/add_underpass \
+  "PG:dbname='baseregisters' host=localhost port=5432 user=superson password='supassword' tables=bgt.underpasses_with_height(geom)" \
+  sample_data/9-320-584.tmp.fcb \
+  sample_data/out.fcb \
+  h_underpass identificatie manifold
+```
+
 Arguments: `<ogr_source> <fcb_input> <fcb_output> <height_attr> [id_attr] [method]`
 
 | Argument | Default | Description |

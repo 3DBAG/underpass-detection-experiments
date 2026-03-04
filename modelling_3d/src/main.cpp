@@ -2,6 +2,7 @@
 #include <format>
 #include <cmath>
 #include <chrono>
+#include <exception>
 #include <string_view>
 #include <unordered_map>
 #include <vector>
@@ -304,15 +305,32 @@ int main(int argc, char* argv[]) {
         }
 
         Surface_mesh house_sm;
+        bool house_mesh_loaded = false;
+        std::string house_mesh_error;
         auto t_stream_read_start_mesh = Clock::now();
-        if (!load_fcb_feature_mesh(fcb, next_id, house_sm, global_offset_x, global_offset_y, global_offset_z)) {
+        try {
+            house_mesh_loaded = load_fcb_feature_mesh(
+                fcb, next_id, house_sm, global_offset_x, global_offset_y, global_offset_z);
+        } catch (const std::exception& e) {
+            house_mesh_error = e.what();
+            house_mesh_loaded = false;
+        } catch (...) {
+            house_mesh_error = "unknown exception";
+            house_mesh_loaded = false;
+        }
+        if (!house_mesh_loaded) {
             auto t_stream_read_end_mesh = Clock::now();
             fcb_stream_read_ms += t_stream_read_end_mesh - t_stream_read_start_mesh;
             for (size_t feature_idx : matched_indices) {
                 seen_feature[feature_idx] = true;
                 const auto& feature = polygon_features[feature_idx];
-                std::cerr << std::format("Skipping feature {} (id='{}'): could not build FlatCityBuf mesh",
-                                         feature_idx, feature.id) << std::endl;
+                if (house_mesh_error.empty()) {
+                    std::cerr << std::format("Skipping feature {} (id='{}'): could not build FlatCityBuf mesh",
+                                             feature_idx, feature.id) << std::endl;
+                } else {
+                    std::cerr << std::format("Skipping feature {} (id='{}'): failed to build FlatCityBuf mesh ({})",
+                                             feature_idx, feature.id, house_mesh_error) << std::endl;
+                }
                 ++skipped_count;
             }
             // Write unmodified feature to output.
@@ -355,8 +373,25 @@ int main(int argc, char* argv[]) {
                     global_offset_x,
                     global_offset_y,
                     global_offset_z);
-                auto underpass_sm = extrusion::extrude_polygon(
-                    offset_polygon, last_house_min_z - 0.1, feature.extrusion_height + 0.1, ignore_holes);
+                Surface_mesh underpass_sm;
+                try {
+                    underpass_sm = extrusion::extrude_polygon(
+                        offset_polygon, last_house_min_z - 0.1, feature.extrusion_height + 0.1, ignore_holes);
+                } catch (const std::exception& e) {
+                    auto t_conversion_end = Clock::now();
+                    ds_conversion_ms += t_conversion_end - t_conversion_start;
+                    std::cerr << std::format("Skipping feature {} (id='{}'): underpass extrusion failed ({})",
+                                             feature_idx, feature.id, e.what()) << std::endl;
+                    ++skipped_count;
+                    continue;
+                } catch (...) {
+                    auto t_conversion_end = Clock::now();
+                    ds_conversion_ms += t_conversion_end - t_conversion_start;
+                    std::cerr << std::format("Skipping feature {} (id='{}'): underpass extrusion failed (unknown exception)",
+                                             feature_idx, feature.id) << std::endl;
+                    ++skipped_count;
+                    continue;
+                }
                 auto t_conversion_end = Clock::now();
                 ds_conversion_ms += t_conversion_end - t_conversion_start;
 

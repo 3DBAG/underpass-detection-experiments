@@ -1,8 +1,9 @@
 #include "ModelLoaders.h"
 
+#include <array>
+#include <exception>
 #include <string>
 #include <vector>
-#include <array>
 
 #include <CGAL/Polygon_mesh_processing/triangulate_faces.h>
 
@@ -170,7 +171,13 @@ bool load_fcb_feature_mesh(
         return false;
     }
 
-    CGAL::Polygon_mesh_processing::triangulate_faces(sm);
+    try {
+        CGAL::Polygon_mesh_processing::triangulate_faces(sm);
+    } catch (const std::exception&) {
+        return false;
+    } catch (...) {
+        return false;
+    }
     return sm.number_of_faces() > 0;
 }
 
