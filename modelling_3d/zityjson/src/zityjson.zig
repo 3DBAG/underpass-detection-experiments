@@ -11,78 +11,6 @@ pub const FaceType = enum(u8) {
     // Add more as needed
 };
 
-// A face is a polygon defined by indices into the vertex array
-pub const PolygonalFace = struct {
-    start: usize,      // Start index into indices array
-    count: usize,      // Number of vertices in this face
-    face_type: FaceType,
-
-    // Optional: add more face-level attributes here
-    // material_id: u16,
-    // normal: [3]f64,
-};
-
-pub const PolygonalMesh = struct {
-    allocator: std.mem.Allocator,
-
-    // Vertex positions (x, y, z triplets)
-    vertices: std.ArrayList(f64),
-
-    // Vertex indices for all faces (stored contiguously)
-    indices: std.ArrayList(usize),
-
-    // Face definitions
-    faces: std.ArrayList(PolygonalFace),
-
-    pub fn init(allocator: std.mem.Allocator) PolygonalMesh {
-        return .{
-            .allocator = allocator,
-            .vertices = .{},
-            .indices = .{},
-            .faces = .{},
-        };
-    }
-
-    pub fn deinit(self: *PolygonalMesh) void {
-        self.vertices.deinit(self.allocator);
-        self.indices.deinit(self.allocator);
-        self.faces.deinit(self.allocator);
-    }
-
-    // Add a vertex, returns its index
-    pub fn addVertex(self: *PolygonalMesh, v:[3]f64) !usize {
-        const idx: usize = @intCast(self.vertices.items.len / 3);
-        try self.vertices.appendSlice(self.allocator, &.{ v[0], v[1], v[2] });
-        return idx;
-    }
-
-    // Add a face from vertex indices
-    pub fn addFace(self: *PolygonalMesh, vertex_indices: []const usize, face_type: FaceType) !void {
-        const start: usize = @intCast(self.indices.items.len);
-        try self.indices.appendSlice(self.allocator, vertex_indices);
-        try self.faces.append(self.allocator, .{
-            .start = start,
-            .count = @intCast(vertex_indices.len),
-            .face_type = face_type,
-        });
-    }
-
-    // Get vertex indices for a face
-    pub fn getFaceIndices(self: *const PolygonalMesh, face: PolygonalFace) []const usize {
-        return self.indices.items[face.start..][0..face.count];
-    }
-
-    // Get vertex position by index
-    pub fn getVertex(self: *const PolygonalMesh, idx: usize) [3]f64 {
-        const i = idx * 3;
-        return .{
-            self.vertices.items[i],
-            self.vertices.items[i + 1],
-            self.vertices.items[i + 2],
-        };
-    }
-};
-
 pub const CJGeometry = struct {
     type: CJGeometryType,
     lod: []const u8,
@@ -161,19 +89,47 @@ pub const CityJSON = struct {
     pub const StoredGeometry = struct {
         type: CJGeometryType,
         lod: []const u8,
-        polygonal_mesh: PolygonalMesh,
+        vertices: std.ArrayList(f64),
+        surfaces: std.ArrayList(usize),
+        strings: std.ArrayList(usize),
+        boundaries: std.ArrayList(usize),
+        face_types: std.ArrayList(FaceType),
 
         pub fn init(allocator: std.mem.Allocator, geometry_type: CJGeometryType, lod: []const u8) !StoredGeometry {
             return StoredGeometry{
                 .type = geometry_type,
                 .lod = try allocator.dupe(u8, lod),
-                .polygonal_mesh = PolygonalMesh.init(allocator),
+                .vertices = .{},
+                .surfaces = .{},
+                .strings = .{},
+                .boundaries = .{},
+                .face_types = .{},
             };
         }
 
         pub fn deinit(self: *StoredGeometry, allocator: std.mem.Allocator) void {
-          allocator.free(self.lod);
-          self.polygonal_mesh.deinit();
+            allocator.free(self.lod);
+            self.vertices.deinit(allocator);
+            self.surfaces.deinit(allocator);
+            self.strings.deinit(allocator);
+            self.boundaries.deinit(allocator);
+            self.face_types.deinit(allocator);
+        }
+
+        pub fn addVertex(self: *StoredGeometry, v: [3]f64, allocator: std.mem.Allocator) !usize {
+            const idx: usize = @intCast(self.vertices.items.len / 3);
+            try self.vertices.appendSlice(allocator, &.{ v[0], v[1], v[2] });
+            return idx;
+        }
+
+        pub fn addSurface(self: *StoredGeometry, rings: []const []const usize, face_type: FaceType, allocator: std.mem.Allocator) !void {
+            if (rings.len == 0) return;
+            try self.surfaces.append(allocator, rings.len);
+            try self.face_types.append(allocator, face_type);
+            for (rings) |ring| {
+                try self.strings.append(allocator, ring.len);
+                try self.boundaries.appendSlice(allocator, ring);
+            }
         }
     };
 
@@ -218,13 +174,12 @@ pub const CityJSON = struct {
         return old_len;
     }
 
-    /// Get the PolygonalMesh for a given object and geometry, for adding vertices and faces.
-    pub fn getMesh(self: *CityJSON, object_index: usize, geometry_index: usize) !*PolygonalMesh {
+    pub fn getGeometry(self: *CityJSON, object_index: usize, geometry_index: usize) !*StoredGeometry {
         const values = self.objects.values();
         if (object_index >= values.len) return error.IndexOutOfBounds;
         const geometries = values[object_index].geometries;
         if (geometry_index >= geometries.len) return error.IndexOutOfBounds;
-        return &geometries[geometry_index].polygonal_mesh;
+        return &geometries[geometry_index];
     }
 
     pub fn load(self: *CityJSON, path: []const u8) !void {
@@ -379,22 +334,20 @@ pub const CityJSON = struct {
             for (obj.geometry, 0..) |g, i| {
                 const geom = &stored_city_object.geometries[i];
                 geom.* = try StoredGeometry.init(self.allocator, g.type, g.lod);
-                try self.ingestGeometry(&geom.polygonal_mesh, g, vertices, transform);
+                try self.ingestGeometry(geom, g, vertices, transform);
             }
         }
     }
 
     fn ingestGeometry(
         self: *CityJSON,
-        mesh: *PolygonalMesh,
+        geom: *StoredGeometry,
         g: CJGeometry,
         vertices: []const [3]i64,
         transform: CJTransform,
     ) !void {
         var vertex_remap = std.AutoArrayHashMap(usize, usize).init(self.allocator);
         defer vertex_remap.deinit();
-        var ring_indices: std.ArrayList(usize) = .{};
-        defer ring_indices.deinit(self.allocator);
 
         switch (g.type) {
             .MultiSurface => {
@@ -408,21 +361,28 @@ pub const CityJSON = struct {
                             if (vi >= vertices.len) return error.InvalidVertexIndex;
                             const result = try vertex_remap.getOrPut(vi);
                             if (!result.found_existing) {
-                                result.value_ptr.* = try mesh.addVertex(transform.apply(vertices[vi]));
+                                result.value_ptr.* = try geom.addVertex(transform.apply(vertices[vi]), self.allocator);
                             }
                         }
                     }
                 }
 
                 for (bounds) |polygon| {
+                    var rings = std.ArrayList([]const usize){};
+                    defer rings.deinit(self.allocator);
+                    try rings.ensureTotalCapacity(self.allocator, polygon.len);
                     for (polygon) |ring| {
-                        ring_indices.clearRetainingCapacity();
-                        try ring_indices.ensureTotalCapacity(self.allocator, ring.len);
-                        for (ring) |vi| {
-                            ring_indices.appendAssumeCapacity(vertex_remap.get(vi).?);
+                        var mapped_ring = try self.allocator.alloc(usize, ring.len);
+                        errdefer self.allocator.free(mapped_ring);
+                        for (ring, 0..) |vi, ring_i| {
+                            mapped_ring[ring_i] = vertex_remap.get(vi).?;
                         }
-                        try mesh.addFace(ring_indices.items, .wall);
+                        rings.appendAssumeCapacity(mapped_ring);
                     }
+                    defer {
+                        for (rings.items) |mapped_ring| self.allocator.free(mapped_ring);
+                    }
+                    try geom.addSurface(rings.items, .wall, self.allocator);
                 }
             },
             .Solid => {
@@ -438,24 +398,31 @@ pub const CityJSON = struct {
                                 if (vi >= vertices.len) return error.InvalidVertexIndex;
                                 const result = try vertex_remap.getOrPut(vi);
                                 if (!result.found_existing) {
-                                    result.value_ptr.* = try mesh.addVertex(transform.apply(vertices[vi]));
+                                    result.value_ptr.* = try geom.addVertex(transform.apply(vertices[vi]), self.allocator);
                                 }
                             }
                         }
                     }
                 }
 
-                // Second pass: add faces with remapped indices
+                // Second pass: add surfaces with remapped rings (holes preserved).
                 for (bounds) |shell| {
                     for (shell) |polygon| {
+                        var rings = std.ArrayList([]const usize){};
+                        defer rings.deinit(self.allocator);
+                        try rings.ensureTotalCapacity(self.allocator, polygon.len);
                         for (polygon) |ring| {
-                            ring_indices.clearRetainingCapacity();
-                            try ring_indices.ensureTotalCapacity(self.allocator, ring.len);
-                            for (ring) |vi| {
-                                ring_indices.appendAssumeCapacity(vertex_remap.get(vi).?);
+                            var mapped_ring = try self.allocator.alloc(usize, ring.len);
+                            errdefer self.allocator.free(mapped_ring);
+                            for (ring, 0..) |vi, ring_i| {
+                                mapped_ring[ring_i] = vertex_remap.get(vi).?;
                             }
-                            try mesh.addFace(ring_indices.items, .wall);
+                            rings.appendAssumeCapacity(mapped_ring);
                         }
+                        defer {
+                            for (rings.items) |mapped_ring| self.allocator.free(mapped_ring);
+                        }
+                        try geom.addSurface(rings.items, .wall, self.allocator);
                     }
                 }
             },
@@ -469,10 +436,14 @@ pub const CityJSON = struct {
         var min = [3]f64{ std.math.floatMax(f64), std.math.floatMax(f64), std.math.floatMax(f64) };
         for (self.objects.values()) |object| {
             for (object.geometries) |geom| {
-                const mesh = &geom.polygonal_mesh;
-                const vert_count = mesh.vertices.items.len / 3;
+                const vert_count = geom.vertices.items.len / 3;
                 for (0..vert_count) |vi| {
-                    const v = mesh.getVertex(vi);
+                    const i = vi * 3;
+                    const v = [3]f64{
+                        geom.vertices.items[i],
+                        geom.vertices.items[i + 1],
+                        geom.vertices.items[i + 2],
+                    };
                     for (0..3) |c| {
                         if (v[c] < min[c]) min[c] = v[c];
                     }
@@ -494,7 +465,7 @@ pub const CityJSON = struct {
         for (self.objects.values()) |object| {
             for (object.geometries) |geom| {
                 try geom_offsets.append(self.allocator, global_vertex_count);
-                global_vertex_count += geom.polygonal_mesh.vertices.items.len / 3;
+                global_vertex_count += geom.vertices.items.len / 3;
             }
         }
 
@@ -576,10 +547,14 @@ pub const CityJSON = struct {
         try jw.beginArray();
         for (self.objects.values()) |object| {
             for (object.geometries) |geom| {
-                const mesh = &geom.polygonal_mesh;
-                const vert_count = mesh.vertices.items.len / 3;
+                const vert_count = geom.vertices.items.len / 3;
                 for (0..vert_count) |vi| {
-                    const v = mesh.getVertex(vi);
+                    const i = vi * 3;
+                    const v = [3]f64{
+                        geom.vertices.items[i],
+                        geom.vertices.items[i + 1],
+                        geom.vertices.items[i + 2],
+                    };
                     try jw.beginArray();
                     for (0..3) |c| {
                         const int_val: i64 = @intFromFloat(@round((v[c] - translate[c]) / scale[c]));
@@ -599,21 +574,27 @@ pub const CityJSON = struct {
 
     fn writeBoundaries(self: *const CityJSON, jw: *std.json.Stringify, geom: *const StoredGeometry, global_offset: usize) !void {
         _ = self;
-        const mesh = &geom.polygonal_mesh;
+        var ring_cursor: usize = 0;
+        var boundary_cursor: usize = 0;
 
         switch (geom.type) {
             .MultiSurface => {
                 // boundaries: [ [[idx, ...]], [[idx, ...]], ... ]
                 try jw.beginArray();
-                for (mesh.faces.items) |face| {
-                    const indices = mesh.getFaceIndices(face);
-                    // One polygon with one ring
+                for (geom.surfaces.items) |rings_in_surface| {
                     try jw.beginArray();
-                    try jw.beginArray();
-                    for (indices) |idx| {
-                        try jw.write(idx + global_offset);
+                    for (0..rings_in_surface) |_| {
+                        if (ring_cursor >= geom.strings.items.len) break;
+                        const ring_size = geom.strings.items[ring_cursor];
+                        ring_cursor += 1;
+                        try jw.beginArray();
+                        for (0..ring_size) |_| {
+                            if (boundary_cursor >= geom.boundaries.items.len) break;
+                            try jw.write(geom.boundaries.items[boundary_cursor] + global_offset);
+                            boundary_cursor += 1;
+                        }
+                        try jw.endArray();
                     }
-                    try jw.endArray();
                     try jw.endArray();
                 }
                 try jw.endArray();
@@ -623,14 +604,20 @@ pub const CityJSON = struct {
                 // Single shell containing all faces
                 try jw.beginArray();
                 try jw.beginArray(); // shell
-                for (mesh.faces.items) |face| {
-                    const indices = mesh.getFaceIndices(face);
+                for (geom.surfaces.items) |rings_in_surface| {
                     try jw.beginArray();
-                    try jw.beginArray();
-                    for (indices) |idx| {
-                        try jw.write(idx + global_offset);
+                    for (0..rings_in_surface) |_| {
+                        if (ring_cursor >= geom.strings.items.len) break;
+                        const ring_size = geom.strings.items[ring_cursor];
+                        ring_cursor += 1;
+                        try jw.beginArray();
+                        for (0..ring_size) |_| {
+                            if (boundary_cursor >= geom.boundaries.items.len) break;
+                            try jw.write(geom.boundaries.items[boundary_cursor] + global_offset);
+                            boundary_cursor += 1;
+                        }
+                        try jw.endArray();
                     }
-                    try jw.endArray();
                     try jw.endArray();
                 }
                 try jw.endArray(); // end shell
@@ -715,24 +702,25 @@ export fn cityjson_add_geometry(handle: ?CityJSONHandle, object_index: usize, ge
     return @intCast(idx);
 }
 
-/// Add a vertex to a geometry's mesh. Returns the vertex index, or -1 on failure.
+/// Add a vertex to a geometry. Returns the vertex index, or -1 on failure.
 export fn cityjson_add_vertex(handle: ?CityJSONHandle, object_index: usize, geometry_index: usize, x: f64, y: f64, z: f64) callconv(.c) isize {
     const cj = handle orelse return -1;
-    const mesh = cj.getMesh(object_index, geometry_index) catch return -1;
-    const idx = mesh.addVertex(.{ x, y, z }) catch return -1;
+    const geom = cj.getGeometry(object_index, geometry_index) catch return -1;
+    const idx = geom.addVertex(.{ x, y, z }, cj.allocator) catch return -1;
     return @intCast(idx);
 }
 
-/// Add a face to a geometry's mesh. Returns 0 on success, -1 on failure.
+/// Add a surface polygon (single ring) to a geometry. Returns 0 on success, -1 on failure.
 /// vertex_indices: pointer to an array of vertex indices.
 /// num_indices: number of vertex indices in the face.
 /// face_type: one of ZITYJSON_FACE_WALL, etc.
 export fn cityjson_add_face(handle: ?CityJSONHandle, object_index: usize, geometry_index: usize, vertex_indices: [*c]const usize, num_indices: usize, face_type: u8) callconv(.c) c_int {
     const cj = handle orelse return -1;
-    const mesh = cj.getMesh(object_index, geometry_index) catch return -1;
+    const geom = cj.getGeometry(object_index, geometry_index) catch return -1;
     const ft = std.meta.intToEnum(FaceType, face_type) catch return -1;
     const indices_slice = vertex_indices[0..num_indices];
-    mesh.addFace(indices_slice, ft) catch return -1;
+    const rings = [_][]const usize{indices_slice};
+    geom.addSurface(&rings, ft, cj.allocator) catch return -1;
     return 0;
 }
 
@@ -807,7 +795,7 @@ export fn cityjson_get_vertex_count(handle: ?CityJSONHandle, object_index: usize
     if (object_index >= values.len) return 0;
     const geometries = values[object_index].geometries;
     if (geometry_index >= geometries.len) return 0;
-    return geometries[geometry_index].polygonal_mesh.vertices.items.len / 3;
+    return geometries[geometry_index].vertices.items.len / 3;
 }
 
 /// Get the face count for a geometry by object and geometry index.
@@ -817,7 +805,7 @@ export fn cityjson_get_face_count(handle: ?CityJSONHandle, object_index: usize, 
     if (object_index >= values.len) return 0;
     const geometries = values[object_index].geometries;
     if (geometry_index >= geometries.len) return 0;
-    return geometries[geometry_index].polygonal_mesh.faces.items.len;
+    return geometries[geometry_index].surfaces.items.len;
 }
 
 /// Get pointer to vertex data (x, y, z triplets as f64) for a geometry by object and geometry index.
@@ -827,7 +815,8 @@ export fn cityjson_get_vertices(handle: ?CityJSONHandle, object_index: usize, ge
     if (object_index >= values.len) return null;
     const geometries = values[object_index].geometries;
     if (geometry_index >= geometries.len) return null;
-    return geometries[geometry_index].polygonal_mesh.vertices.items.ptr;
+    if (geometries[geometry_index].vertices.items.len == 0) return null;
+    return geometries[geometry_index].vertices.items.ptr;
 }
 
 /// Get pointer to index data for a geometry by object and geometry index.
@@ -837,7 +826,8 @@ export fn cityjson_get_indices(handle: ?CityJSONHandle, object_index: usize, geo
     if (object_index >= values.len) return null;
     const geometries = values[object_index].geometries;
     if (geometry_index >= geometries.len) return null;
-    return geometries[geometry_index].polygonal_mesh.indices.items.ptr;
+    if (geometries[geometry_index].boundaries.items.len == 0) return null;
+    return geometries[geometry_index].boundaries.items.ptr;
 }
 
 /// Get the index count for a geometry by object and geometry index.
@@ -847,7 +837,7 @@ export fn cityjson_get_index_count(handle: ?CityJSONHandle, object_index: usize,
     if (object_index >= values.len) return 0;
     const geometries = values[object_index].geometries;
     if (geometry_index >= geometries.len) return 0;
-    return geometries[geometry_index].polygonal_mesh.indices.items.len;
+    return geometries[geometry_index].boundaries.items.len;
 }
 
 /// Get face info: start index and vertex count. Returns 0 on success, -1 on failure.
@@ -865,13 +855,89 @@ export fn cityjson_get_face_info(
     if (object_index >= values.len) return -1;
     const geometries = values[object_index].geometries;
     if (geometry_index >= geometries.len) return -1;
-    const mesh = &geometries[geometry_index].polygonal_mesh;
-    if (face_index >= mesh.faces.items.len) return -1;
-    const face = mesh.faces.items[face_index];
-    out_start.* = face.start;
-    out_count.* = face.count;
-    out_face_type.* = @intFromEnum(face.face_type);
+    const geom = &geometries[geometry_index];
+    if (face_index >= geom.surfaces.items.len) return -1;
+    var ring_cursor: usize = 0;
+    var boundary_cursor: usize = 0;
+    for (0..face_index) |s| {
+        const rings = geom.surfaces.items[s];
+        for (0..rings) |_| {
+            if (ring_cursor >= geom.strings.items.len) return -1;
+            const ring_size = geom.strings.items[ring_cursor];
+            ring_cursor += 1;
+            if (boundary_cursor > geom.boundaries.items.len) return -1;
+            if (ring_size > geom.boundaries.items.len - boundary_cursor) return -1;
+            boundary_cursor += ring_size;
+        }
+    }
+    if (ring_cursor >= geom.strings.items.len) return -1;
+    const outer_ring_size = geom.strings.items[ring_cursor];
+    if (boundary_cursor > geom.boundaries.items.len) return -1;
+    if (outer_ring_size > geom.boundaries.items.len - boundary_cursor) return -1;
+    out_start.* = boundary_cursor;
+    out_count.* = outer_ring_size;
+    out_face_type.* = if (face_index < geom.face_types.items.len)
+        @intFromEnum(geom.face_types.items[face_index])
+    else
+        @intFromEnum(FaceType.wall);
     return 0;
+}
+
+export fn cityjson_get_geometry_surface_count(handle: ?CityJSONHandle, object_index: usize, geometry_index: usize) callconv(.c) usize {
+    const cj = handle orelse return 0;
+    const values = cj.objects.values();
+    if (object_index >= values.len) return 0;
+    const geometries = values[object_index].geometries;
+    if (geometry_index >= geometries.len) return 0;
+    return geometries[geometry_index].surfaces.items.len;
+}
+
+export fn cityjson_get_geometry_string_count(handle: ?CityJSONHandle, object_index: usize, geometry_index: usize) callconv(.c) usize {
+    const cj = handle orelse return 0;
+    const values = cj.objects.values();
+    if (object_index >= values.len) return 0;
+    const geometries = values[object_index].geometries;
+    if (geometry_index >= geometries.len) return 0;
+    return geometries[geometry_index].strings.items.len;
+}
+
+export fn cityjson_get_geometry_boundary_count(handle: ?CityJSONHandle, object_index: usize, geometry_index: usize) callconv(.c) usize {
+    const cj = handle orelse return 0;
+    const values = cj.objects.values();
+    if (object_index >= values.len) return 0;
+    const geometries = values[object_index].geometries;
+    if (geometry_index >= geometries.len) return 0;
+    return geometries[geometry_index].boundaries.items.len;
+}
+
+export fn cityjson_get_geometry_surfaces(handle: ?CityJSONHandle, object_index: usize, geometry_index: usize) callconv(.c) [*c]const usize {
+    const cj = handle orelse return null;
+    const values = cj.objects.values();
+    if (object_index >= values.len) return null;
+    const geometries = values[object_index].geometries;
+    if (geometry_index >= geometries.len) return null;
+    if (geometries[geometry_index].surfaces.items.len == 0) return null;
+    return geometries[geometry_index].surfaces.items.ptr;
+}
+
+export fn cityjson_get_geometry_strings(handle: ?CityJSONHandle, object_index: usize, geometry_index: usize) callconv(.c) [*c]const usize {
+    const cj = handle orelse return null;
+    const values = cj.objects.values();
+    if (object_index >= values.len) return null;
+    const geometries = values[object_index].geometries;
+    if (geometry_index >= geometries.len) return null;
+    if (geometries[geometry_index].strings.items.len == 0) return null;
+    return geometries[geometry_index].strings.items.ptr;
+}
+
+export fn cityjson_get_geometry_boundaries(handle: ?CityJSONHandle, object_index: usize, geometry_index: usize) callconv(.c) [*c]const usize {
+    const cj = handle orelse return null;
+    const values = cj.objects.values();
+    if (object_index >= values.len) return null;
+    const geometries = values[object_index].geometries;
+    if (geometry_index >= geometries.len) return null;
+    if (geometries[geometry_index].boundaries.items.len == 0) return null;
+    return geometries[geometry_index].boundaries.items.ptr;
 }
 
 const CJSeqHeaderMetadata = struct {
@@ -1624,11 +1690,13 @@ test "save round-trip" {
     var obj = try CityJSON.StoredCityObject.init(allocator, .Building, 1);
     obj.geometries[0] = try CityJSON.StoredGeometry.init(allocator, .MultiSurface, "1.2");
 
-    const mesh = &obj.geometries[0].polygonal_mesh;
-    _ = try mesh.addVertex(.{ 100.0, 200.0, 0.0 });
-    _ = try mesh.addVertex(.{ 110.0, 200.0, 0.0 });
-    _ = try mesh.addVertex(.{ 105.0, 210.0, 5.0 });
-    try mesh.addFace(&.{ 0, 1, 2 }, .wall);
+    const geom = &obj.geometries[0];
+    _ = try geom.addVertex(.{ 100.0, 200.0, 0.0 }, allocator);
+    _ = try geom.addVertex(.{ 110.0, 200.0, 0.0 }, allocator);
+    _ = try geom.addVertex(.{ 105.0, 210.0, 5.0 }, allocator);
+    const ring = [_]usize{ 0, 1, 2 };
+    const rings = [_][]const usize{&ring};
+    try geom.addSurface(&rings, .wall, allocator);
 
     const key = try allocator.dupeZ(u8, "TestBuilding");
     try cj.objects.put(key, obj);
@@ -1653,15 +1721,16 @@ test "save round-trip" {
     try std.testing.expectEqual(CJGeometryType.MultiSurface, obj2.geometries[0].type);
     try std.testing.expectEqualStrings("1.2", obj2.geometries[0].lod);
 
-    const mesh2 = &obj2.geometries[0].polygonal_mesh;
-    try std.testing.expectEqual(@as(usize, 3), mesh2.vertices.items.len / 3);
-    try std.testing.expectEqual(@as(usize, 1), mesh2.faces.items.len);
+    const geom2 = &obj2.geometries[0];
+    try std.testing.expectEqual(@as(usize, 3), geom2.vertices.items.len / 3);
+    try std.testing.expectEqual(@as(usize, 1), geom2.surfaces.items.len);
 
     // Verify vertex positions within tolerance (0.001 = scale)
     const tolerance = 0.002;
     for (0..3) |vi| {
-        const v1 = mesh.getVertex(vi);
-        const v2 = mesh2.getVertex(vi);
+        const i = vi * 3;
+        const v1 = [3]f64{ geom.vertices.items[i], geom.vertices.items[i + 1], geom.vertices.items[i + 2] };
+        const v2 = [3]f64{ geom2.vertices.items[i], geom2.vertices.items[i + 1], geom2.vertices.items[i + 2] };
         for (0..3) |c| {
             try std.testing.expect(@abs(v1[c] - v2[c]) < tolerance);
         }
@@ -1681,28 +1750,34 @@ test "builder API round-trip" {
     const geom_idx = try cj.addGeometry(obj_idx, .MultiSurface, "2.2");
     try std.testing.expectEqual(@as(usize, 0), geom_idx);
 
-    const mesh = try cj.getMesh(obj_idx, geom_idx);
-    const v0 = try mesh.addVertex(.{ 0.0, 0.0, 0.0 });
-    const v1 = try mesh.addVertex(.{ 10.0, 0.0, 0.0 });
-    const v2 = try mesh.addVertex(.{ 10.0, 10.0, 0.0 });
-    const v3 = try mesh.addVertex(.{ 0.0, 10.0, 0.0 });
-    try mesh.addFace(&.{ v0, v1, v2, v3 }, .floor);
+    const geom = try cj.getGeometry(obj_idx, geom_idx);
+    const v0 = try geom.addVertex(.{ 0.0, 0.0, 0.0 }, allocator);
+    const v1 = try geom.addVertex(.{ 10.0, 0.0, 0.0 }, allocator);
+    const v2 = try geom.addVertex(.{ 10.0, 10.0, 0.0 }, allocator);
+    const v3 = try geom.addVertex(.{ 0.0, 10.0, 0.0 }, allocator);
+    const floor_ring = [_]usize{ v0, v1, v2, v3 };
+    const floor_rings = [_][]const usize{&floor_ring};
+    try geom.addSurface(&floor_rings, .floor, allocator);
 
-    const v4 = try mesh.addVertex(.{ 0.0, 0.0, 5.0 });
-    const v5 = try mesh.addVertex(.{ 10.0, 0.0, 5.0 });
-    const v6 = try mesh.addVertex(.{ 10.0, 10.0, 5.0 });
-    const v7 = try mesh.addVertex(.{ 0.0, 10.0, 5.0 });
-    try mesh.addFace(&.{ v4, v5, v6, v7 }, .roof);
+    const v4 = try geom.addVertex(.{ 0.0, 0.0, 5.0 }, allocator);
+    const v5 = try geom.addVertex(.{ 10.0, 0.0, 5.0 }, allocator);
+    const v6 = try geom.addVertex(.{ 10.0, 10.0, 5.0 }, allocator);
+    const v7 = try geom.addVertex(.{ 0.0, 10.0, 5.0 }, allocator);
+    const roof_ring = [_]usize{ v4, v5, v6, v7 };
+    const roof_rings = [_][]const usize{&roof_ring};
+    try geom.addSurface(&roof_rings, .roof, allocator);
 
     // Add a second geometry to the same object
     const geom_idx2 = try cj.addGeometry(obj_idx, .Solid, "1.0");
     try std.testing.expectEqual(@as(usize, 1), geom_idx2);
 
-    const mesh2 = try cj.getMesh(obj_idx, geom_idx2);
-    _ = try mesh2.addVertex(.{ 0.0, 0.0, 0.0 });
-    _ = try mesh2.addVertex(.{ 5.0, 0.0, 0.0 });
-    _ = try mesh2.addVertex(.{ 5.0, 5.0, 0.0 });
-    try mesh2.addFace(&.{ 0, 1, 2 }, .wall);
+    const geom2 = try cj.getGeometry(obj_idx, geom_idx2);
+    _ = try geom2.addVertex(.{ 0.0, 0.0, 0.0 }, allocator);
+    _ = try geom2.addVertex(.{ 5.0, 0.0, 0.0 }, allocator);
+    _ = try geom2.addVertex(.{ 5.0, 5.0, 0.0 }, allocator);
+    const wall_ring = [_]usize{ 0, 1, 2 };
+    const wall_rings = [_][]const usize{&wall_ring};
+    try geom2.addSurface(&wall_rings, .wall, allocator);
 
     // Add a second object
     const obj_idx2 = try cj.addObject("MyBuildingPart", .BuildingPart);
@@ -1729,12 +1804,12 @@ test "builder API round-trip" {
     try std.testing.expectEqual(@as(usize, 2), loaded_obj.geometries.len);
     try std.testing.expectEqual(CJGeometryType.MultiSurface, loaded_obj.geometries[0].type);
     try std.testing.expectEqualStrings("2.2", loaded_obj.geometries[0].lod);
-    try std.testing.expectEqual(@as(usize, 2), loaded_obj.geometries[0].polygonal_mesh.faces.items.len);
-    try std.testing.expectEqual(@as(usize, 8), loaded_obj.geometries[0].polygonal_mesh.vertices.items.len / 3);
+    try std.testing.expectEqual(@as(usize, 2), loaded_obj.geometries[0].surfaces.items.len);
+    try std.testing.expectEqual(@as(usize, 8), loaded_obj.geometries[0].vertices.items.len / 3);
 
     try std.testing.expectEqual(CJGeometryType.Solid, loaded_obj.geometries[1].type);
     try std.testing.expectEqualStrings("1.0", loaded_obj.geometries[1].lod);
-    try std.testing.expectEqual(@as(usize, 1), loaded_obj.geometries[1].polygonal_mesh.faces.items.len);
+    try std.testing.expectEqual(@as(usize, 1), loaded_obj.geometries[1].surfaces.items.len);
 }
 
 test "load cityjson sequence" {
@@ -1763,13 +1838,13 @@ test "load cityjson sequence" {
     try std.testing.expectEqual(CJGeometryType.MultiSurface, obj.geometries[0].type);
     try std.testing.expectEqualStrings("1.0", obj.geometries[0].lod);
 
-    const mesh = &obj.geometries[0].polygonal_mesh;
-    try std.testing.expectEqual(@as(usize, 3), mesh.vertices.items.len / 3);
-    try std.testing.expectEqual(@as(usize, 1), mesh.faces.items.len);
+    const geom = &obj.geometries[0];
+    try std.testing.expectEqual(@as(usize, 3), geom.vertices.items.len / 3);
+    try std.testing.expectEqual(@as(usize, 1), geom.surfaces.items.len);
 
-    const v0 = mesh.getVertex(0);
-    const v1 = mesh.getVertex(1);
-    const v2 = mesh.getVertex(2);
+    const v0 = [3]f64{ geom.vertices.items[0], geom.vertices.items[1], geom.vertices.items[2] };
+    const v1 = [3]f64{ geom.vertices.items[3], geom.vertices.items[4], geom.vertices.items[5] };
+    const v2 = [3]f64{ geom.vertices.items[6], geom.vertices.items[7], geom.vertices.items[8] };
     try std.testing.expect(@abs(v0[0] - 10.0) < 0.000001);
     try std.testing.expect(@abs(v0[1] - 20.0) < 0.000001);
     try std.testing.expect(@abs(v0[2] - 30.0) < 0.000001);
