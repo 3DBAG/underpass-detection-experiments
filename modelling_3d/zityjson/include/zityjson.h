@@ -11,6 +11,8 @@ extern "C" {
 
 // Opaque handle to a CityJSON instance
 typedef struct CityJSON* CityJSONHandle;
+typedef struct CityJSONSeqReader* CityJSONSeqReaderHandle;
+typedef struct CityJSONSeqWriter* CityJSONSeqWriterHandle;
 
 // Face type enumeration (matches Zig FaceType enum)
 typedef enum {
@@ -85,6 +87,20 @@ ssize_t cityjson_get_object_index(CityJSONHandle handle, const char* key);
 // Get the geometry count for an object by index.
 size_t cityjson_get_geometry_count(CityJSONHandle handle, size_t object_index);
 
+// Get geometry type for a geometry by object and geometry index.
+// Returns CITYJSON_MULTISURFACE, CITYJSON_SOLID, or 255 on invalid indices.
+uint8_t cityjson_get_geometry_type(CityJSONHandle handle, size_t object_index, size_t geometry_index);
+
+// Get geometry LoD string for a geometry by object and geometry index.
+// Returns 1 on success, 0 on failure.
+int cityjson_get_geometry_lod(
+    CityJSONHandle handle,
+    size_t object_index,
+    size_t geometry_index,
+    const char** out_lod,
+    size_t* out_len
+);
+
 // Get the vertex count for a geometry by object and geometry index.
 size_t cityjson_get_vertex_count(CityJSONHandle handle, size_t object_index, size_t geometry_index);
 
@@ -112,6 +128,73 @@ int cityjson_get_face_info(
     size_t* out_start,
     size_t* out_count,
     uint8_t* out_face_type
+);
+
+// ---------------------------------------------------------------------------
+// CityJSONSeq streaming reader/writer API
+// ---------------------------------------------------------------------------
+
+// Open / close a CityJSONSeq reader.
+CityJSONSeqReaderHandle cityjsonseq_reader_open(const char* path);
+void cityjsonseq_reader_destroy(CityJSONSeqReaderHandle handle);
+
+// Get world-coordinate extent from the CityJSONSeq header metadata.geographicalExtent.
+// Returns:
+//   1 => success, extent available
+//   0 => no extent available
+//  -1 => error
+int cityjsonseq_reader_header_geographical_extent(
+    CityJSONSeqReaderHandle handle,
+    double* out_min_xyz,
+    double* out_max_xyz
+);
+
+// Streaming iteration.
+// Returns:
+//   1 => success with data
+//   0 => end-of-file
+//  -1 => error
+int cityjsonseq_peek_next_id(CityJSONSeqReaderHandle handle, const char** out_id, size_t* out_len);
+int cityjsonseq_next(CityJSONSeqReaderHandle handle);
+int cityjsonseq_current_feature_id(CityJSONSeqReaderHandle handle, const char** out_id, size_t* out_len);
+
+// Access decoded CityJSON for the current feature (valid until next/peek/destroy).
+CityJSONHandle cityjsonseq_current_cityjson(CityJSONSeqReaderHandle handle);
+
+// Open / close a CityJSONSeq writer from an existing reader (writes the header).
+CityJSONSeqWriterHandle cityjsonseq_writer_open_from_reader(
+    CityJSONSeqReaderHandle reader_handle,
+    const char* output_path
+);
+void cityjsonseq_writer_destroy(CityJSONSeqWriterHandle writer_handle);
+
+// Write pending/current raw feature lines.
+// cityjsonseq_writer_write_pending_raw returns 1/0/-1.
+// cityjsonseq_writer_write_current_raw returns 0/-1.
+int cityjsonseq_writer_write_pending_raw(
+    CityJSONSeqReaderHandle reader_handle,
+    CityJSONSeqWriterHandle writer_handle
+);
+int cityjsonseq_writer_write_current_raw(
+    CityJSONSeqReaderHandle reader_handle,
+    CityJSONSeqWriterHandle writer_handle
+);
+
+// Write current feature with LoD 2.2 Solid geometry replaced by a triangle mesh.
+// Semantics type values match zfcb semantic enum values:
+//   0=RoofSurface, 1=GroundSurface, 2=WallSurface, 4=OuterCeilingSurface.
+// Returns 0 on success, -1 on failure.
+int cityjsonseq_writer_write_current_replaced_lod22(
+    CityJSONSeqReaderHandle reader_handle,
+    CityJSONSeqWriterHandle writer_handle,
+    const char* feature_id,
+    size_t feature_id_len,
+    const double* vertices_xyz_world,
+    size_t vertex_count,
+    const uint32_t* triangle_indices,
+    size_t triangle_index_count,
+    const uint8_t* semantic_types,
+    size_t semantic_types_count
 );
 
 #ifdef __cplusplus

@@ -769,6 +769,37 @@ export fn cityjson_get_geometry_count(handle: ?CityJSONHandle, object_index: usi
     return values[object_index].geometries.len;
 }
 
+/// Get geometry type for a geometry by object and geometry index.
+/// Returns CITYJSON_MULTISURFACE (0), CITYJSON_SOLID (1), or 255 on invalid indices.
+export fn cityjson_get_geometry_type(handle: ?CityJSONHandle, object_index: usize, geometry_index: usize) callconv(.c) u8 {
+    const cj = handle orelse return 255;
+    const values = cj.objects.values();
+    if (object_index >= values.len) return 255;
+    const geometries = values[object_index].geometries;
+    if (geometry_index >= geometries.len) return 255;
+    return @intFromEnum(geometries[geometry_index].type);
+}
+
+/// Get geometry LoD string for a geometry by object and geometry index.
+/// Returns 1 on success, 0 on failure.
+export fn cityjson_get_geometry_lod(
+    handle: ?CityJSONHandle,
+    object_index: usize,
+    geometry_index: usize,
+    out_lod: *[*c]const u8,
+    out_len: *usize,
+) callconv(.c) c_int {
+    const cj = handle orelse return 0;
+    const values = cj.objects.values();
+    if (object_index >= values.len) return 0;
+    const geometries = values[object_index].geometries;
+    if (geometry_index >= geometries.len) return 0;
+    const lod = geometries[geometry_index].lod;
+    out_lod.* = lod.ptr;
+    out_len.* = lod.len;
+    return 1;
+}
+
 /// Get the vertex count for a geometry by object and geometry index.
 export fn cityjson_get_vertex_count(handle: ?CityJSONHandle, object_index: usize, geometry_index: usize) callconv(.c) usize {
     const cj = handle orelse return 0;
@@ -840,6 +871,746 @@ export fn cityjson_get_face_info(
     out_start.* = face.start;
     out_count.* = face.count;
     out_face_type.* = @intFromEnum(face.face_type);
+    return 0;
+}
+
+const CJSeqHeaderMetadata = struct {
+    geographicalExtent: ?[6]f64 = null,
+};
+
+const CJSeqHeader = struct {
+    type: []const u8,
+    transform: CJTransform,
+    metadata: ?CJSeqHeaderMetadata = null,
+};
+
+const CJSeqFeatureId = struct {
+    type: []const u8,
+    id: []const u8,
+};
+
+fn semanticSurfaceTypeName(semantic_type: u8) []const u8 {
+    return switch (semantic_type) {
+        0 => "RoofSurface",
+        1 => "GroundSurface",
+        2 => "WallSurface",
+        4 => "OuterCeilingSurface",
+        else => "WallSurface",
+    };
+}
+
+fn isSolidLikeGeometryType(type_name: []const u8) bool {
+    return std.mem.eql(u8, type_name, "Solid") or
+        std.mem.eql(u8, type_name, "MultiSolid") or
+        std.mem.eql(u8, type_name, "CompositeSolid");
+}
+
+fn parseJsonIntegerIndex(value: std.json.Value) !usize {
+    const i: i64 = switch (value) {
+        .integer => |v| v,
+        .float => |v| blk: {
+            if (!std.math.isFinite(v)) return error.InvalidJsonIndex;
+            const rounded = @round(v);
+            if (rounded != v) return error.InvalidJsonIndex;
+            if (rounded < 0.0) return error.InvalidJsonIndex;
+            break :blk @intFromFloat(rounded);
+        },
+        .number_string => |v| try std.fmt.parseInt(i64, v, 10),
+        else => return error.InvalidJsonIndex,
+    };
+    if (i < 0) return error.InvalidJsonIndex;
+    return @intCast(i);
+}
+
+fn parseJsonI64(value: std.json.Value) !i64 {
+    return switch (value) {
+        .integer => |v| v,
+        .float => |v| blk: {
+            if (!std.math.isFinite(v)) return error.InvalidJsonNumber;
+            const rounded = @round(v);
+            if (rounded != v) return error.InvalidJsonNumber;
+            if (rounded < @as(f64, @floatFromInt(std.math.minInt(i64)))) return error.InvalidJsonNumber;
+            if (rounded > @as(f64, @floatFromInt(std.math.maxInt(i64)))) return error.InvalidJsonNumber;
+            break :blk @intFromFloat(rounded);
+        },
+        .number_string => |v| try std.fmt.parseInt(i64, v, 10),
+        else => error.InvalidJsonNumber,
+    };
+}
+
+fn quantizeWorldCoordinate(value: f64, scale: f64, translate: f64) !i64 {
+    if (!std.math.isFinite(value) or !std.math.isFinite(scale) or !std.math.isFinite(translate)) {
+        return error.InvalidCoordinate;
+    }
+    if (scale == 0.0) {
+        return error.InvalidCoordinate;
+    }
+    const q = @round((value - translate) / scale);
+    if (!std.math.isFinite(q)) {
+        return error.InvalidCoordinate;
+    }
+    if (q < @as(f64, @floatFromInt(std.math.minInt(i64))) or q > @as(f64, @floatFromInt(std.math.maxInt(i64)))) {
+        return error.InvalidCoordinate;
+    }
+    return @intFromFloat(q);
+}
+
+fn collectBoundaryIndices(value: *const std.json.Value, used: *std.AutoHashMap(usize, void)) !void {
+    switch (value.*) {
+        .array => |arr| {
+            for (arr.items) |*child| {
+                try collectBoundaryIndices(child, used);
+            }
+        },
+        .integer, .float, .number_string => {
+            const idx = try parseJsonIntegerIndex(value.*);
+            try used.put(idx, {});
+        },
+        else => {},
+    }
+}
+
+fn remapBoundaryIndices(value: *std.json.Value, old_to_new: *const std.AutoHashMap(usize, usize)) !void {
+    switch (value.*) {
+        .array => |*arr| {
+            for (arr.items) |*child| {
+                try remapBoundaryIndices(child, old_to_new);
+            }
+        },
+        .integer, .float, .number_string => {
+            const old_idx = try parseJsonIntegerIndex(value.*);
+            const new_idx = old_to_new.get(old_idx) orelse return error.InvalidBoundaryIndex;
+            value.* = .{ .integer = @intCast(new_idx) };
+        },
+        else => {},
+    }
+}
+
+fn readFeatureIdAlloc(allocator: std.mem.Allocator, line: []const u8) ![]u8 {
+    const parsed = try std.json.parseFromSlice(CJSeqFeatureId, allocator, line, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+    if (!std.mem.eql(u8, parsed.value.type, "CityJSONFeature")) {
+        return error.InvalidCityJSONSeqFeature;
+    }
+    if (parsed.value.id.len == 0) {
+        return error.InvalidCityJSONSeqFeature;
+    }
+    return try allocator.dupe(u8, parsed.value.id);
+}
+
+fn featureCityObjectsContainsKey(city_objs: std.json.ArrayHashMap(CJObject), key: []const u8) bool {
+    for (city_objs.map.keys()) |obj_key| {
+        if (std.mem.eql(u8, obj_key, key)) return true;
+    }
+    return false;
+}
+
+const CityJSONSeqReader = struct {
+    allocator: std.mem.Allocator,
+    file: std.fs.File,
+    read_buf: [8192]u8,
+    read_len: usize,
+    read_pos: usize,
+    header_line: []u8,
+    seq_transform: CJTransform,
+    header_extent: ?[6]f64,
+    pending_line: []u8,
+    pending_id: []u8,
+    has_pending: bool,
+    current_line: []u8,
+    current_id: []u8,
+    current_cj: CityJSON,
+
+    fn init(allocator: std.mem.Allocator, path: []const u8) !*CityJSONSeqReader {
+        const file = if (std.fs.path.isAbsolute(path))
+            try std.fs.openFileAbsolute(path, .{ .mode = .read_only })
+        else
+            try std.fs.cwd().openFile(path, .{ .mode = .read_only });
+
+        var current_cj = try CityJSON.init(allocator);
+        errdefer current_cj.deinit();
+
+        const reader = try allocator.create(CityJSONSeqReader);
+        reader.* = .{
+            .allocator = allocator,
+            .file = file,
+            .read_buf = undefined,
+            .read_len = 0,
+            .read_pos = 0,
+            .header_line = &[_]u8{},
+            .seq_transform = .{
+                .scale = .{ 1.0, 1.0, 1.0 },
+                .translate = .{ 0.0, 0.0, 0.0 },
+            },
+            .header_extent = null,
+            .pending_line = &[_]u8{},
+            .pending_id = &[_]u8{},
+            .has_pending = false,
+            .current_line = &[_]u8{},
+            .current_id = &[_]u8{},
+            .current_cj = current_cj,
+        };
+        errdefer reader.deinit();
+
+        const header_line = try reader.readNextMeaningfulLineAlloc() orelse return error.InvalidCityJSONSeqHeader;
+        reader.header_line = header_line;
+
+        var parse_line = header_line;
+        if (std.mem.startsWith(u8, parse_line, "\xEF\xBB\xBF")) {
+            parse_line = parse_line[3..];
+        }
+
+        const parsed_header = try std.json.parseFromSlice(CJSeqHeader, allocator, parse_line, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed_header.deinit();
+        if (!std.mem.eql(u8, parsed_header.value.type, "CityJSON")) {
+            return error.InvalidCityJSONSeqHeader;
+        }
+
+        reader.seq_transform = parsed_header.value.transform;
+        if (parsed_header.value.metadata) |metadata| {
+            reader.header_extent = metadata.geographicalExtent;
+        }
+
+        return reader;
+    }
+
+    fn deinit(self: *CityJSONSeqReader) void {
+        self.clearPending();
+        self.clearCurrent();
+        if (self.header_line.len > 0) {
+            self.allocator.free(self.header_line);
+        }
+        self.current_cj.deinit();
+        self.file.close();
+        self.allocator.destroy(self);
+    }
+
+    fn clearPending(self: *CityJSONSeqReader) void {
+        if (!self.has_pending) return;
+        if (self.pending_line.len > 0) self.allocator.free(self.pending_line);
+        if (self.pending_id.len > 0) self.allocator.free(self.pending_id);
+        self.pending_line = &[_]u8{};
+        self.pending_id = &[_]u8{};
+        self.has_pending = false;
+    }
+
+    fn clearCurrent(self: *CityJSONSeqReader) void {
+        if (self.current_line.len > 0) self.allocator.free(self.current_line);
+        if (self.current_id.len > 0) self.allocator.free(self.current_id);
+        self.current_line = &[_]u8{};
+        self.current_id = &[_]u8{};
+    }
+
+    fn readNextMeaningfulLineAlloc(self: *CityJSONSeqReader) !?[]u8 {
+        var line: std.ArrayList(u8) = .{};
+        defer line.deinit(self.allocator);
+
+        while (true) {
+            line.clearRetainingCapacity();
+            var saw_bytes = false;
+
+            while (true) {
+                if (self.read_pos >= self.read_len) {
+                    self.read_len = try self.file.read(&self.read_buf);
+                    self.read_pos = 0;
+                    if (self.read_len == 0) break;
+                }
+
+                const chunk = self.read_buf[self.read_pos..self.read_len];
+                if (std.mem.indexOfScalar(u8, chunk, '\n')) |rel_end| {
+                    try line.appendSlice(self.allocator, chunk[0..rel_end]);
+                    self.read_pos += rel_end + 1;
+                    saw_bytes = true;
+                    break;
+                }
+
+                try line.appendSlice(self.allocator, chunk);
+                self.read_pos = self.read_len;
+                saw_bytes = true;
+            }
+
+            if (!saw_bytes and line.items.len == 0 and self.read_len == 0) {
+                return null;
+            }
+
+            const trimmed = std.mem.trim(u8, line.items, " \t\r");
+            if (trimmed.len == 0) {
+                continue;
+            }
+            return try self.allocator.dupe(u8, trimmed);
+        }
+    }
+
+    fn decodeCurrentFeature(self: *CityJSONSeqReader) !void {
+        self.current_cj.deinit();
+        self.current_cj = try CityJSON.init(self.allocator);
+
+        const parsed_feature = try std.json.parseFromSlice(CJFeature, self.allocator, self.current_line, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed_feature.deinit();
+
+        if (!std.mem.eql(u8, parsed_feature.value.type, "CityJSONFeature")) {
+            return error.InvalidCityJSONSeqFeature;
+        }
+        if (parsed_feature.value.id.len == 0) {
+            return error.InvalidCityJSONSeqFeature;
+        }
+        if (!featureCityObjectsContainsKey(parsed_feature.value.CityObjects, parsed_feature.value.id)) {
+            return error.InvalidCityJSONSeqFeatureParent;
+        }
+
+        try self.current_cj.ingestCityObjects(
+            parsed_feature.value.CityObjects,
+            parsed_feature.value.vertices,
+            self.seq_transform,
+        );
+    }
+};
+
+const CityJSONSeqWriter = struct {
+    allocator: std.mem.Allocator,
+    file: std.fs.File,
+
+    fn init(allocator: std.mem.Allocator, reader: *const CityJSONSeqReader, path: []const u8) !*CityJSONSeqWriter {
+        const file = if (std.fs.path.isAbsolute(path))
+            try std.fs.createFileAbsolute(path, .{ .truncate = true })
+        else
+            try std.fs.cwd().createFile(path, .{ .truncate = true });
+
+        const writer = try allocator.create(CityJSONSeqWriter);
+        writer.* = .{
+            .allocator = allocator,
+            .file = file,
+        };
+        errdefer writer.deinit();
+
+        try writer.writeLine(reader.header_line);
+        return writer;
+    }
+
+    fn deinit(self: *CityJSONSeqWriter) void {
+        self.file.close();
+        self.allocator.destroy(self);
+    }
+
+    fn writeLine(self: *CityJSONSeqWriter, line: []const u8) !void {
+        try self.file.writeAll(line);
+        try self.file.writeAll("\n");
+    }
+};
+
+pub const CityJSONSeqReaderHandle = *CityJSONSeqReader;
+pub const CityJSONSeqWriterHandle = *CityJSONSeqWriter;
+
+export fn cityjsonseq_reader_open(path: [*c]const u8) callconv(.c) ?CityJSONSeqReaderHandle {
+    if (path == null) return null;
+    const path_slice = std.mem.span(path);
+    return CityJSONSeqReader.init(c_allocator, path_slice) catch |err| {
+        std.debug.print("Error opening CityJSONSeq reader: {}\n", .{err});
+        return null;
+    };
+}
+
+export fn cityjsonseq_reader_destroy(handle: ?CityJSONSeqReaderHandle) callconv(.c) void {
+    if (handle) |reader| {
+        reader.deinit();
+    }
+}
+
+export fn cityjsonseq_reader_header_geographical_extent(
+    handle: ?CityJSONSeqReaderHandle,
+    out_min_xyz: [*c]f64,
+    out_max_xyz: [*c]f64,
+) callconv(.c) c_int {
+    const reader = handle orelse return -1;
+    if (out_min_xyz == null or out_max_xyz == null) return -1;
+    const extent = reader.header_extent orelse return 0;
+    out_min_xyz[0] = extent[0];
+    out_min_xyz[1] = extent[1];
+    out_min_xyz[2] = extent[2];
+    out_max_xyz[0] = extent[3];
+    out_max_xyz[1] = extent[4];
+    out_max_xyz[2] = extent[5];
+    return 1;
+}
+
+export fn cityjsonseq_peek_next_id(
+    handle: ?CityJSONSeqReaderHandle,
+    out_id: *[*c]const u8,
+    out_len: *usize,
+) callconv(.c) c_int {
+    const reader = handle orelse return -1;
+
+    if (reader.has_pending) {
+        out_id.* = reader.pending_id.ptr;
+        out_len.* = reader.pending_id.len;
+        return 1;
+    }
+
+    const next_line = reader.readNextMeaningfulLineAlloc() catch return -1;
+    if (next_line == null) return 0;
+    const line = next_line.?;
+
+    const parsed_id = readFeatureIdAlloc(reader.allocator, line) catch {
+        reader.allocator.free(line);
+        return -1;
+    };
+
+    reader.pending_line = line;
+    reader.pending_id = parsed_id;
+    reader.has_pending = true;
+
+    out_id.* = reader.pending_id.ptr;
+    out_len.* = reader.pending_id.len;
+    return 1;
+}
+
+export fn cityjsonseq_next(handle: ?CityJSONSeqReaderHandle) callconv(.c) c_int {
+    const reader = handle orelse return -1;
+
+    var line: []u8 = &[_]u8{};
+    var id: []u8 = &[_]u8{};
+
+    if (reader.has_pending) {
+        line = reader.pending_line;
+        id = reader.pending_id;
+        reader.pending_line = &[_]u8{};
+        reader.pending_id = &[_]u8{};
+        reader.has_pending = false;
+    } else {
+        const next_line = reader.readNextMeaningfulLineAlloc() catch return -1;
+        if (next_line == null) return 0;
+        line = next_line.?;
+        id = readFeatureIdAlloc(reader.allocator, line) catch {
+            reader.allocator.free(line);
+            return -1;
+        };
+    }
+
+    reader.clearCurrent();
+    reader.current_line = line;
+    reader.current_id = id;
+
+    reader.decodeCurrentFeature() catch {
+        reader.clearCurrent();
+        return -1;
+    };
+
+    return 1;
+}
+
+export fn cityjsonseq_current_feature_id(
+    handle: ?CityJSONSeqReaderHandle,
+    out_id: *[*c]const u8,
+    out_len: *usize,
+) callconv(.c) c_int {
+    const reader = handle orelse return -1;
+    if (reader.current_id.len == 0) return 0;
+    out_id.* = reader.current_id.ptr;
+    out_len.* = reader.current_id.len;
+    return 1;
+}
+
+export fn cityjsonseq_current_cityjson(handle: ?CityJSONSeqReaderHandle) callconv(.c) ?CityJSONHandle {
+    const reader = handle orelse return null;
+    if (reader.current_id.len == 0) return null;
+    return &reader.current_cj;
+}
+
+export fn cityjsonseq_writer_open_from_reader(
+    reader_handle: ?CityJSONSeqReaderHandle,
+    output_path: [*c]const u8,
+) callconv(.c) ?CityJSONSeqWriterHandle {
+    const reader = reader_handle orelse return null;
+    if (output_path == null) return null;
+    const output_path_slice = std.mem.span(output_path);
+    return CityJSONSeqWriter.init(c_allocator, reader, output_path_slice) catch |err| {
+        std.debug.print("Error opening CityJSONSeq writer: {}\n", .{err});
+        return null;
+    };
+}
+
+export fn cityjsonseq_writer_destroy(handle: ?CityJSONSeqWriterHandle) callconv(.c) void {
+    if (handle) |writer| {
+        writer.deinit();
+    }
+}
+
+export fn cityjsonseq_writer_write_pending_raw(
+    reader_handle: ?CityJSONSeqReaderHandle,
+    writer_handle: ?CityJSONSeqWriterHandle,
+) callconv(.c) c_int {
+    const reader = reader_handle orelse return -1;
+    const writer = writer_handle orelse return -1;
+
+    if (!reader.has_pending) {
+        var id_ptr: [*c]const u8 = null;
+        var id_len: usize = 0;
+        const peek_result = cityjsonseq_peek_next_id(reader_handle, &id_ptr, &id_len);
+        if (peek_result != 1) return peek_result;
+    }
+
+    writer.writeLine(reader.pending_line) catch return -1;
+    reader.clearPending();
+    return 1;
+}
+
+export fn cityjsonseq_writer_write_current_raw(
+    reader_handle: ?CityJSONSeqReaderHandle,
+    writer_handle: ?CityJSONSeqWriterHandle,
+) callconv(.c) c_int {
+    const reader = reader_handle orelse return -1;
+    const writer = writer_handle orelse return -1;
+    if (reader.current_line.len == 0) return -1;
+    writer.writeLine(reader.current_line) catch return -1;
+    return 0;
+}
+
+fn writeReplacedCurrentFeatureLine(
+    reader: *CityJSONSeqReader,
+    writer: *CityJSONSeqWriter,
+    feature_id: []const u8,
+    vertices_xyz_world: []const f64,
+    triangle_indices: []const u32,
+    semantic_types: []const u8,
+) !void {
+    if (triangle_indices.len % 3 != 0) return error.InvalidTriangleIndexArray;
+    if (vertices_xyz_world.len % 3 != 0) return error.InvalidVertexArray;
+    if (semantic_types.len != triangle_indices.len / 3) return error.InvalidSemanticTypesArray;
+    if (vertices_xyz_world.len == 0 or triangle_indices.len == 0) return error.InvalidReplacementGeometry;
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, reader.allocator, reader.current_line, .{});
+    defer parsed.deinit();
+    const arena_alloc = parsed.arena.allocator();
+
+    if (parsed.value != .object) return error.InvalidCityJSONSeqFeature;
+    var root_obj = &parsed.value.object;
+
+    const city_objects_value = root_obj.getPtr("CityObjects") orelse return error.InvalidCityJSONSeqFeature;
+    if (city_objects_value.* != .object) return error.InvalidCityJSONSeqFeature;
+    var city_objects_obj = &city_objects_value.object;
+
+    const vertices_value = root_obj.getPtr("vertices") orelse return error.InvalidCityJSONSeqFeature;
+    if (vertices_value.* != .array) return error.InvalidCityJSONSeqFeature;
+
+    var target_obj_id = try std.fmt.allocPrint(arena_alloc, "{s}-0", .{feature_id});
+    var target_object = city_objects_obj.getPtr(target_obj_id);
+    if (target_object == null) {
+        target_obj_id = try arena_alloc.dupe(u8, feature_id);
+        target_object = city_objects_obj.getPtr(target_obj_id);
+    }
+    var target_object_value = target_object orelse return error.TargetObjectNotFound;
+    if (target_object_value.* != .object) return error.TargetObjectNotFound;
+
+    const target_geometries_value = target_object_value.object.getPtr("geometry") orelse return error.TargetGeometryNotFound;
+    if (target_geometries_value.* != .array) return error.TargetGeometryNotFound;
+
+    var target_geometry: ?*std.json.Value = null;
+    for (target_geometries_value.array.items) |*geom| {
+        if (geom.* != .object) continue;
+        const geom_type_value = geom.object.get("type") orelse continue;
+        if (geom_type_value != .string) continue;
+        if (!isSolidLikeGeometryType(geom_type_value.string)) continue;
+        const lod_value = geom.object.get("lod") orelse continue;
+        if (lod_value != .string) continue;
+        if (std.mem.eql(u8, lod_value.string, "2.2")) {
+            target_geometry = geom;
+            break;
+        }
+    }
+    const target_geometry_value = target_geometry orelse return error.TargetGeometryNotFound;
+
+    var old_vertices = std.ArrayList([3]i64){};
+    defer old_vertices.deinit(arena_alloc);
+    for (vertices_value.array.items) |vertex| {
+        if (vertex != .array or vertex.array.items.len != 3) return error.InvalidCityJSONSeqFeature;
+        const vx = try parseJsonI64(vertex.array.items[0]);
+        const vy = try parseJsonI64(vertex.array.items[1]);
+        const vz = try parseJsonI64(vertex.array.items[2]);
+        try old_vertices.append(arena_alloc, .{ vx, vy, vz });
+    }
+
+    var used_old_indices = std.AutoHashMap(usize, void).init(arena_alloc);
+    defer used_old_indices.deinit();
+
+    var object_it = city_objects_obj.iterator();
+    while (object_it.next()) |entry| {
+        if (entry.value_ptr.* != .object) continue;
+        const geoms = entry.value_ptr.object.getPtr("geometry") orelse continue;
+        if (geoms.* != .array) continue;
+        for (geoms.array.items) |*geom| {
+            if (geom == target_geometry_value) continue;
+            if (geom.* != .object) continue;
+            const boundaries = geom.object.getPtr("boundaries") orelse continue;
+            try collectBoundaryIndices(boundaries, &used_old_indices);
+        }
+    }
+
+    var old_to_new = std.AutoHashMap(usize, usize).init(arena_alloc);
+    defer old_to_new.deinit();
+    var coord_to_new = std.AutoHashMap([3]i64, usize).init(arena_alloc);
+    defer coord_to_new.deinit();
+    var new_vertices = std.ArrayList([3]i64){};
+    defer new_vertices.deinit(arena_alloc);
+
+    for (old_vertices.items, 0..) |coord, old_idx| {
+        if (used_old_indices.contains(old_idx)) {
+            const new_idx = new_vertices.items.len;
+            try old_to_new.put(old_idx, new_idx);
+            try new_vertices.append(arena_alloc, coord);
+            try coord_to_new.put(coord, new_idx);
+        }
+    }
+
+    var replacement_indices = std.ArrayList(usize){};
+    defer replacement_indices.deinit(arena_alloc);
+    try replacement_indices.ensureTotalCapacity(arena_alloc, triangle_indices.len);
+
+    const input_vertex_count = vertices_xyz_world.len / 3;
+    for (triangle_indices) |src_idx_u32| {
+        const src_idx: usize = @intCast(src_idx_u32);
+        if (src_idx >= input_vertex_count) return error.InvalidTriangleIndexArray;
+
+        const quantized = [3]i64{
+            try quantizeWorldCoordinate(vertices_xyz_world[src_idx * 3 + 0], reader.seq_transform.scale[0], reader.seq_transform.translate[0]),
+            try quantizeWorldCoordinate(vertices_xyz_world[src_idx * 3 + 1], reader.seq_transform.scale[1], reader.seq_transform.translate[1]),
+            try quantizeWorldCoordinate(vertices_xyz_world[src_idx * 3 + 2], reader.seq_transform.scale[2], reader.seq_transform.translate[2]),
+        };
+
+        const final_idx = if (coord_to_new.get(quantized)) |existing_idx| blk: {
+            break :blk existing_idx;
+        } else blk: {
+            const appended_idx = new_vertices.items.len;
+            try new_vertices.append(arena_alloc, quantized);
+            try coord_to_new.put(quantized, appended_idx);
+            break :blk appended_idx;
+        };
+
+        replacement_indices.appendAssumeCapacity(final_idx);
+    }
+
+    object_it = city_objects_obj.iterator();
+    while (object_it.next()) |entry| {
+        if (entry.value_ptr.* != .object) continue;
+        const geoms = entry.value_ptr.object.getPtr("geometry") orelse continue;
+        if (geoms.* != .array) continue;
+        for (geoms.array.items) |*geom| {
+            if (geom == target_geometry_value) continue;
+            if (geom.* != .object) continue;
+            const boundaries = geom.object.getPtr("boundaries") orelse continue;
+            try remapBoundaryIndices(boundaries, &old_to_new);
+        }
+    }
+
+    var shell_polygons = std.json.Array.init(arena_alloc);
+    for (0..(replacement_indices.items.len / 3)) |tri_idx| {
+        var ring = std.json.Array.init(arena_alloc);
+        try ring.append(.{ .integer = @intCast(replacement_indices.items[tri_idx * 3 + 0]) });
+        try ring.append(.{ .integer = @intCast(replacement_indices.items[tri_idx * 3 + 1]) });
+        try ring.append(.{ .integer = @intCast(replacement_indices.items[tri_idx * 3 + 2]) });
+
+        var polygon = std.json.Array.init(arena_alloc);
+        try polygon.append(.{ .array = ring });
+        try shell_polygons.append(.{ .array = polygon });
+    }
+    var solid_boundaries = std.json.Array.init(arena_alloc);
+    try solid_boundaries.append(.{ .array = shell_polygons });
+
+    var surfaces = std.json.Array.init(arena_alloc);
+    var semantic_to_surface = std.AutoHashMap(u8, usize).init(arena_alloc);
+    defer semantic_to_surface.deinit();
+    var semantic_values = std.ArrayList(usize){};
+    defer semantic_values.deinit(arena_alloc);
+
+    for (semantic_types) |semantic_type| {
+        const surface_idx = if (semantic_to_surface.get(semantic_type)) |idx| blk: {
+            break :blk idx;
+        } else blk: {
+            var surface_obj = std.json.ObjectMap.init(arena_alloc);
+            try surface_obj.put("type", .{ .string = semanticSurfaceTypeName(semantic_type) });
+            const idx = surfaces.items.len;
+            try surfaces.append(.{ .object = surface_obj });
+            try semantic_to_surface.put(semantic_type, idx);
+            break :blk idx;
+        };
+        try semantic_values.append(arena_alloc, surface_idx);
+    }
+
+    var shell_values = std.json.Array.init(arena_alloc);
+    for (semantic_values.items) |semantic_idx| {
+        try shell_values.append(.{ .integer = @intCast(semantic_idx) });
+    }
+    var values_outer = std.json.Array.init(arena_alloc);
+    try values_outer.append(.{ .array = shell_values });
+
+    var semantics_obj = std.json.ObjectMap.init(arena_alloc);
+    try semantics_obj.put("surfaces", .{ .array = surfaces });
+    try semantics_obj.put("values", .{ .array = values_outer });
+
+    if (target_geometry_value.* != .object) return error.TargetGeometryNotFound;
+    try target_geometry_value.object.put("type", .{ .string = "Solid" });
+    try target_geometry_value.object.put("lod", .{ .string = "2.2" });
+    try target_geometry_value.object.put("boundaries", .{ .array = solid_boundaries });
+    try target_geometry_value.object.put("semantics", .{ .object = semantics_obj });
+
+    var vertices_array = std.json.Array.init(arena_alloc);
+    try vertices_array.ensureTotalCapacity(new_vertices.items.len);
+    for (new_vertices.items) |coord| {
+        var vertex_triplet = std.json.Array.init(arena_alloc);
+        try vertex_triplet.append(.{ .integer = coord[0] });
+        try vertex_triplet.append(.{ .integer = coord[1] });
+        try vertex_triplet.append(.{ .integer = coord[2] });
+        vertices_array.appendAssumeCapacity(.{ .array = vertex_triplet });
+    }
+    vertices_value.* = .{ .array = vertices_array };
+
+    // Serialize the replaced feature to an in-memory line, then append through
+    // writeLine() so we preserve output stream ordering.
+    var out: std.io.Writer.Allocating = .init(reader.allocator);
+    defer out.deinit();
+    try std.json.Stringify.value(parsed.value, .{ .whitespace = .minified }, &out.writer);
+    try writer.writeLine(out.written());
+}
+
+export fn cityjsonseq_writer_write_current_replaced_lod22(
+    reader_handle: ?CityJSONSeqReaderHandle,
+    writer_handle: ?CityJSONSeqWriterHandle,
+    feature_id_ptr: [*c]const u8,
+    feature_id_len: usize,
+    vertices_xyz_world_ptr: [*c]const f64,
+    vertex_count: usize,
+    triangle_indices_ptr: [*c]const u32,
+    triangle_index_count: usize,
+    semantic_types_ptr: [*c]const u8,
+    semantic_types_count: usize,
+) callconv(.c) c_int {
+    const reader = reader_handle orelse return -1;
+    const writer = writer_handle orelse return -1;
+    if (feature_id_ptr == null or feature_id_len == 0) return -1;
+    if (vertices_xyz_world_ptr == null or vertex_count == 0) return -1;
+    if (triangle_indices_ptr == null or triangle_index_count == 0 or triangle_index_count % 3 != 0) return -1;
+    if (semantic_types_ptr == null or semantic_types_count != triangle_index_count / 3) return -1;
+    if (reader.current_line.len == 0) return -1;
+
+    const feature_id = feature_id_ptr[0..feature_id_len];
+    const vertices_xyz_world = vertices_xyz_world_ptr[0 .. vertex_count * 3];
+    const triangle_indices = triangle_indices_ptr[0..triangle_index_count];
+    const semantic_types = semantic_types_ptr[0..semantic_types_count];
+
+    writeReplacedCurrentFeatureLine(
+        reader,
+        writer,
+        feature_id,
+        vertices_xyz_world,
+        triangle_indices,
+        semantic_types,
+    ) catch return -1;
+
     return 0;
 }
 
