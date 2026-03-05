@@ -12,6 +12,7 @@ typedef struct CityJSON* CityJSONHandle;
 typedef struct Reader* ZfcbReaderHandle;
 
 bool is_fcb_path(std::string_view path);
+bool is_cityjsonseq_path(std::string_view path);
 
 ssize_t resolve_cityjson_object_index(CityJSONHandle cj, std::string_view feature_id);
 

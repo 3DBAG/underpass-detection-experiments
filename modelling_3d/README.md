@@ -69,6 +69,15 @@ With FCB input and FCB output (preserves all metadata, only replaces LoD 2.2 geo
   hoogte identificatie manifold
 ```
 
+With CityJSONSeq (`.jsonl`) input and output:
+```bash
+./zig-out/bin/add_underpass \
+  sample_data/amsterdam_beemsterstraat_42.gpkg \
+  sample_data/9-444-728_sm.city.jsonl \
+  sample_data/out.city.jsonl \
+  hoogte identificatie manifold
+```
+
 With PostgreSQL/PostGIS as OGR source:
 ```bash
 ./zig-out/bin/add_underpass \
@@ -78,13 +87,13 @@ With PostgreSQL/PostGIS as OGR source:
   h_underpass identificatie manifold
 ```
 
-Arguments: `<ogr_source> <fcb_input> <fcb_output> <height_attr> [id_attr] [method]`
+Arguments: `<ogr_source> <model_input> <model_output> <height_attr> [id_attr] [method]`
 
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `ogr_source` | — | Input OGR datasource path that contains 2D underpass polygons |
-| `fcb_input` | — | Input path with 2.5D building model (`/.fcb`) or `-` for FCB stdin |
-| `fcb_output-` | — | Output path; FCB path or `-` for FCB stdout |
+| `model_input` | — | Input path with 2.5D building model (`.fcb` or `.jsonl`). Use `-` only for FCB stdin. |
+| `model_output` | — | Output path (`.fcb` or `.jsonl`). Use `-` only for FCB stdout. |
 | `height_attr` | — | OGR height attribute name |
 | `id_attr` | `identificatie` | OGR Feature ID attribute name. This is used to match with ID of the building models. |
 | `method` | `manifold` | Boolean method: `manifold`, `nef`, `pmp`, or `geogram` |
@@ -112,6 +121,7 @@ fcb deser -i sample_data/out.fcb -o sample_data/out.city.jsonl
 - Use `-` as input path (second argument) to read FCB from stdin.
 - Use `-` as output path (third argument) to write FCB to stdout.
 - When writing binary FCB to stdout, logs/timing are written to stderr.
+- CityJSONSeq (`.jsonl`) stdin/stdout piping is not supported yet.
 
 Examples:
 

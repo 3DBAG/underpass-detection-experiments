@@ -7,6 +7,7 @@
 
 #include <CGAL/Polygon_mesh_processing/triangulate_faces.h>
 
+#include "zityjson.h"
 #include "zfcb.h"
 
 bool is_fcb_path(const std::string_view path) {
@@ -15,6 +16,136 @@ bool is_fcb_path(const std::string_view path) {
         return false;
     }
     return path.substr(path.size() - ext.size()) == ext;
+}
+
+bool is_cityjsonseq_path(const std::string_view path) {
+    constexpr std::string_view jsonl_ext = ".jsonl";
+    constexpr std::string_view cityjsonl_ext = ".city.jsonl";
+    if (path.size() >= cityjsonl_ext.size() &&
+        path.substr(path.size() - cityjsonl_ext.size()) == cityjsonl_ext) {
+        return true;
+    }
+    if (path.size() >= jsonl_ext.size() &&
+        path.substr(path.size() - jsonl_ext.size()) == jsonl_ext) {
+        return true;
+    }
+    return false;
+}
+
+ssize_t resolve_cityjson_object_index(CityJSONHandle cj, std::string_view feature_id) {
+    if (cj == nullptr || feature_id.empty()) {
+        return -1;
+    }
+
+    std::string feature_id_str(feature_id);
+    std::string object_id = feature_id_str + "-0";
+    ssize_t object_index = cityjson_get_object_index(cj, object_id.c_str());
+    if (object_index >= 0) {
+        return object_index;
+    }
+    return cityjson_get_object_index(cj, feature_id_str.c_str());
+}
+
+bool load_cityjson_object_mesh(
+    CityJSONHandle cj,
+    size_t object_index,
+    Surface_mesh& sm,
+    double offset_x,
+    double offset_y,
+    double offset_z) {
+    if (cj == nullptr) {
+        return false;
+    }
+
+    ssize_t geometry_index = -1;
+    size_t geom_count = cityjson_get_geometry_count(cj, object_index);
+    for (size_t geom_idx = 0; geom_idx < geom_count; ++geom_idx) {
+        uint8_t geom_type = cityjson_get_geometry_type(cj, object_index, geom_idx);
+        if (geom_type != CITYJSON_SOLID) {
+            continue;
+        }
+
+        const char* lod_ptr = nullptr;
+        size_t lod_len = 0;
+        if (cityjson_get_geometry_lod(cj, object_index, geom_idx, &lod_ptr, &lod_len) != 1) {
+            continue;
+        }
+        std::string_view lod = (lod_ptr != nullptr) ? std::string_view(lod_ptr, lod_len) : std::string_view{};
+        if (lod == "2.2") {
+            geometry_index = static_cast<ssize_t>(geom_idx);
+            break;
+        }
+    }
+    if (geometry_index < 0) {
+        return false;
+    }
+
+    const size_t geom_idx = static_cast<size_t>(geometry_index);
+    size_t vertex_count = cityjson_get_vertex_count(cj, object_index, geom_idx);
+    const double* vertices = cityjson_get_vertices(cj, object_index, geom_idx);
+    if (vertices == nullptr || vertex_count == 0) {
+        return false;
+    }
+
+    std::vector<Surface_mesh::Vertex_index> vertex_handles;
+    vertex_handles.reserve(vertex_count);
+    for (size_t v = 0; v < vertex_count; ++v) {
+        vertex_handles.push_back(sm.add_vertex(K::Point_3(
+            vertices[v * 3] - offset_x,
+            vertices[v * 3 + 1] - offset_y,
+            vertices[v * 3 + 2] - offset_z)));
+    }
+
+    size_t face_count = cityjson_get_face_count(cj, object_index, geom_idx);
+    size_t index_count = cityjson_get_index_count(cj, object_index, geom_idx);
+    const size_t* indices = cityjson_get_indices(cj, object_index, geom_idx);
+    if (indices == nullptr || face_count == 0 || index_count == 0) {
+        return false;
+    }
+
+    bool added_faces = false;
+    for (size_t face_idx = 0; face_idx < face_count; ++face_idx) {
+        size_t start = 0;
+        size_t count = 0;
+        uint8_t face_type = 0;
+        (void)face_type;
+        if (cityjson_get_face_info(cj, object_index, geom_idx, face_idx, &start, &count, &face_type) != 0) {
+            continue;
+        }
+        if (count < 3 || start >= index_count || start + count > index_count) {
+            continue;
+        }
+
+        std::vector<Surface_mesh::Vertex_index> face_vertices;
+        face_vertices.reserve(count);
+        bool valid_face = true;
+        for (size_t i = 0; i < count; ++i) {
+            size_t idx = indices[start + i];
+            if (idx >= vertex_count) {
+                valid_face = false;
+                break;
+            }
+            face_vertices.push_back(vertex_handles[idx]);
+        }
+        if (!valid_face) {
+            continue;
+        }
+        sm.add_face(face_vertices);
+        added_faces = true;
+    }
+
+    if (!added_faces) {
+        return false;
+    }
+
+    try {
+        CGAL::Polygon_mesh_processing::triangulate_faces(sm);
+    } catch (const std::exception&) {
+        return false;
+    } catch (...) {
+        return false;
+    }
+    return sm.number_of_faces() > 0;
 }
 
 static bool append_fcb_geometry_faces(

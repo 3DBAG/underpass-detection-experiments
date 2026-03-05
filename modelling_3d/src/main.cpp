@@ -3,6 +3,7 @@
 #include <cmath>
 #include <chrono>
 #include <exception>
+#include <limits>
 #include <string_view>
 #include <unordered_map>
 #include <vector>
@@ -19,6 +20,7 @@
 #include "BooleanOpsManifold.h"
 #include "MeshConversion.h"
 #include "ModelLoaders.h"
+#include "zityjson.h"
 #include "zfcb.h"
 #include "OGRVectorReader.h"
 #include "PolygonExtruder.h"
@@ -105,16 +107,628 @@ static std::vector<uint8_t> classify_triangle_semantics(
     return result;
 }
 
+struct FeatureCarveResult {
+    bool any_succeeded = false;
+    manifold::MeshGL result_meshgl;
+    double house_min_z = std::numeric_limits<double>::quiet_NaN();
+    double underpass_z = 0.0;
+    size_t processed_count = 0;
+    size_t skipped_count = 0;
+};
+
+static FeatureCarveResult carve_underpasses_for_feature(
+    const Surface_mesh& house_mesh,
+    std::string_view model_feature_id,
+    const std::vector<ogr::VectorReader::PolygonFeature>& polygon_features,
+    const std::vector<size_t>& matched_indices,
+    std::vector<bool>& seen_feature,
+    BooleanMethod method,
+    bool ignore_holes,
+    double global_offset_x,
+    double global_offset_y,
+    double global_offset_z,
+    std::string_view val3dity_suffix,
+    std::chrono::duration<double, std::milli>& ds_conversion_ms,
+    std::chrono::duration<double, std::milli>& intersection_ms) {
+    FeatureCarveResult result;
+    result.house_min_z = mesh_min_z(house_mesh);
+    if (!std::isfinite(result.house_min_z)) {
+        for (size_t feature_idx : matched_indices) {
+            seen_feature[feature_idx] = true;
+            const auto& feature = polygon_features[feature_idx];
+            std::cerr << std::format("Skipping feature {} (id='{}'): could not determine house min z{}",
+                                     feature_idx, feature.id, val3dity_suffix) << std::endl;
+            ++result.skipped_count;
+        }
+        return result;
+    }
+
+    std::vector<Surface_mesh> underpass_meshes;
+    underpass_meshes.reserve(matched_indices.size());
+    size_t merged_feature_count = 0;
+    for (size_t feature_idx : matched_indices) {
+        seen_feature[feature_idx] = true;
+        const auto& feature = polygon_features[feature_idx];
+
+        auto t_conversion_start = Clock::now();
+        auto offset_polygon = make_offset_polygon(
+            feature.polygon,
+            global_offset_x,
+            global_offset_y,
+            global_offset_z);
+        Surface_mesh underpass_sm;
+        try {
+            underpass_sm = extrusion::extrude_polygon(
+                offset_polygon, result.house_min_z - 0.1, feature.extrusion_height + 0.1, ignore_holes);
+        } catch (const std::exception& e) {
+            auto t_conversion_end = Clock::now();
+            ds_conversion_ms += t_conversion_end - t_conversion_start;
+            std::cerr << std::format("Skipping feature {} (id='{}'): underpass extrusion failed ({}){}",
+                                     feature_idx, feature.id, e.what(), val3dity_suffix) << std::endl;
+            ++result.skipped_count;
+            continue;
+        } catch (...) {
+            auto t_conversion_end = Clock::now();
+            ds_conversion_ms += t_conversion_end - t_conversion_start;
+            std::cerr << std::format("Skipping feature {} (id='{}'): underpass extrusion failed (unknown exception){}",
+                                     feature_idx, feature.id, val3dity_suffix) << std::endl;
+            ++result.skipped_count;
+            continue;
+        }
+        auto t_conversion_end = Clock::now();
+        ds_conversion_ms += t_conversion_end - t_conversion_start;
+
+        if (underpass_sm.number_of_faces() == 0) {
+            std::cerr << std::format("Skipping feature {} (id='{}'): underpass extrusion produced empty mesh{}",
+                                     feature_idx, feature.id, val3dity_suffix) << std::endl;
+            ++result.skipped_count;
+            continue;
+        }
+
+        underpass_meshes.push_back(std::move(underpass_sm));
+        result.underpass_z = feature.extrusion_height - global_offset_z;
+        ++merged_feature_count;
+    }
+
+    if (underpass_meshes.empty()) {
+        return result;
+    }
+
+    BooleanOpTiming timing;
+    bool success = true;
+    Surface_mesh house_sm = house_mesh;
+    if (method == BooleanMethod::Manifold) {
+        ManifoldBooleanError error = ManifoldBooleanError::None;
+        success = manifold_boolean_difference(
+            house_sm, underpass_meshes, result.result_meshgl, &timing, &error);
+        if (!success) {
+            if (error == ManifoldBooleanError::EmptyInputMesh) {
+                std::cerr << std::format("Skipping {} merged features (id='{}'): empty mesh for manifold boolean{}",
+                                         merged_feature_count, std::string(model_feature_id), val3dity_suffix) << std::endl;
+            } else if (error == ManifoldBooleanError::InvalidInput) {
+                std::cerr << std::format("Skipping {} merged features (id='{}'): invalid manifold input{}",
+                                         merged_feature_count, std::string(model_feature_id), val3dity_suffix) << std::endl;
+            } else {
+                std::cerr << std::format("Skipping {} merged features (id='{}'): manifold boolean failed{}",
+                                         merged_feature_count, std::string(model_feature_id), val3dity_suffix) << std::endl;
+            }
+        }
+    } else if (method == BooleanMethod::CgalNef) {
+        Surface_mesh result_sm = nef_boolean_difference(house_sm, underpass_meshes, &timing);
+        auto t_conversion_start_local = Clock::now();
+        CGAL::Polygon_mesh_processing::triangulate_faces(result_sm);
+        result.result_meshgl = surface_mesh_to_meshgl(result_sm, false);
+        auto t_conversion_end_local = Clock::now();
+        ds_conversion_ms += t_conversion_end_local - t_conversion_start_local;
+    } else if (method == BooleanMethod::Geogram) {
+        Surface_mesh result_sm = geogram_boolean_difference(house_sm, underpass_meshes, &timing);
+        auto t_conversion_start_local = Clock::now();
+        result.result_meshgl = surface_mesh_to_meshgl(result_sm, false);
+        auto t_conversion_end_local = Clock::now();
+        ds_conversion_ms += t_conversion_end_local - t_conversion_start_local;
+    } else {
+        Surface_mesh result_sm = corefine_boolean_difference(house_sm, underpass_meshes, &timing);
+        auto t_conversion_start_local = Clock::now();
+        result.result_meshgl = surface_mesh_to_meshgl(result_sm, false);
+        auto t_conversion_end_local = Clock::now();
+        ds_conversion_ms += t_conversion_end_local - t_conversion_start_local;
+    }
+    intersection_ms += timing.boolean_ms;
+    ds_conversion_ms += timing.conversion_ms;
+
+    if (success && result.result_meshgl.NumTri() > 0) {
+        result.any_succeeded = true;
+        result.processed_count += merged_feature_count;
+    } else {
+        if (success) {
+            std::cerr << std::format("Skipping {} merged features (id='{}'): boolean produced empty mesh{}",
+                                     merged_feature_count, std::string(model_feature_id), val3dity_suffix) << std::endl;
+        }
+        result.skipped_count += merged_feature_count;
+    }
+
+    return result;
+}
+
+static std::vector<double> meshgl_to_world_vertices(
+    const manifold::MeshGL& meshgl,
+    double offset_x,
+    double offset_y,
+    double offset_z) {
+    size_t num_verts = meshgl.NumVert();
+    size_t num_prop = meshgl.numProp;
+    std::vector<double> world_verts(num_verts * 3);
+    for (size_t v = 0; v < num_verts; ++v) {
+        world_verts[v * 3 + 0] = static_cast<double>(meshgl.vertProperties[v * num_prop + 0]) + offset_x;
+        world_verts[v * 3 + 1] = static_cast<double>(meshgl.vertProperties[v * num_prop + 1]) + offset_y;
+        world_verts[v * 3 + 2] = static_cast<double>(meshgl.vertProperties[v * num_prop + 2]) + offset_z;
+    }
+    return world_verts;
+}
+
+struct StreamProcessingContext {
+    const std::vector<ogr::VectorReader::PolygonFeature>& polygon_features;
+    std::unordered_map<std::string_view, std::vector<size_t>>& features_by_exact_id;
+    std::vector<bool>& seen_feature;
+    BooleanMethod method;
+    bool ignore_holes;
+    bool& global_offset_set;
+    double& global_offset_x;
+    double& global_offset_y;
+    double& global_offset_z;
+    size_t& processed_count;
+    size_t& skipped_count;
+    std::chrono::duration<double, std::milli>& ds_conversion_ms;
+    std::chrono::duration<double, std::milli>& intersection_ms;
+    std::chrono::duration<double, std::milli>& output_write_ms;
+    std::chrono::duration<double, std::milli>& output_write_changed_ms;
+    std::chrono::duration<double, std::milli>& output_write_passthrough_ms;
+    std::chrono::duration<double, std::milli>& model_stream_read_ms;
+    std::ostream& log_out;
+};
+
+struct FcbStreamBackend {
+    ZfcbReaderHandle reader = nullptr;
+    ZfcbWriterHandle writer = nullptr;
+    bool output_to_stdout = false;
+    const char* output_path = nullptr;
+
+    const char* stream_label() const { return "FlatCityBuf"; }
+    const char* output_label() const { return "FCB"; }
+    const char* output_destination() const { return output_to_stdout ? "stdout" : output_path; }
+    const char* missing_current_error() const { return "FlatCityBuf stream error: decoded feature unavailable"; }
+
+    bool open_writer() {
+        if (output_to_stdout) {
+            writer = zfcb_writer_open_from_reader_no_index_fd(reader, stdout_fd(), 0);
+        } else {
+            writer = zfcb_writer_open_from_reader_no_index(reader, output_path);
+        }
+        return writer != nullptr;
+    }
+
+    void close_writer() {
+        if (writer != nullptr) {
+            zfcb_writer_destroy(writer);
+            writer = nullptr;
+        }
+    }
+
+    int peek_next_id(const char** out_id, size_t* out_len) {
+        return zfcb_peek_next_id(reader, out_id, out_len);
+    }
+
+    int next() {
+        return zfcb_next(reader);
+    }
+
+    bool ensure_current_available() const {
+        return true;
+    }
+
+    int write_pending_raw() {
+        return zfcb_writer_write_pending_raw(reader, writer);
+    }
+
+    int write_current_raw() {
+        return zfcb_writer_write_current_raw(reader, writer);
+    }
+
+    int write_current_replaced_lod22(
+        const char* feature_id_ptr,
+        size_t feature_id_len,
+        const double* vertices_xyz_world,
+        size_t vertex_count,
+        const uint32_t* triangle_indices,
+        size_t triangle_index_count,
+        const uint8_t* semantic_types,
+        size_t semantic_types_count) {
+        return zfcb_writer_write_current_replaced_lod22(
+            reader, writer,
+            feature_id_ptr, feature_id_len,
+            vertices_xyz_world, vertex_count,
+            triangle_indices, triangle_index_count,
+            semantic_types, semantic_types_count);
+    }
+
+    bool prepare_current_feature(
+        std::string_view next_id,
+        const std::vector<size_t>& matched_indices,
+        const std::vector<ogr::VectorReader::PolygonFeature>& polygon_features,
+        std::vector<bool>& seen_feature,
+        size_t& skipped_count,
+        bool& global_offset_set,
+        double& global_offset_x,
+        double& global_offset_y,
+        double& global_offset_z,
+        std::chrono::duration<double, std::milli>& output_write_ms,
+        std::chrono::duration<double, std::milli>& output_write_passthrough_ms) {
+        (void)next_id;
+        if (global_offset_set) {
+            return true;
+        }
+        const double* verts = zfcb_current_vertices(reader);
+        size_t vert_count = zfcb_current_vertex_count(reader);
+        if (verts == nullptr || vert_count == 0) {
+            for (size_t feature_idx : matched_indices) {
+                seen_feature[feature_idx] = true;
+                const auto& feature = polygon_features[feature_idx];
+                std::cerr << std::format("Skipping ogr feature {} (id='{}'): invalid FlatCityBuf vertices",
+                                         feature_idx, feature.id) << std::endl;
+                ++skipped_count;
+            }
+            auto t_output_write_start_local = Clock::now();
+            zfcb_writer_write_current_raw(reader, writer);
+            auto t_output_write_end_local = Clock::now();
+            auto d_output_write = t_output_write_end_local - t_output_write_start_local;
+            output_write_ms += d_output_write;
+            output_write_passthrough_ms += d_output_write;
+            return false;
+        }
+
+        global_offset_x = verts[0];
+        global_offset_y = verts[1];
+        global_offset_z = verts[2];
+        global_offset_set = true;
+        return true;
+    }
+
+    bool load_current_house_mesh(
+        std::string_view next_id,
+        Surface_mesh& house_sm,
+        double offset_x,
+        double offset_y,
+        double offset_z,
+        std::string& val3dity_suffix) {
+        std::string fcb_b3_val3dity_lod22;
+        bool loaded = load_fcb_feature_mesh(
+            reader, next_id, house_sm, offset_x, offset_y, offset_z, &fcb_b3_val3dity_lod22);
+        val3dity_suffix = fcb_b3_val3dity_lod22.empty()
+            ? std::string{}
+            : std::format(" (b3_val3dity_lod22='{}')", fcb_b3_val3dity_lod22);
+        return loaded;
+    }
+};
+
+struct CjseqStreamBackend {
+    CityJSONSeqReaderHandle reader = nullptr;
+    CityJSONSeqWriterHandle writer = nullptr;
+    const char* output_path = nullptr;
+
+    const char* stream_label() const { return "CityJSONSeq"; }
+    const char* output_label() const { return "CityJSONSeq"; }
+    const char* output_destination() const { return output_path; }
+    const char* missing_current_error() const { return "CityJSONSeq stream error: decoded feature unavailable"; }
+
+    bool open_writer() {
+        writer = cityjsonseq_writer_open_from_reader(reader, output_path);
+        return writer != nullptr;
+    }
+
+    void close_writer() {
+        if (writer != nullptr) {
+            cityjsonseq_writer_destroy(writer);
+            writer = nullptr;
+        }
+    }
+
+    int peek_next_id(const char** out_id, size_t* out_len) {
+        return cityjsonseq_peek_next_id(reader, out_id, out_len);
+    }
+
+    int next() {
+        return cityjsonseq_next(reader);
+    }
+
+    bool ensure_current_available() const {
+        return cityjsonseq_current_cityjson(reader) != nullptr;
+    }
+
+    int write_pending_raw() {
+        return cityjsonseq_writer_write_pending_raw(reader, writer);
+    }
+
+    int write_current_raw() {
+        return cityjsonseq_writer_write_current_raw(reader, writer);
+    }
+
+    int write_current_replaced_lod22(
+        const char* feature_id_ptr,
+        size_t feature_id_len,
+        const double* vertices_xyz_world,
+        size_t vertex_count,
+        const uint32_t* triangle_indices,
+        size_t triangle_index_count,
+        const uint8_t* semantic_types,
+        size_t semantic_types_count) {
+        return cityjsonseq_writer_write_current_replaced_lod22(
+            reader, writer,
+            feature_id_ptr, feature_id_len,
+            vertices_xyz_world, vertex_count,
+            triangle_indices, triangle_index_count,
+            semantic_types, semantic_types_count);
+    }
+
+    bool prepare_current_feature(
+        std::string_view next_id,
+        const std::vector<size_t>& matched_indices,
+        const std::vector<ogr::VectorReader::PolygonFeature>& polygon_features,
+        std::vector<bool>& seen_feature,
+        size_t& skipped_count,
+        bool& global_offset_set,
+        double& global_offset_x,
+        double& global_offset_y,
+        double& global_offset_z,
+        std::chrono::duration<double, std::milli>& output_write_ms,
+        std::chrono::duration<double, std::milli>& output_write_passthrough_ms) {
+        (void)next_id;
+        (void)matched_indices;
+        (void)polygon_features;
+        (void)seen_feature;
+        (void)skipped_count;
+        (void)output_write_ms;
+        (void)output_write_passthrough_ms;
+        global_offset_set = true;
+        global_offset_x = 0.0;
+        global_offset_y = 0.0;
+        global_offset_z = 0.0;
+        return true;
+    }
+
+    bool load_current_house_mesh(
+        std::string_view next_id,
+        Surface_mesh& house_sm,
+        double offset_x,
+        double offset_y,
+        double offset_z,
+        std::string& val3dity_suffix) {
+        CityJSONHandle current_feature_cj = cityjsonseq_current_cityjson(reader);
+        if (current_feature_cj == nullptr) {
+            return false;
+        }
+        ssize_t object_index = resolve_cityjson_object_index(current_feature_cj, next_id);
+        if (object_index < 0) {
+            return false;
+        }
+        val3dity_suffix.clear();
+        return load_cityjson_object_mesh(
+            current_feature_cj,
+            static_cast<size_t>(object_index),
+            house_sm,
+            offset_x,
+            offset_y,
+            offset_z);
+    }
+};
+
+template <typename Backend>
+static bool process_stream_features(Backend& backend, StreamProcessingContext& ctx) {
+    auto t_output_write_start = Clock::now();
+    bool writer_opened = backend.open_writer();
+    auto t_output_write_end = Clock::now();
+    ctx.output_write_ms += t_output_write_end - t_output_write_start;
+    if (!writer_opened) {
+        std::cerr << "Failed to open " << backend.output_label()
+                  << " writer: " << backend.output_destination() << std::endl;
+        return false;
+    }
+    ctx.log_out << std::format("{} output: {}", backend.output_label(), backend.output_destination()) << std::endl;
+
+    bool stream_error = false;
+
+    while (true) {
+        const char* peek_id_ptr = nullptr;
+        size_t peek_id_len = 0;
+        auto t_stream_read_start = Clock::now();
+        int peek_result = backend.peek_next_id(&peek_id_ptr, &peek_id_len);
+        auto t_stream_read_end = Clock::now();
+        ctx.model_stream_read_ms += t_stream_read_end - t_stream_read_start;
+        if (peek_result < 0) {
+            std::cerr << backend.stream_label() << " stream error while peeking next feature id" << std::endl;
+            stream_error = true;
+            break;
+        }
+        if (peek_result == 0) {
+            break;
+        }
+
+        std::string_view next_id(peek_id_ptr, peek_id_len);
+        auto exact_hint_it = ctx.features_by_exact_id.find(next_id);
+        if (exact_hint_it == ctx.features_by_exact_id.end()) {
+            auto t_output_write_start_local = Clock::now();
+            int write_result = backend.write_pending_raw();
+            auto t_output_write_end_local = Clock::now();
+            auto d_output_write = t_output_write_end_local - t_output_write_start_local;
+            ctx.output_write_ms += d_output_write;
+            ctx.output_write_passthrough_ms += d_output_write;
+            if (write_result < 0) {
+                std::cerr << backend.stream_label() << " stream error while writing pass-through feature" << std::endl;
+                stream_error = true;
+                break;
+            }
+            if (write_result == 0) {
+                break;
+            }
+            continue;
+        }
+
+        auto t_stream_read_start_next = Clock::now();
+        int next_result = backend.next();
+        auto t_stream_read_end_next = Clock::now();
+        ctx.model_stream_read_ms += t_stream_read_end_next - t_stream_read_start_next;
+        if (next_result < 0) {
+            std::cerr << backend.stream_label() << " stream error while decoding feature" << std::endl;
+            stream_error = true;
+            break;
+        }
+        if (next_result == 0) {
+            break;
+        }
+        if (!backend.ensure_current_available()) {
+            std::cerr << backend.missing_current_error() << std::endl;
+            stream_error = true;
+            break;
+        }
+
+        const auto& matched_indices = exact_hint_it->second;
+        if (!backend.prepare_current_feature(
+                next_id,
+                matched_indices,
+                ctx.polygon_features,
+                ctx.seen_feature,
+                ctx.skipped_count,
+                ctx.global_offset_set,
+                ctx.global_offset_x,
+                ctx.global_offset_y,
+                ctx.global_offset_z,
+                ctx.output_write_ms,
+                ctx.output_write_passthrough_ms)) {
+            continue;
+        }
+
+        Surface_mesh house_sm;
+        bool house_mesh_loaded = false;
+        std::string house_mesh_error;
+        std::string val3dity_suffix;
+        auto t_stream_read_start_mesh = Clock::now();
+        try {
+            house_mesh_loaded = backend.load_current_house_mesh(
+                next_id,
+                house_sm,
+                ctx.global_offset_x,
+                ctx.global_offset_y,
+                ctx.global_offset_z,
+                val3dity_suffix);
+        } catch (const std::exception& e) {
+            house_mesh_error = e.what();
+            house_mesh_loaded = false;
+        } catch (...) {
+            house_mesh_error = "unknown exception";
+            house_mesh_loaded = false;
+        }
+        if (!house_mesh_loaded) {
+            auto t_stream_read_end_mesh = Clock::now();
+            ctx.model_stream_read_ms += t_stream_read_end_mesh - t_stream_read_start_mesh;
+            for (size_t feature_idx : matched_indices) {
+                ctx.seen_feature[feature_idx] = true;
+                const auto& feature = ctx.polygon_features[feature_idx];
+                if (house_mesh_error.empty()) {
+                    std::cerr << std::format("Skipping feature {} (id='{}'): could not build {} mesh{}",
+                                             feature_idx, feature.id, backend.stream_label(), val3dity_suffix) << std::endl;
+                } else {
+                    std::cerr << std::format("Skipping feature {} (id='{}'): failed to build {} mesh ({}){}",
+                                             feature_idx, feature.id, backend.stream_label(), house_mesh_error, val3dity_suffix) << std::endl;
+                }
+                ++ctx.skipped_count;
+            }
+            auto t_output_write_start_local = Clock::now();
+            backend.write_current_raw();
+            auto t_output_write_end_local = Clock::now();
+            auto d_output_write = t_output_write_end_local - t_output_write_start_local;
+            ctx.output_write_ms += d_output_write;
+            ctx.output_write_passthrough_ms += d_output_write;
+            continue;
+        }
+        auto t_stream_read_end_mesh = Clock::now();
+        ctx.model_stream_read_ms += t_stream_read_end_mesh - t_stream_read_start_mesh;
+
+        auto carve_result = carve_underpasses_for_feature(
+            house_sm,
+            next_id,
+            ctx.polygon_features,
+            matched_indices,
+            ctx.seen_feature,
+            ctx.method,
+            ctx.ignore_holes,
+            ctx.global_offset_x,
+            ctx.global_offset_y,
+            ctx.global_offset_z,
+            val3dity_suffix,
+            ctx.ds_conversion_ms,
+            ctx.intersection_ms);
+        ctx.processed_count += carve_result.processed_count;
+        ctx.skipped_count += carve_result.skipped_count;
+
+        if (carve_result.any_succeeded && carve_result.result_meshgl.NumTri() > 0) {
+            auto world_verts = meshgl_to_world_vertices(
+                carve_result.result_meshgl,
+                ctx.global_offset_x,
+                ctx.global_offset_y,
+                ctx.global_offset_z);
+            auto semantics = classify_triangle_semantics(
+                carve_result.result_meshgl, carve_result.house_min_z, carve_result.underpass_z);
+
+            std::string feature_id_str(next_id);
+            auto t_output_write_start_local = Clock::now();
+            int write_result = backend.write_current_replaced_lod22(
+                feature_id_str.c_str(), feature_id_str.size(),
+                world_verts.data(), world_verts.size() / 3,
+                carve_result.result_meshgl.triVerts.data(), carve_result.result_meshgl.triVerts.size(),
+                semantics.data(), semantics.size());
+            auto t_output_write_end_local = Clock::now();
+            auto d_output_write = t_output_write_end_local - t_output_write_start_local;
+            ctx.output_write_ms += d_output_write;
+            ctx.output_write_changed_ms += d_output_write;
+            if (write_result < 0) {
+                std::cerr << std::format("Warning: failed to write modified feature '{}' to {}, writing raw instead",
+                                         feature_id_str, backend.output_label()) << std::endl;
+                auto t_fallback_write_start = Clock::now();
+                backend.write_current_raw();
+                auto t_fallback_write_end = Clock::now();
+                auto d_output_write_fallback = t_fallback_write_end - t_fallback_write_start;
+                ctx.output_write_ms += d_output_write_fallback;
+                ctx.output_write_passthrough_ms += d_output_write_fallback;
+            }
+        } else {
+            auto t_output_write_start_local = Clock::now();
+            backend.write_current_raw();
+            auto t_output_write_end_local = Clock::now();
+            auto d_output_write = t_output_write_end_local - t_output_write_start_local;
+            ctx.output_write_ms += d_output_write;
+            ctx.output_write_passthrough_ms += d_output_write;
+        }
+    }
+
+    auto t_output_write_start_local = Clock::now();
+    backend.close_writer();
+    auto t_output_write_end_local = Clock::now();
+    ctx.output_write_ms += t_output_write_end_local - t_output_write_start_local;
+
+    return !stream_error;
+}
+
 int main(int argc, char* argv[]) {
     auto t_program_start = Clock::now();
 
     if (argc < 5) {
         std::cerr << "Usage: " << argv[0]
-                  << " <ogr_source> <fcb_input-> <fcb_output-> <height_attribute> [id_attribute] [method]" << std::endl;
+                  << " <ogr_source> <model_input> <model_output> <height_attribute> [id_attribute] [method]" << std::endl;
+        std::cerr << "  model formats: .fcb (FlatCityBuf) or .jsonl (CityJSONSeq)" << std::endl;
         std::cerr << "  id_attribute default: identificatie" << std::endl;
         std::cerr << "  method: pmp (default), manifold, nef, geogram" << std::endl;
         std::cerr << "  use '-' as input to read FCB from stdin" << std::endl;
         std::cerr << "  use '-' as output to write FCB to stdout" << std::endl;
+        std::cerr << "  CityJSONSeq stdin/stdout piping is not supported yet" << std::endl;
         return 1;
     }
 
@@ -140,40 +754,93 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    ZfcbReaderHandle fcb = nullptr;
-    auto t_model_read_start = Clock::now();
-    if (model_from_stdin) {
-        fcb = zfcb_reader_open_fd(stdin_fd(), 0);
-    } else {
-        fcb = zfcb_reader_open(model_path);
-    }
-    if (fcb == nullptr) {
-        std::cerr << "Failed to open FlatCityBuf stream: " << (model_from_stdin ? "stdin" : model_path) << std::endl;
+    const bool model_is_fcb = model_from_stdin || is_fcb_path(model_path);
+    const bool model_is_cityjsonseq = !model_from_stdin && is_cityjsonseq_path(model_path);
+    const bool output_is_fcb = output_to_stdout || is_fcb_path(output_path);
+    const bool output_is_cityjsonseq = !output_to_stdout && is_cityjsonseq_path(output_path);
+
+    if (!model_is_fcb && !model_is_cityjsonseq) {
+        std::cerr << "Unsupported input model format. Use .fcb or .jsonl" << std::endl;
         return 1;
+    }
+    if (model_is_cityjsonseq && model_from_stdin) {
+        std::cerr << "CityJSONSeq stdin input is not supported yet" << std::endl;
+        return 1;
+    }
+    if (model_is_cityjsonseq && output_to_stdout) {
+        std::cerr << "CityJSONSeq stdout output is not supported yet" << std::endl;
+        return 1;
+    }
+    if (model_is_fcb && !output_is_fcb) {
+        std::cerr << "FCB input currently requires FCB output" << std::endl;
+        return 1;
+    }
+    if (model_is_cityjsonseq && !output_is_cityjsonseq) {
+        std::cerr << "CityJSONSeq input currently requires CityJSONSeq (.jsonl) output" << std::endl;
+        return 1;
+    }
+
+    ZfcbReaderHandle fcb = nullptr;
+    CityJSONSeqReaderHandle cjseq_reader = nullptr;
+
+    auto t_model_read_start = Clock::now();
+    if (model_is_fcb) {
+        if (model_from_stdin) {
+            fcb = zfcb_reader_open_fd(stdin_fd(), 0);
+        } else {
+            fcb = zfcb_reader_open(model_path);
+        }
+        if (fcb == nullptr) {
+            std::cerr << "Failed to open FlatCityBuf stream: " << (model_from_stdin ? "stdin" : model_path) << std::endl;
+            return 1;
+        }
+    } else {
+        cjseq_reader = cityjsonseq_reader_open(model_path);
+        if (cjseq_reader == nullptr) {
+            std::cerr << "Failed to open CityJSONSeq stream: " << model_path << std::endl;
+            return 1;
+        }
     }
     auto t_model_read_end = Clock::now();
 
-    double fcb_extent_min[3] = {0.0, 0.0, 0.0};
-    double fcb_extent_max[3] = {0.0, 0.0, 0.0};
-    int extent_result = zfcb_reader_header_geographical_extent(fcb, fcb_extent_min, fcb_extent_max);
+    double model_extent_min[3] = {0.0, 0.0, 0.0};
+    double model_extent_max[3] = {0.0, 0.0, 0.0};
+    int extent_result = model_is_fcb
+        ? zfcb_reader_header_geographical_extent(fcb, model_extent_min, model_extent_max)
+        : cityjsonseq_reader_header_geographical_extent(cjseq_reader, model_extent_min, model_extent_max);
     if (extent_result < 0) {
-        std::cerr << "Failed to read FlatCityBuf header geographical_extent; cannot apply OGR extent filter" << std::endl;
-        zfcb_reader_destroy(fcb);
+        if (model_is_fcb) {
+            std::cerr << "Failed to read FlatCityBuf header geographical_extent; cannot apply OGR extent filter" << std::endl;
+            zfcb_reader_destroy(fcb);
+        } else {
+            std::cerr << "Failed to read CityJSONSeq header geographical_extent; cannot apply OGR extent filter" << std::endl;
+            cityjsonseq_reader_destroy(cjseq_reader);
+        }
         return 1;
     }
 
     ogr::VectorReader reader;
-    reader.set_spatial_filter_rect(
-        fcb_extent_min[0], fcb_extent_min[1], fcb_extent_max[0], fcb_extent_max[1]);
+    if (extent_result == 1) {
+        reader.set_spatial_filter_rect(
+            model_extent_min[0], model_extent_min[1], model_extent_max[0], model_extent_max[1]);
+    } else {
+        log_out << "Warning: model header has no geographical extent; reading OGR without spatial filter" << std::endl;
+    }
+
     auto t_ogr_read_start = Clock::now();
     reader.open(ogr_source_path);
-    log_out << std::format(
-        "Applied OGR spatial filter from FCB extent XY: [{:.3f}, {:.3f}] -> [{:.3f}, {:.3f}]",
-        fcb_extent_min[0], fcb_extent_min[1], fcb_extent_max[0], fcb_extent_max[1]) << std::endl;
+    if (extent_result == 1) {
+        log_out << std::format(
+            "Applied OGR spatial filter from model extent XY: [{:.3f}, {:.3f}] -> [{:.3f}, {:.3f}]",
+            model_extent_min[0], model_extent_min[1], model_extent_max[0], model_extent_max[1]) << std::endl;
+    }
     auto polygon_features = reader.read_polygon_features(id_attribute, height_attribute);
     auto t_ogr_read_end = Clock::now();
     log_out << std::format("Read {} OGR features", polygon_features.size()) << std::endl;
-    log_out << std::format("Model input: {} (FlatCityBuf stream)", model_from_stdin ? "stdin" : model_path) << std::endl;
+    log_out << std::format(
+        "Model input: {} ({})",
+        model_from_stdin ? "stdin" : model_path,
+        model_is_fcb ? "FlatCityBuf stream" : "CityJSONSeq stream") << std::endl;
 
     bool ignore_holes = false;
     size_t processed_count = 0;
@@ -185,26 +852,9 @@ int main(int argc, char* argv[]) {
     std::chrono::duration<double, std::milli> ds_conversion_ms{0.0};
     std::chrono::duration<double, std::milli> intersection_ms{0.0};
     std::chrono::duration<double, std::milli> output_write_ms{0.0};
-    std::chrono::duration<double, std::milli> output_write_fcb_changed_ms{0.0};
-    std::chrono::duration<double, std::milli> output_write_fcb_passthrough_ms{0.0};
-    std::chrono::duration<double, std::milli> fcb_stream_read_ms{0.0};
-
-    // FCB streaming mode: read features, process matching ones, write all to output.
-    ZfcbWriterHandle fcb_writer = nullptr;
-    auto t_output_write_start = Clock::now();
-    if (output_to_stdout) {
-        fcb_writer = zfcb_writer_open_from_reader_no_index_fd(fcb, stdout_fd(), 0);
-    } else {
-        fcb_writer = zfcb_writer_open_from_reader_no_index(fcb, output_path);
-    }
-    auto t_output_write_end = Clock::now();
-    output_write_ms += t_output_write_end - t_output_write_start;
-    if (fcb_writer == nullptr) {
-        std::cerr << "Failed to open FCB writer: " << (output_to_stdout ? "stdout" : output_path) << std::endl;
-        zfcb_reader_destroy(fcb);
-        return 1;
-    }
-    log_out << std::format("FCB output: {}", output_to_stdout ? "stdout" : output_path) << std::endl;
+    std::chrono::duration<double, std::milli> output_write_changed_ms{0.0};
+    std::chrono::duration<double, std::milli> output_write_passthrough_ms{0.0};
+    std::chrono::duration<double, std::milli> model_stream_read_ms{0.0};
 
     std::unordered_map<std::string_view, std::vector<size_t>> features_by_exact_id;
     std::vector<size_t> valid_feature_indices;
@@ -227,304 +877,51 @@ int main(int argc, char* argv[]) {
         valid_feature_indices.push_back(i);
     }
 
-    bool stream_error = false;
-    while (true) {
-        const char* peek_id_ptr = nullptr;
-        size_t peek_id_len = 0;
-        auto t_stream_read_start = Clock::now();
-        int peek_result = zfcb_peek_next_id(fcb, &peek_id_ptr, &peek_id_len);
-        auto t_stream_read_end = Clock::now();
-        fcb_stream_read_ms += t_stream_read_end - t_stream_read_start;
-        if (peek_result < 0) {
-            std::cerr << "FlatCityBuf stream error while peeking next feature id" << std::endl;
-            stream_error = true;
-            break;
+    StreamProcessingContext stream_ctx{
+        .polygon_features = polygon_features,
+        .features_by_exact_id = features_by_exact_id,
+        .seen_feature = seen_feature,
+        .method = method,
+        .ignore_holes = ignore_holes,
+        .global_offset_set = global_offset_set,
+        .global_offset_x = global_offset_x,
+        .global_offset_y = global_offset_y,
+        .global_offset_z = global_offset_z,
+        .processed_count = processed_count,
+        .skipped_count = skipped_count,
+        .ds_conversion_ms = ds_conversion_ms,
+        .intersection_ms = intersection_ms,
+        .output_write_ms = output_write_ms,
+        .output_write_changed_ms = output_write_changed_ms,
+        .output_write_passthrough_ms = output_write_passthrough_ms,
+        .model_stream_read_ms = model_stream_read_ms,
+        .log_out = log_out,
+    };
+
+    bool stream_ok = false;
+    if (model_is_fcb) {
+        FcbStreamBackend backend{
+            .reader = fcb,
+            .writer = nullptr,
+            .output_to_stdout = output_to_stdout,
+            .output_path = output_path,
+        };
+        stream_ok = process_stream_features(backend, stream_ctx);
+        if (!stream_ok) {
+            zfcb_reader_destroy(fcb);
+            return 1;
         }
-        if (peek_result == 0) {
-            break;
+    } else {
+        CjseqStreamBackend backend{
+            .reader = cjseq_reader,
+            .writer = nullptr,
+            .output_path = output_path,
+        };
+        stream_ok = process_stream_features(backend, stream_ctx);
+        if (!stream_ok) {
+            cityjsonseq_reader_destroy(cjseq_reader);
+            return 1;
         }
-
-        std::string_view next_id(peek_id_ptr, peek_id_len);
-        auto exact_hint_it = features_by_exact_id.find(next_id);
-        if (exact_hint_it == features_by_exact_id.end()) {
-            auto t_output_write_start_local = Clock::now();
-            int write_result = zfcb_writer_write_pending_raw(fcb, fcb_writer);
-            auto t_output_write_end_local = Clock::now();
-            auto d_output_write = t_output_write_end_local - t_output_write_start_local;
-            output_write_ms += d_output_write;
-            output_write_fcb_passthrough_ms += d_output_write;
-            if (write_result < 0) {
-                std::cerr << "FlatCityBuf stream error while writing pass-through feature" << std::endl;
-                stream_error = true;
-                break;
-            }
-            if (write_result == 0) {
-                break;
-            }
-            continue;
-        }
-
-        auto t_stream_read_start_next = Clock::now();
-        int next_result = zfcb_next(fcb);
-        auto t_stream_read_end_next = Clock::now();
-        fcb_stream_read_ms += t_stream_read_end_next - t_stream_read_start_next;
-        if (next_result < 0) {
-            std::cerr << "FlatCityBuf stream error while decoding feature" << std::endl;
-            stream_error = true;
-            break;
-        }
-        if (next_result == 0) {
-            break;
-        }
-
-        const auto& matched_indices = exact_hint_it->second;
-
-        const double* verts = zfcb_current_vertices(fcb);
-        size_t vert_count = zfcb_current_vertex_count(fcb);
-        if (!global_offset_set) {
-            if (verts == nullptr || vert_count == 0) {
-                for (size_t feature_idx : matched_indices) {
-                    seen_feature[feature_idx] = true;
-                    const auto& feature = polygon_features[feature_idx];
-                    std::cerr << std::format("Skipping ogr feature {} (id='{}'): invalid FlatCityBuf vertices",
-                                             feature_idx, feature.id) << std::endl;
-                    ++skipped_count;
-                }
-                auto t_output_write_start_local = Clock::now();
-                zfcb_writer_write_current_raw(fcb, fcb_writer);
-                auto t_output_write_end_local = Clock::now();
-                auto d_output_write = t_output_write_end_local - t_output_write_start_local;
-                output_write_ms += d_output_write;
-                output_write_fcb_passthrough_ms += d_output_write;
-                continue;
-            }
-            global_offset_x = verts[0];
-            global_offset_y = verts[1];
-            global_offset_z = verts[2];
-            global_offset_set = true;
-        }
-
-        Surface_mesh house_sm;
-        std::string fcb_b3_val3dity_lod22;
-        bool house_mesh_loaded = false;
-        std::string house_mesh_error;
-        auto t_stream_read_start_mesh = Clock::now();
-        try {
-            house_mesh_loaded = load_fcb_feature_mesh(
-                fcb, next_id, house_sm, global_offset_x, global_offset_y, global_offset_z, &fcb_b3_val3dity_lod22);
-        } catch (const std::exception& e) {
-            house_mesh_error = e.what();
-            house_mesh_loaded = false;
-        } catch (...) {
-            house_mesh_error = "unknown exception";
-            house_mesh_loaded = false;
-        }
-        const std::string val3dity_suffix = fcb_b3_val3dity_lod22.empty()
-            ? std::string{}
-            : std::format(" (b3_val3dity_lod22='{}')", fcb_b3_val3dity_lod22);
-        if (!house_mesh_loaded) {
-            auto t_stream_read_end_mesh = Clock::now();
-            fcb_stream_read_ms += t_stream_read_end_mesh - t_stream_read_start_mesh;
-            for (size_t feature_idx : matched_indices) {
-                seen_feature[feature_idx] = true;
-                const auto& feature = polygon_features[feature_idx];
-                if (house_mesh_error.empty()) {
-                    std::cerr << std::format("Skipping feature {} (id='{}'): could not build FlatCityBuf mesh{}",
-                                             feature_idx, feature.id, val3dity_suffix) << std::endl;
-                } else {
-                    std::cerr << std::format("Skipping feature {} (id='{}'): failed to build FlatCityBuf mesh ({}){}",
-                                             feature_idx, feature.id, house_mesh_error, val3dity_suffix) << std::endl;
-                }
-                ++skipped_count;
-            }
-            // Write unmodified feature to output.
-            auto t_output_write_start_local = Clock::now();
-            zfcb_writer_write_current_raw(fcb, fcb_writer);
-            auto t_output_write_end_local = Clock::now();
-            auto d_output_write = t_output_write_end_local - t_output_write_start_local;
-            output_write_ms += d_output_write;
-            output_write_fcb_passthrough_ms += d_output_write;
-            continue;
-        }
-        auto t_stream_read_end_mesh = Clock::now();
-        fcb_stream_read_ms += t_stream_read_end_mesh - t_stream_read_start_mesh;
-
-        // Merge all matched underpasses first, then run a single boolean difference.
-        bool any_succeeded = false;
-        manifold::MeshGL last_result_meshgl;
-        const double last_house_min_z = mesh_min_z(house_sm);
-        double last_underpass_z = 0.0;
-        if (!std::isfinite(last_house_min_z)) {
-            for (size_t feature_idx : matched_indices) {
-                seen_feature[feature_idx] = true;
-                const auto& feature = polygon_features[feature_idx];
-                std::cerr << std::format("Skipping feature {} (id='{}'): could not determine house min z{}",
-                                         feature_idx, feature.id, val3dity_suffix) << std::endl;
-                ++skipped_count;
-            }
-        } else {
-            std::vector<Surface_mesh> underpass_meshes;
-            underpass_meshes.reserve(matched_indices.size());
-            size_t merged_feature_count = 0;
-
-            for (size_t feature_idx : matched_indices) {
-                seen_feature[feature_idx] = true;
-                const auto& feature = polygon_features[feature_idx];
-
-                auto t_conversion_start = Clock::now();
-                auto offset_polygon = make_offset_polygon(
-                    feature.polygon,
-                    global_offset_x,
-                    global_offset_y,
-                    global_offset_z);
-                Surface_mesh underpass_sm;
-                try {
-                    underpass_sm = extrusion::extrude_polygon(
-                        offset_polygon, last_house_min_z - 0.1, feature.extrusion_height + 0.1, ignore_holes);
-                } catch (const std::exception& e) {
-                    auto t_conversion_end = Clock::now();
-                    ds_conversion_ms += t_conversion_end - t_conversion_start;
-                    std::cerr << std::format("Skipping feature {} (id='{}'): underpass extrusion failed ({}){}",
-                                             feature_idx, feature.id, e.what(), val3dity_suffix) << std::endl;
-                    ++skipped_count;
-                    continue;
-                } catch (...) {
-                    auto t_conversion_end = Clock::now();
-                    ds_conversion_ms += t_conversion_end - t_conversion_start;
-                    std::cerr << std::format("Skipping feature {} (id='{}'): underpass extrusion failed (unknown exception){}",
-                                             feature_idx, feature.id, val3dity_suffix) << std::endl;
-                    ++skipped_count;
-                    continue;
-                }
-                auto t_conversion_end = Clock::now();
-                ds_conversion_ms += t_conversion_end - t_conversion_start;
-
-                if (underpass_sm.number_of_faces() == 0) {
-                    std::cerr << std::format("Skipping feature {} (id='{}'): underpass extrusion produced empty mesh{}",
-                                             feature_idx, feature.id, val3dity_suffix) << std::endl;
-                    ++skipped_count;
-                    continue;
-                }
-
-                underpass_meshes.push_back(std::move(underpass_sm));
-                last_underpass_z = feature.extrusion_height - global_offset_z;
-                ++merged_feature_count;
-            }
-
-            if (!underpass_meshes.empty()) {
-                BooleanOpTiming timing;
-                bool success = true;
-                if (method == BooleanMethod::Manifold) {
-                    ManifoldBooleanError error = ManifoldBooleanError::None;
-                    success = manifold_boolean_difference(
-                        house_sm, underpass_meshes, last_result_meshgl, &timing, &error);
-                    if (!success) {
-                        if (error == ManifoldBooleanError::EmptyInputMesh) {
-                            std::cerr << std::format("Skipping {} merged features (id='{}'): empty mesh for manifold boolean{}",
-                                                     merged_feature_count, std::string(next_id), val3dity_suffix) << std::endl;
-                        } else if (error == ManifoldBooleanError::InvalidInput) {
-                            std::cerr << std::format("Skipping {} merged features (id='{}'): invalid manifold input{}",
-                                                     merged_feature_count, std::string(next_id), val3dity_suffix) << std::endl;
-                        } else {
-                            std::cerr << std::format("Skipping {} merged features (id='{}'): manifold boolean failed{}",
-                                                     merged_feature_count, std::string(next_id), val3dity_suffix) << std::endl;
-                        }
-                    }
-                } else if (method == BooleanMethod::CgalNef) {
-                    Surface_mesh result_sm = nef_boolean_difference(house_sm, underpass_meshes, &timing);
-                    auto t_conversion_start_local = Clock::now();
-                    CGAL::Polygon_mesh_processing::triangulate_faces(result_sm);
-                    last_result_meshgl = surface_mesh_to_meshgl(result_sm, false);
-                    auto t_conversion_end_local = Clock::now();
-                    ds_conversion_ms += t_conversion_end_local - t_conversion_start_local;
-                } else if (method == BooleanMethod::Geogram) {
-                    Surface_mesh result_sm = geogram_boolean_difference(house_sm, underpass_meshes, &timing);
-                    auto t_conversion_start_local = Clock::now();
-                    last_result_meshgl = surface_mesh_to_meshgl(result_sm, false);
-                    auto t_conversion_end_local = Clock::now();
-                    ds_conversion_ms += t_conversion_end_local - t_conversion_start_local;
-                } else {
-                    Surface_mesh result_sm = corefine_boolean_difference(house_sm, underpass_meshes, &timing);
-                    auto t_conversion_start_local = Clock::now();
-                    last_result_meshgl = surface_mesh_to_meshgl(result_sm, false);
-                    auto t_conversion_end_local = Clock::now();
-                    ds_conversion_ms += t_conversion_end_local - t_conversion_start_local;
-                }
-                intersection_ms += timing.boolean_ms;
-                ds_conversion_ms += timing.conversion_ms;
-
-                if (success && last_result_meshgl.NumTri() > 0) {
-                    any_succeeded = true;
-                    processed_count += merged_feature_count;
-                } else {
-                    if (success) {
-                        std::cerr << std::format("Skipping {} merged features (id='{}'): boolean produced empty mesh{}",
-                                                 merged_feature_count, std::string(next_id), val3dity_suffix) << std::endl;
-                    }
-                    skipped_count += merged_feature_count;
-                }
-            }
-        }
-
-        // Write the feature to FCB output.
-        if (any_succeeded && last_result_meshgl.NumTri() > 0) {
-            // Extract world-coordinate vertices from result mesh
-            // (undo the global offset that was subtracted during loading).
-            size_t num_verts = last_result_meshgl.NumVert();
-            size_t num_prop = last_result_meshgl.numProp;
-            std::vector<double> world_verts(num_verts * 3);
-            for (size_t v = 0; v < num_verts; ++v) {
-                world_verts[v * 3 + 0] = static_cast<double>(last_result_meshgl.vertProperties[v * num_prop + 0]) + global_offset_x;
-                world_verts[v * 3 + 1] = static_cast<double>(last_result_meshgl.vertProperties[v * num_prop + 1]) + global_offset_y;
-                world_verts[v * 3 + 2] = static_cast<double>(last_result_meshgl.vertProperties[v * num_prop + 2]) + global_offset_z;
-            }
-
-            auto semantics = classify_triangle_semantics(
-                last_result_meshgl, last_house_min_z, last_underpass_z);
-
-            std::string feature_id_str(next_id);
-            auto t_output_write_start_local = Clock::now();
-            int write_result = zfcb_writer_write_current_replaced_lod22(
-                fcb, fcb_writer,
-                feature_id_str.c_str(), feature_id_str.size(),
-                world_verts.data(), num_verts,
-                last_result_meshgl.triVerts.data(), last_result_meshgl.triVerts.size(),
-                semantics.data(), semantics.size());
-            auto t_output_write_end_local = Clock::now();
-            auto d_output_write = t_output_write_end_local - t_output_write_start_local;
-            output_write_ms += d_output_write;
-            output_write_fcb_changed_ms += d_output_write;
-            if (write_result < 0) {
-                std::cerr << std::format("Warning: failed to write modified feature '{}' to FCB, writing raw instead",
-                                         feature_id_str) << std::endl;
-                auto t_fallback_write_start = Clock::now();
-                zfcb_writer_write_current_raw(fcb, fcb_writer);
-                auto t_fallback_write_end = Clock::now();
-                auto d_output_write_fallback = t_fallback_write_end - t_fallback_write_start;
-                output_write_ms += d_output_write_fallback;
-                output_write_fcb_passthrough_ms += d_output_write_fallback;
-            }
-        } else {
-            // No successful boolean: write original feature.
-            auto t_output_write_start_local = Clock::now();
-            zfcb_writer_write_current_raw(fcb, fcb_writer);
-            auto t_output_write_end_local = Clock::now();
-            auto d_output_write = t_output_write_end_local - t_output_write_start_local;
-            output_write_ms += d_output_write;
-            output_write_fcb_passthrough_ms += d_output_write;
-        }
-    }
-
-    if (fcb_writer != nullptr) {
-        auto t_output_write_start_local = Clock::now();
-        zfcb_writer_destroy(fcb_writer);
-        auto t_output_write_end_local = Clock::now();
-        output_write_ms += t_output_write_end_local - t_output_write_start_local;
-    }
-
-    if (stream_error) {
-        zfcb_reader_destroy(fcb);
-        return 1;
     }
 
     for (size_t feature_idx : valid_feature_indices) {
@@ -532,23 +929,29 @@ int main(int argc, char* argv[]) {
             continue;
         }
         const auto& feature = polygon_features[feature_idx];
-        std::cerr << std::format("Skipping feature {}: FlatCityBuf feature not found for id '{}'",
-                                 feature_idx, feature.id) << std::endl;
+        std::cerr << std::format("Skipping feature {}: {} feature not found for id '{}'",
+                                 feature_idx,
+                                 model_is_fcb ? "FlatCityBuf" : "CityJSONSeq",
+                                 feature.id) << std::endl;
         ++skipped_count;
     }
 
-    zfcb_reader_destroy(fcb);
+    if (model_is_fcb) {
+        zfcb_reader_destroy(fcb);
+    } else {
+        cityjsonseq_reader_destroy(cjseq_reader);
+    }
 
     log_out << std::format("Processed features: {}, skipped: {}", processed_count, skipped_count) << std::endl;
 
-    // FCB output was already written during streaming.
     if (processed_count == 0) {
-        std::cerr << "Warning: no features were modified; output FCB is a copy of input." << std::endl;
+        std::cerr << std::format("Warning: no features were modified; output {} is a copy of input.",
+                                 model_is_fcb ? "FCB" : "CityJSONSeq") << std::endl;
     }
 
     auto ogr_read_ms = std::chrono::duration<double, std::milli>(t_ogr_read_end - t_ogr_read_start).count();
     auto model_read_ms = std::chrono::duration<double, std::milli>(t_model_read_end - t_model_read_start).count() +
-                         fcb_stream_read_ms.count();
+                         model_stream_read_ms.count();
     auto output_write_ms_value = output_write_ms.count();
     auto total_ms = std::chrono::duration<double, std::milli>(Clock::now() - t_program_start).count();
     auto accounted_ms = model_read_ms + ogr_read_ms + ds_conversion_ms.count() + intersection_ms.count() + output_write_ms_value;
@@ -563,8 +966,8 @@ int main(int argc, char* argv[]) {
     log_out << std::format("  datastructure conversion: {:.3f}", ds_conversion_ms.count()) << std::endl;
     log_out << std::format("  boolean ops: {:.3f}", intersection_ms.count()) << std::endl;
     log_out << std::format("  output writing: {:.3f}", output_write_ms_value) << std::endl;
-    log_out << std::format("    changed features: {:.3f}", output_write_fcb_changed_ms.count()) << std::endl;
-    log_out << std::format("    pass-through features: {:.3f}", output_write_fcb_passthrough_ms.count()) << std::endl;
+    log_out << std::format("    changed features: {:.3f}", output_write_changed_ms.count()) << std::endl;
+    log_out << std::format("    pass-through features: {:.3f}", output_write_passthrough_ms.count()) << std::endl;
     log_out << std::format("  other: {:.3f}", other_ms) << std::endl;
     log_out << std::format("  total: {:.3f}", total_ms) << std::endl;
 
