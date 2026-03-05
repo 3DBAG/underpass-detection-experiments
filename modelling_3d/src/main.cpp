@@ -942,7 +942,7 @@ int main(int argc, char* argv[]) {
         cityjsonseq_reader_destroy(cjseq_reader);
     }
 
-    log_out << std::format("Processed features: {}, skipped: {}", processed_count, skipped_count) << std::endl;
+    log_out << std::format("Processed underpasses: {}, skipped: {}", processed_count, skipped_count) << std::endl;
 
     if (processed_count == 0) {
         std::cerr << std::format("Warning: no features were modified; output {} is a copy of input.",

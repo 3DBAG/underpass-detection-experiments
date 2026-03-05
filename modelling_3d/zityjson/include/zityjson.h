@@ -62,13 +62,13 @@ ssize_t cityjson_add_object(CityJSONHandle handle, const char* name, uint8_t obj
 // Returns the geometry index within that object, or -1 on failure.
 ssize_t cityjson_add_geometry(CityJSONHandle handle, size_t object_index, uint8_t geometry_type, const char* lod);
 
-// Add a vertex to a geometry's mesh.
+// Add a vertex to a geometry.
 // Returns the vertex index, or -1 on failure.
 ssize_t cityjson_add_vertex(CityJSONHandle handle, size_t object_index, size_t geometry_index, double x, double y, double z);
 
-// Add a face to a geometry's mesh.
-// vertex_indices: array of vertex indices for this face.
-// num_indices: number of indices.
+// Add a surface polygon (single ring) to a geometry.
+// vertex_indices: array of ring vertex indices for the outer ring.
+// num_indices: number of ring indices.
 // face_type: one of ZITYJSON_FACE_WALL, ZITYJSON_FACE_FLOOR, etc.
 // Returns 0 on success, -1 on failure.
 int cityjson_add_face(CityJSONHandle handle, size_t object_index, size_t geometry_index, const size_t* vertex_indices, size_t num_indices, uint8_t face_type);
@@ -101,10 +101,18 @@ int cityjson_get_geometry_lod(
     size_t* out_len
 );
 
+// Ringed geometry accessors, aligned with FlatCityBuf geometry vectors.
+size_t cityjson_get_geometry_surface_count(CityJSONHandle handle, size_t object_index, size_t geometry_index);
+size_t cityjson_get_geometry_string_count(CityJSONHandle handle, size_t object_index, size_t geometry_index);
+size_t cityjson_get_geometry_boundary_count(CityJSONHandle handle, size_t object_index, size_t geometry_index);
+const size_t* cityjson_get_geometry_surfaces(CityJSONHandle handle, size_t object_index, size_t geometry_index);
+const size_t* cityjson_get_geometry_strings(CityJSONHandle handle, size_t object_index, size_t geometry_index);
+const size_t* cityjson_get_geometry_boundaries(CityJSONHandle handle, size_t object_index, size_t geometry_index);
+
 // Get the vertex count for a geometry by object and geometry index.
 size_t cityjson_get_vertex_count(CityJSONHandle handle, size_t object_index, size_t geometry_index);
 
-// Get the face count for a geometry by object and geometry index.
+// Get the surface count for a geometry by object and geometry index.
 size_t cityjson_get_face_count(CityJSONHandle handle, size_t object_index, size_t geometry_index);
 
 // Get pointer to vertex data (x, y, z triplets as double) for a geometry by object and geometry index.

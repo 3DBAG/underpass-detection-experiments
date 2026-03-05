@@ -4,6 +4,7 @@
 // Adapted for standalone use with CGAL Surface_mesh.
 
 #include "PolygonExtruder.h"
+#include "CdtDomainMarking.h"
 #include "RerunVisualization.h"
 
 #include <CGAL/Constrained_Delaunay_triangulation_2.h>
@@ -13,7 +14,6 @@
 #include <algorithm>
 #include <format>
 #include <iostream>
-#include <list>
 #include <map>
 
 namespace extrusion {
@@ -43,47 +43,6 @@ void set_rerun_recording_stream(const rerun::RecordingStream* rec) {
   g_polygon_index = 0;
 }
 #endif
-
-// Mark domains using flood fill from infinite face
-static void mark_domains(CDT& ct, CDT::Face_handle start, int index,
-                         std::list<CDT::Edge>& border) {
-  if (start->info().nesting_level != -1) {
-    return;
-  }
-  std::list<CDT::Face_handle> queue;
-  queue.push_back(start);
-  while (!queue.empty()) {
-    CDT::Face_handle fh = queue.front();
-    queue.pop_front();
-    if (fh->info().nesting_level == -1) {
-      fh->info().nesting_level = index;
-      for (int i = 0; i < 3; i++) {
-        CDT::Edge e(fh, i);
-        CDT::Face_handle n = fh->neighbor(i);
-        if (n->info().nesting_level == -1) {
-          if (ct.is_constrained(e))
-            border.push_back(e);
-          else
-            queue.push_back(n);
-        }
-      }
-    }
-  }
-}
-
-// Mark triangles that are inside the polygon (odd nesting level)
-static void mark_domains(CDT& cdt) {
-  std::list<CDT::Edge> border;
-  mark_domains(cdt, cdt.infinite_face(), 0, border);
-  while (!border.empty()) {
-    CDT::Edge e = border.front();
-    border.pop_front();
-    CDT::Face_handle n = e.first->neighbor(e.second);
-    if (n->info().nesting_level == -1) {
-      mark_domains(cdt, n, e.first->info().nesting_level + 1, border);
-    }
-  }
-}
 
 // Insert a ring as constrained edges into the CDT.
 // Returns vertex handles in the same order as the input ring.
@@ -127,7 +86,7 @@ static void triangulate_polygon(const ogr::LinearRing& ring, CDT& cdt,
 
   if (cdt.number_of_faces() == 0) return;
 
-  mark_domains(cdt);
+  cdt_domain_marking::mark_domains(cdt);
 }
 
 Surface_mesh extrude_polygon(const ogr::LinearRing& ring, double floor_height,
