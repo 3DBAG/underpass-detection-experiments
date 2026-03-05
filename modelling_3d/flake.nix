@@ -72,6 +72,9 @@
 
           shellHook = ''
             export NIX_CFLAGS_COMPILE=$(echo "$NIX_CFLAGS_COMPILE" | sed 's/-fmacro-prefix-map=[^ ]*//g')
+            export ZIG_LOCAL_CACHE_DIR="$PWD/.zig-cache"
+            export ZIG_GLOBAL_CACHE_DIR="$PWD/.zig-global-cache"
+            mkdir -p "$ZIG_LOCAL_CACHE_DIR" "$ZIG_GLOBAL_CACHE_DIR"
             export LD_LIBRARY_PATH="${pkgs.geogram.lib}/lib:$LD_LIBRARY_PATH"
             export DYLD_FALLBACK_LIBRARY_PATH="${pkgs.geogram.lib}/lib:$DYLD_FALLBACK_LIBRARY_PATH"
             echo "Entering development environment for add_underpass"

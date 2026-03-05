@@ -5,6 +5,7 @@
 
 # Build dirs and artifacts
 .zig-cache/
+.zig-global-cache
 zig-out/
 /result/bin/test_3d_intersection
 
