@@ -22,7 +22,7 @@ WITH filtered AS (
     FROM lvbag.pandactueelbestaand bag
     JOIN bgt.pandactueelbestaand bt
         ON bt.identificatiebagpnd = SUBSTRING(bag.identificatie FROM 15)
-       AND bag.geometrie && bt.geometrie
+        AND bag.geometrie && bt.geometrie
 )
 SELECT
     identificatie,
@@ -60,7 +60,7 @@ This initial BAG-BGT operation yields **1,972,190** potential underpass polygons
 <figcaption>Example of sliver polygons resulting from the BAG-BGT difference</figcaption>
 </figure>
 
-### Step 3: Sliver Polygon Filtering through Double Buffering
+### Step 3: Filtering through Double Buffering per Geometry
 
 We implement an erosion/dilation operation (double buffering) with a threshold of **0.2 meters**. This step removes thin sliver polygons while preserving substantial underpass areas.
 
@@ -77,7 +77,7 @@ CREATE TABLE underpasses.non_sliver_geometries AS (
 );
 ```
   
-⚠️ **Note:** This step primarily addresses cases where BGT and BAG polygons are nearly identical, with differences consisting mainly of sliver polygons. When substantial geometric differences exist between the datasets (eg an underpass or other architecturela detail), some sliver polygons may also remain within the overall geometry and require further processing in subsequent steps. 
+⚠️ **Note:** This step primarily addresses cases where BGT and BAG polygons are nearly identical, with differences consisting mainly of sliver polygons. When substantial geometric differences exist between the datasets (eg an underpass or other architectural detail), some sliver polygons may also remain within the overall geometry and require further processing in subsequent steps. 
 
 <table>
   <tr>
@@ -96,9 +96,9 @@ CREATE TABLE underpasses.non_sliver_geometries AS (
   </tr>
 </table>
 
-### Step 4: Precise Geometry Alignment through Snapping
+### Step 4: Double Snapping
 
-For the filtered dataset, we perform a more sophisticated difference calculation using geometric snapping to better align BAG and BGT geometries. This step uses a 0.2-meter snapping tolerance to handle small misalignments between datasets:
+For the filtered dataset, we perform a more sophisticated difference calculation using geometric snapping to better align BAG and BGT geometries. This step uses a 0.05m snapping tolerance to handle small misalignments between datasets:
 
 ```SQL
 CREATE TABLE underpasses.snapped_differences AS
@@ -116,8 +116,8 @@ snapped AS (
         identificatie,
         bag_geometrie,
         bgt_geometrie,
-        ST_MakeValid(ST_Snap(bag_geometrie, bgt_geometrie, 0.2)) AS bag_snap,
-        ST_MakeValid(ST_Snap(bgt_geometrie, bag_geometrie, 0.2)) AS bgt_snap
+        ST_MakeValid(ST_Snap(bag_geometrie, bgt_geometrie, 0.05)) AS bag_snap,
+        ST_MakeValid(ST_Snap(bgt_geometrie, bag_geometrie, 0.05)) AS bgt_snap
     FROM joined
 ),
 diff AS (
@@ -131,12 +131,12 @@ diff AS (
 )
 SELECT
     identificatie,
-    ST_Multi(ST_CollectionExtract(raw_geom, 3)) AS simplified_diff
+    ST_Multi(ST_CollectionExtract(raw_geom, 3)) AS geom
 FROM diff
 WHERE NOT ST_IsEmpty(raw_geom);
 ```
 
-### Step 5: Final Polygon-Level Cleaning
+### Step 5: Final Filtering though Double Buffering per Geometry
 
 As a final step, we break down multipolygons into individual components and apply another erosion/dilation operation at the polygon level. This removes any remaining thin artifacts within multipolygon geometries and then reassembles the surviving polygons back into multipolygons per building:
 
@@ -146,7 +146,7 @@ WITH exploded AS (
     -- Split multipolygons into individual polygons
     SELECT
         identificatie,
-        (ST_Dump(simplified_diff)).geom AS single_poly
+        (ST_Dump(geom)).geom AS single_poly
     FROM underpasses.snapped_differences
 ),
 exploded_with_id AS (
@@ -206,3 +206,6 @@ With Blue the parts that got removed and with red the parts that got preserved:
     </td>
   </tr>
 </table>
+
+
+## Part 2: Edge Classification and expansion

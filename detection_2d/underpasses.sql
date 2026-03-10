@@ -4,7 +4,8 @@
 -- *************************************
 
 -- =====================================
--- Step 1: Join BAG and BGT geometries and merge BGT geometries per pand
+-- Step 1: Preprocessing and Geometry Join: 
+-- Join BAG and BGT geometries and merge BGT geometries per pand
 -- =====================================
 
 DROP TABLE IF EXISTS underpasses.bag_bgt_join;
@@ -29,7 +30,7 @@ GROUP BY identificatie, bag_geometrie;
 
 
 -- =====================================
--- Step 2: Calculate BAG-BGT difference
+-- Step 2: Initial BAG-BGT Difference Calculation
 -- =====================================
 
 DROP TABLE IF EXISTS underpasses.bag_minus_bgt;
@@ -51,7 +52,7 @@ WHERE NOT ST_IsEmpty(raw_diff);
 
 
 -- =====================================
--- Step 3: Filter sliver polygons using an erosion and dilation operation
+-- Step 3: Filtering through Double Buffering per Geometry
 -- =====================================
 
 DROP TABLE IF EXISTS underpasses.non_sliver_geometries;
@@ -64,7 +65,7 @@ CREATE TABLE underpasses.non_sliver_geometries AS (
 
 
 -- =====================================
--- Step 4: Perform a more precise geometry difference using snapping to align BAG and BGT geometries
+-- Step 4: Double Snapping
 -- =====================================
 
 DROP TABLE IF EXISTS underpasses.snapped_differences;
@@ -105,7 +106,7 @@ WHERE NOT ST_IsEmpty(raw_geom);
 
 
 -- =====================================
--- Step 5: Perform another erosion and dilation to remove any remaining sliver polygons within each multipolygon, and merge surviving polygons back into a multipolygon per identificatie.
+-- Step 5: Final Filtering though Double Buffering per Geometry
 -- =====================================
 
 DROP TABLE IF EXISTS underpasses.geometries;
@@ -116,7 +117,7 @@ WITH exploded AS (
     SELECT
         identificatie,
         (ST_Dump(geom)).geom AS single_poly
-    FROM underpasses.t2_snapped_differences
+    FROM underpasses.snapped_differences
 ),
 exploded_with_id AS (
     SELECT
