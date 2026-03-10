@@ -2,7 +2,7 @@
 
 This directory contains a small Python workflow for estimating an underpass height from a cropped LAS point cloud and a matching polygon stored in a GeoPackage.
 
-The croppedpoint cloud was generated using roofer:
+The cropped point cloud was generated using roofer:
 ```
 roofer --ceil-point-density 100 --crop-only --crop-output  122200_486000.laz voormaligeStadstimmertuin.gpkg data/roofer-out
 ```
