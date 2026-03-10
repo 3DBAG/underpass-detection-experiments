@@ -1,180 +1,191 @@
 import os
-import geopandas as gpd
-import pandas as pd
-import duckdb
-import itertools
-from shapely import wkb
-from shapely import wkt
-import shapely
-from shapely.ops import unary_union
-import trimesh
+import cv2
 import numpy as np
+from statistics import mean
 
-# import image_matching.image_matching
+import data_preprocessing
+import perspective_projection
+import facade_extraction
+import height_estimation
 
 # Configure root directory
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
 
-# Input 3DBAG tiles directory. Contains geopckg files
-tiles_directory = os.path.join(PROJECT_ROOT, 'data/main/3dbag_tiles')
-# Input images directory. Contains image rasters, camera_parameters.txt and image_footprints.geojson
-images_directory = os.path.join(PROJECT_ROOT, 'data/main/oblique_images')
-# Input underpasses directory. Contains a geojson file
-underpasses_directory = os.path.join(PROJECT_ROOT, 'data/main/underpass_polygons')
-# Input database file
-database_path = os.path.join(PROJECT_ROOT, 'data/main/underpasses_database.db')
-# Create connection to database
-con = duckdb.connect(database=database_path)
-con.execute("INSTALL spatial;")
-con.execute("LOAD spatial;")
+# ----------------------------------
+# 1. DEFINE INPUT DATA
+# ----------------------------------
+# Select height estimation method
+height_estimation_method = "cc_method" # "cc_method", "depth_method", "unet_method"
 
-# Camera parameters file
+# Load model if needed
+if height_estimation_method == "depth_method":
+    depth_map_model = height_estimation.load_depth_map_model()
+elif height_estimation_method == "unet_method":
+    unet_device, unet_model = height_estimation.load_unet_model()
+
+# Define output file according to selected method
+if height_estimation_method == "cc_method":
+    output_path = os.path.join(PROJECT_ROOT, 'output/underpass_heights_ccmethod.geojson')
+elif height_estimation_method == "depth_method":
+    output_path = os.path.join(PROJECT_ROOT, 'output/underpass_heights_depthmethod.geojson')
+elif height_estimation_method == "unet_method":
+    output_path = os.path.join(PROJECT_ROOT, 'output/underpass_heights_unetmethod.geojson')
+
+tiles_directory = os.path.join(PROJECT_ROOT, 'data/3dbag_tiles')
+images_directory = os.path.join(PROJECT_ROOT, 'data/oblique_images')
+underpasses_directory = os.path.join(PROJECT_ROOT, 'data/underpass_polygons')
+
 camera_parameters_path = os.path.join(images_directory, 'camera_parameters.txt')
-# Image footprints file
 image_footprints_path = os.path.join(images_directory, 'image_footprints.geojson')
+underpasses_path = os.path.join(underpasses_directory, 'underpasses.geojson')
 
+# ----------------------------------
+# 2. LOAD INPUT DATA IN GEOPANDAS DATAFRAMES
+# ----------------------------------
+df_camera_parameters, gdf_image_footprints, gdf_underpass_polygons = data_preprocessing.load_input_data(camera_parameters_path, 
+                                                                                                  image_footprints_path, 
+                                                                                                  underpasses_path)
+# print("Camera parameters table: \n", df_camera_parameters.head(), "\n")
+# print("Image footprints table: \n", gdf_image_footprints.head(), "\n")
+# print("Underpasses table: \n", gdf_underpass_polygons.head(), "\n")
 
-# Iterate over each tile for height calculation
+# ----------------------------------
+# 3. ITERATE OVER EACH 3D BAG TILE (GEOJSON)
+# ----------------------------------
+img_number = 1 # For saving the dataset
 for filename in os.listdir(tiles_directory):
 
-    # Make sure that there is no buildings table
-    con.execute('DROP TABLE IF EXISTS buildings')
-    con.execute("DROP TABLE IF EXISTS walls")
-    con.execute("DROP TABLE IF EXISTS merged_walls")
-    
-    # Read geopckg file lod_22 geometries into geodata frame
+    # Load building lod-0 and lod-22 geometries
     tile = os.path.join(tiles_directory, filename)
-    buildings_gdf = gpd.read_file(tile, layer="lod22_3d")
-    # Convert geometry column to wkt so duckdb can read it
-    buildings_gdf["lod22_geom"] = buildings_gdf.geometry.apply(lambda g: g.wkt)
-    buildings_gdf = buildings_gdf.drop(columns="geometry")
+    gdf_building_footprints, gdf_building_3d = data_preprocessing.load_tile_data(tile)
 
-    # Create empty table for buildings
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS buildings (
-                building_id VARCHAR,
-                b3_pand_deel_id INTEGER,
-                labels VARCHAR,
-                lod22_geom VARCHAR
-        )""")
+    # print("Building footprints table: \n", gdf_building_footprints.head(), "\n")
+    # print("Building 3D table: \n", gdf_building_3d.head(), "\n")
 
-    # Add geodata frame to database
-    con.register("buildings_gdf", buildings_gdf)
-    con.execute("INSERT INTO buildings SELECT * FROM buildings_gdf")
-
-    # Select buildings which have underpasses (spatial intersection underpass polygons-buildings)
-    # Create temporal tables with intersecting buildings
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS buildings_intersecting AS
-        SELECT b.*
-        FROM buildings b
-        JOIN underpasses u
-        ON ST_Intersects(ST_GeomFromText(b.lod22_geom), ST_GeomFromText(u.geometry_wkt))
-    """)
+    # ----------------------------------
+    # 4. FIND CRITICAL SEGMENTS (INTERSECTION OF BUILDING FOOTPRINTS WITH UNDERPASSES)
+    # ----------------------------------
+    gdf_underpass_intersected, gdf_critical_segments = data_preprocessing.find_critical_segments(gdf_underpass_polygons, 
+                                                                      gdf_building_footprints,
+                                                                      buf_tol=0.1,
+                                                                      simpl_tol=0.2,
+                                                                      min_length=2)
     
-    # Drop current building table and rename buildings_intersecting into buildings
-    con.execute("DROP TABLE buildings")
-    con.execute("ALTER TABLE buildings_intersecting RENAME TO buildings")
+    # print("Critical segments table: \n", gdf_critical_segments.head(), "\n")
+    # Visualize critical segments
+    # data_preprocessing.visualize_critical_segments(gdf_underpass_intersected, gdf_critical_segments)
 
-    # Get building walls that intersect with underpasses and create new table walls    
-    wall_records = []
-    wall_counter = itertools.count(1)
+    # ----------------------------------
+    # 5. FIND CRITICAL WALLS (EXTRUDE CRITICAL SEGMENTS TO 3D)
+    # ----------------------------------
+    gdf_critical_walls = data_preprocessing.find_critical_walls(gdf_critical_segments, 
+                                                                gdf_building_3d, 
+                                                                buf_tol=0.5,
+                                                                extend_length=1)
+    
+    # print("Critical walls table: \n", gdf_critical_walls.head(), "\n")
+    # Visualize critical walls in 3d
+    # data_preprocessing.visualize_critical_walls(gdf_critical_walls)
 
-    df_buildings = con.execute("SELECT * FROM buildings").fetchdf()
-    df_underpasses = con.execute("SELECT * FROM underpasses").fetchdf()
+    # ----------------------------------
+    # 6. CONSTRUCT IMAGE - WALL VISIBILITY TABLE (INTERSECTION OF CRITICAL WALLS WITH IMAGE FOOTPRINTS)
+    # ----------------------------------
+    gdf_image_visibility = data_preprocessing.infere_image_visibility(gdf_image_footprints, 
+                                                                      gdf_critical_walls)
 
-    for index, building in df_buildings.iterrows():
+    print("Selected images table: \n", gdf_image_visibility.head(), "\n")
 
-        # Retrieve building geometry as bytes and convert to shapely geometry
-        building_geom = shapely.from_wkt(building["lod22_geom"])
-        # Parse labels. Label 2 describes a wall surface
-        count, values = building['labels'].strip("()").split(":")
-        labels = list(map(int, values.split(",")))
-        # Extract walls
-        walls = []
-        if building_geom.geom_type == "Polygon":
-            building_geom = [building_geom]
-        elif building_geom.geom_type == "MultiPolygon":
-            building_geom = building_geom.geoms
+    # ----------------------------------
+    # 7. PERFORM PERSPECTIVE PROJECTION OF CRITICAL WALLS ONTO OBLIQUE IMAGES
+    # ----------------------------------
+    for _, row in gdf_image_visibility.iterrows():
 
-        for i, polygon in enumerate(building_geom):
-            if labels[i] == 2:
-                walls.append(polygon)
+        image_id = row['image_id']
+        # !!!Change for proper datasets (special case for Almere dataset)
+        img_prefix = image_id[:3]  
+        oblique_image_path = os.path.join(images_directory, f"{image_id}")                                                      
+        oblique_image = cv2.imread(oblique_image_path)  
+        wall_ids = row['visible_walls']
 
-        # Merge walls to aggregate touching polygons
-        merged_walls = unary_union(walls)
-
-        # Check intersection of walls with underpasses. Create new wall entry if intersects an underpass
-        for wall in walls:
-            for index, underpass in df_underpasses.iterrows():
-                underpass_geom = shapely.from_wkt(underpass['geometry_wkt'])
-                if wall.intersects(underpass_geom):
-                    wall_id = next(wall_counter)
-                    wall_records.append({
-                        "wall_id": wall_id,
-                        "geom": wall.wkt,
-                        "underpass_id": underpass["identificatie"]
-                    })
-
-    wall_df = pd.DataFrame(wall_records)
-
-    # Collect all wall meshes
-    wall_meshes = []
-
-    for _, row in wall_df.iterrows():
-        geom = shapely.from_wkt(row["geom"])  # convert WKT back to shapely
-        if geom.geom_type == "Polygon":
-            polys = [geom]
-        elif geom.geom_type == "MultiPolygon":
-            polys = geom.geoms
-        else:
+        if len(wall_ids) == 0:
             continue
+        if oblique_image is None:
+            continue  
+        # !!!Change for proper datasets (special case for Almere dataset)
+        if img_prefix == '403' or img_prefix == '405':
+            continue                                   
+        
+        rectangles_2d = perspective_projection.project_walls_on_image(oblique_image, 
+                                                      image_id, 
+                                                      img_prefix,
+                                                      wall_ids,
+                                                      df_camera_parameters, 
+                                                      gdf_critical_walls)
+        # Visualize image with projected walls
+        # perspective_projection.display_image(rectangles_2d, oblique_image)
 
-        for poly in polys:
-            # Extract exterior coordinates (ignore holes for now)
-            coords = poly.exterior.coords
-            # Convert to numpy array
-            vertices = np.array(coords)
-            # Create faces: connect consecutive vertices into a loop
-            faces = [[i, (i + 1) % len(vertices), (i + 1) % len(vertices)] for i in range(len(vertices)-1)]
-            # Create trimesh object
-            mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
-            wall_meshes.append(mesh)
+        # ----------------------------------
+        # 8. EXTRACT FACADE TEXTURE FROM EVERY PROJECTED WALL
+        # ----------------------------------
+        for wall_id, rect_2d in zip(wall_ids, rectangles_2d):
+            
+            facade_image = facade_extraction.extract_facade(rect_2d, oblique_image)
 
-    # Merge all walls into a single mesh
-    scene = trimesh.util.concatenate(wall_meshes)
+            # Display facade image
+            facade_extraction.display_facade_image(facade_image)
 
-    # Export to OBJ
-    scene.export("walls.obj")
-    
-    # Create table for walls. Create empty table and insert data from wall dataframe
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS walls (
-                wall_id INTEGER PRIMARY KEY,
-                geom VARCHAR,
-                underpass_id VARCHAR
-        )""")
-    con.register("wall_df", wall_df)
-    con.execute("INSERT INTO walls SELECT * FROM wall_df")
+            # ----------------------------------
+            # 9. ESTIMATE UNDERPASS HEIGHT APPLYING SELECTED METHOD
+            # ----------------------------------
+            # Obtain real facade height
+            facade_height = gdf_critical_walls[gdf_critical_walls['wall_id'] == wall_id]['wall_height'].iloc[0]
 
-    df_footprints = con.execute("SELECT * FROM image_footprints").fetch_df()
-    print("Image footprints table: \n", df_footprints.head())
+            if height_estimation_method == "cc_method":
+                pixel_row, underpass_height = height_estimation.apply_cc_method(facade_image, 
+                                                                                facade_height,
+                                                                                min_height=2,
+                                                                                ground_dist=100,
+                                                                                top_dist=50,
+                                                                                min_solidity=0.5)
+            elif height_estimation_method == "depth_method":
+                pixel_row, underpass_height = height_estimation.apply_depth_method(facade_image, 
+                                                                                facade_height, 
+                                                                                depth_map_model, 
+                                                                                k=3)
+            elif height_estimation_method == "unet_method":
+                pixel_row, underpass_height = height_estimation.apply_unet_method(facade_image, 
+                                                                                facade_height, 
+                                                                                unet_model,
+                                                                                unet_device)
+                
+            if underpass_height is not None:
+                # print(f"    Facade height: {facade_height} m; Estimated underpass height: {underpass_height} m")
+                # Visualize estimated underpass height image
+                # height_estimation.display_image(facade_image, pixel_row)
 
-    df_underpasses = con.execute("SELECT * FROM underpasses").fetch_df()
-    print("Underpasses table: \n", df_underpasses.head())
-    
-    df_buildings = con.execute("SELECT * FROM buildings").fetch_df()
-    print("Buildings table: \n", df_buildings.head())
+                # Record observation in underpass GeoDataFrame
+                height_estimation.record_observation(gdf_underpass_polygons, gdf_critical_walls, wall_id, underpass_height)
+                
+            else:
+                # print(f"    Facade height: {facade_height} m; Estimated underpass height: Undetermined")
+                # Skip to next wall if height estimation failed
+                continue
 
+    # ----------------------------------
+    # 10. ESTIMATE HEIGHT OF UNDERPASSES FROM OBSERVATIONS
+    # ----------------------------------
+    # Method 1: Compute average height from observations for each underpass
+    gdf_underpass_polygons['estimated_height'] = gdf_underpass_polygons['observed_heights'].apply(lambda x: mean(x) if len(x) > 0 else None)
+    # Visualize updated underpass polygons
+    updated_underpasses = gdf_underpass_polygons[gdf_underpass_polygons['estimated_height'].notna()]
+    print("Updated underpass polygons with estimated heights: \n", updated_underpasses.head(), "\n")
 
-    # Drop table for next iteration
-    con.execute("DROP TABLE IF EXISTS buildings")
-    con.execute("DROP TABLE IF EXISTS walls")
-    con.execute("DROP TABLE IF EXISTS merged_walls")
-
-    break 
-    
+# ----------------------------------
+# 11. WRITE RESULTS TO GEOJSON
+# ----------------------------------
+gdf_output = gdf_underpass_polygons[['underpass_id', 'building_id', 'geometry', 'estimated_height']]
+height_estimation.write_geojson(gdf_output, output_path)
     
 
 

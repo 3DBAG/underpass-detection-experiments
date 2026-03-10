@@ -159,7 +159,7 @@ static FeatureCarveResult carve_underpasses_for_feature(
         Surface_mesh underpass_sm;
         try {
             underpass_sm = extrusion::extrude_polygon(
-                offset_polygon, result.house_min_z - 0.1, feature.extrusion_height + 0.1, ignore_holes);
+                offset_polygon, result.house_min_z - 0.1, result.house_min_z + feature.extrusion_height, ignore_holes);
         } catch (const std::exception& e) {
             auto t_conversion_end = Clock::now();
             ds_conversion_ms += t_conversion_end - t_conversion_start;
