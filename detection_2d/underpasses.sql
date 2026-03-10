@@ -1,9 +1,12 @@
 
--- =====================================
+-- *************************************
 -- UNDERPASS DETECTION SQL PIPELINE
+-- *************************************
+
+-- =====================================
+-- Step 1: Join BAG and BGT geometries and merge BGT geometries per pand
 -- =====================================
 
--- Step 1: Join BAG and BGT geometries and merge BGT geometries per pand
 DROP TABLE IF EXISTS underpasses.bag_bgt_join;
 
 CREATE TABLE underpasses.bag_bgt_join AS
@@ -15,7 +18,7 @@ WITH filtered AS (
     FROM lvbag.pandactueelbestaand bag
     JOIN bgt.pandactueelbestaand bt
         ON bt.identificatiebagpnd = SUBSTRING(bag.identificatie FROM 15)
-       AND bag.geometrie && bt.geometrie
+        AND bag.geometrie && bt.geometrie
 )
 SELECT
     identificatie,
@@ -61,7 +64,7 @@ CREATE TABLE underpasses.non_sliver_geometries AS (
 
 
 -- =====================================
--- Step 4: Perfrorm a more precise geometry difference using snapping to align BAG and BGT geometries
+-- Step 4: Perform a more precise geometry difference using snapping to align BAG and BGT geometries
 -- =====================================
 
 DROP TABLE IF EXISTS underpasses.snapped_differences;
@@ -81,8 +84,8 @@ snapped AS (
         identificatie,
         bag_geometrie,
         bgt_geometrie,
-        ST_MakeValid(ST_Snap(bag_geometrie, bgt_geometrie, 0.2)) AS bag_snap,
-        ST_MakeValid(ST_Snap(bgt_geometrie, bag_geometrie, 0.2)) AS bgt_snap
+        ST_MakeValid(ST_Snap(bag_geometrie, bgt_geometrie, 0.05)) AS bag_snap,
+        ST_MakeValid(ST_Snap(bgt_geometrie, bag_geometrie, 0.05)) AS bgt_snap
     FROM joined
 ),
 diff AS (
@@ -96,7 +99,7 @@ diff AS (
 )
 SELECT
     identificatie,
-    ST_Multi(ST_CollectionExtract(raw_geom, 3)) AS simplified_diff
+    ST_Multi(ST_CollectionExtract(raw_geom, 3)) AS geom
 FROM diff
 WHERE NOT ST_IsEmpty(raw_geom);
 
@@ -112,8 +115,8 @@ WITH exploded AS (
     -- Split multipolygons into individual polygons
     SELECT
         identificatie,
-        (ST_Dump(simplified_diff)).geom AS single_poly
-    FROM underpasses.snapped_differences
+        (ST_Dump(geom)).geom AS single_poly
+    FROM underpasses.t2_snapped_differences
 ),
 exploded_with_id AS (
     SELECT
