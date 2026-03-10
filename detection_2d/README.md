@@ -98,7 +98,7 @@ CREATE TABLE underpasses.non_sliver_geometries AS (
 
 ### Step 4: Double Snapping
 
-For the filtered dataset, we perform a more sophisticated difference calculation using geometric snapping to better align BAG and BGT geometries. This step uses a 0.05m snapping tolerance to handle small misalignments between datasets:
+For the filtered dataset, we perform a more sophisticated difference calculation using geometric snapping to better align BAG and BGT geometries. This step uses a **0.03m** snapping tolerance to handle small misalignments between datasets:
 
 ```SQL
 CREATE TABLE underpasses.snapped_differences AS
@@ -184,28 +184,75 @@ With Blue the parts that got removed and with red the parts that got preserved:
   <tr>
     <td>
       <figure>
-        <img src="img/ex1.png" width="200"/>
+        <img src="img/ex6.png" width="200"/>
+        <figcaption>NL.IMBAG.Pand.0003100000118006</figcaption>
       </figure>
     </td>
     <td>
       <figure>
         <img src="img/ex2.png" width="200"/>
+        <figcaption>NL.IMBAG.Pand.0003100000118401</figcaption>
       </figure>
     </td>
-  </tr>
-    <tr>
     <td>
       <figure>
         <img src="img/ex3.png" width="200"/>
-      </figure>
-    </td>
-    <td>
-      <figure>
-        <img src="img/ex4.png" width="200"/>
+        <figcaption>NL.IMBAG.Pand.0003100000118462</figcaption>
       </figure>
     </td>
   </tr>
 </table>
 
+Where it doesn't work perfectly:
+
+<table>
+  <tr>
+    <td>
+      <figure>
+        <img src="img/ex5.png" width="200"/>
+        <figcaption>NL.IMBAG.Pand.0010100000008514</figcaption>
+      </figure>
+    </td>
+    <td>
+      <figure>
+        <img src="img/ex4.png" width="200"/>
+        <figcaption>NL.IMBAG.Pand.0005100000002807</figcaption>
+      </figure>
+    </td>
+    <td>
+      <figure>
+        <img src="img/ex1.png" width="200"/>
+        <figcaption>NL.IMBAG.Pand.0003100000117823</figcaption>
+      </figure>
+    </td>
+  </tr>
+</table>
+
+
+To avoid those cases we could increase the threshold for the double snapping, however this will affect the polygons of certain underpasses. For example for building **NL.IMBAG.Pand.0599100000635797**, the underpass polygon is preserved better with 3cm instead of 5cm threshold:
+
+<table>
+  <tr>
+    <td>
+      <figure>
+        <img src="img/ex7.png" width="200"/>
+        <figcaption>Threshold 3cm</figcaption>
+      </figure>
+    </td>
+    <td>
+      <figure>
+        <img src="img/ex8.png" width="200"/>
+        <figcaption>Threshold 5cm</figcaption>
+      </figure>
+    </td>
+  </tr>
+</table>
+
+Finally, when compared with the "outer ceiling surfaces" from 3D rotterdam, the polygon of the underpasses have minimal differences.
+
+  <figure>
+    <img src="img/ex9.png" width="200"/>
+    <figcaption>NL.IMBAG.Pand.0599100000635797: Red our detected underpass, green from 3DRotterdam</figcaption>
+  </figure>
 
 ## Part 2: Edge Classification and expansion

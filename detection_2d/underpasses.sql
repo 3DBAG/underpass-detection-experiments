@@ -85,8 +85,8 @@ snapped AS (
         identificatie,
         bag_geometrie,
         bgt_geometrie,
-        ST_MakeValid(ST_Snap(bag_geometrie, bgt_geometrie, 0.05)) AS bag_snap,
-        ST_MakeValid(ST_Snap(bgt_geometrie, bag_geometrie, 0.05)) AS bgt_snap
+        ST_MakeValid(ST_Snap(bag_geometrie, bgt_geometrie, 0.03)) AS bag_snap,
+        ST_MakeValid(ST_Snap(bgt_geometrie, bag_geometrie, 0.03)) AS bgt_snap
     FROM joined
 ),
 diff AS (
