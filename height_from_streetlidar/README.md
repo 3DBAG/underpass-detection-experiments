@@ -1,6 +1,6 @@
 # Underpass Height From Street LiDAR
 
-This directory contains a small Python workflow for estimating an underpass height from a cropped LAS point cloud and a matching polygon stored in a GeoPackage.
+This directory contains a Python workflow for estimating an underpass height from a cropped LAS/LAZ point cloud and a matching polygon stored in a GeoPackage.
 
 > The cropped point cloud was generated using roofer:
 > ```
@@ -8,7 +8,7 @@ This directory contains a small Python workflow for estimating an underpass heig
 > ```
 > The GPKG file contains the underpass polygon of interest from the 2D detection pipeline. The pointcloud is one of the files Amsterdam gave to us. To save space, these two files are not included in this repository, but the relvant roofer output is included.
 
-The script reads [`data/roofer-out/objects/0/crop/0_.las`](/Users/ravi/git/underpass-detection-experiments/height_from_streetlidar/data/roofer-out/objects/0/crop/0_.las), finds the two dominant peaks in the Z histogram, treats them as the lower and upper height clusters, rasterizes the points from each cluster onto the XY plane at `0.5 m` resolution, and overlays those rasters with the polygon from [`data/roofer-out/objects/0/crop/0.gpkg`](/Users/ravi/git/underpass-detection-experiments/height_from_streetlidar/data/roofer-out/objects/0/crop/0.gpkg).
+The script loops over a list of BAG cases, reads each LAS/LAZ file and its matching GeoPackage polygon, finds two Z peaks, rasterizes the corresponding point subsets onto the XY plane at `0.5 m` resolution, and overlays those rasters with the polygon footprint.
 
 It also writes the derived attributes back into the GeoPackage feature table:
 
@@ -18,39 +18,77 @@ It also writes the derived attributes back into the GeoPackage feature table:
 
 ## What The Script Produces
 
-- A histogram of Z values with:
-  - the two detected peak lines
-  - shaded peak windows
-  - a double-headed arrow labeled with the height difference
+- A histogram of Z values with the raw histogram, the smoothed histogram, the two selected peak lines, fixed `0.5 m` selection bands, and a double-headed height-difference annotation
 - One XY raster subplot for the lower peak and one for the upper peak, each overlaid with the polygon outline
-- An output image written to [`peak_grids_overlay.png`](/Users/ravi/git/underpass-detection-experiments/height_from_streetlidar/peak_grids_overlay.png)
-- Updated attributes in [`data/roofer-out/objects/0/crop/0.gpkg`](/Users/ravi/git/underpass-detection-experiments/height_from_streetlidar/data/roofer-out/objects/0/crop/0.gpkg)
+- One PNG per BAG id, named `<bag_id>_peak_grids_overlay.png`
+- Updated attributes in each input GeoPackage:
+  - `underpass_dh`
+  - `underpass_top_area`
+  - `underpass_bottom_area`
 
-## Current Result
+## Example Cases
 
-On the current input data, the script reports:
+The `images/` directory contains point-cloud screenshots and matching script outputs for several BAG ids.
 
-- Lower peak: about `1.02 m`
-- Upper peak: about `5.01 m`
-- Height difference: `3.99 m`
-- Bottom area: `370.0 m^2`
-- Top area: `262.5 m^2`
+### `NL.IMBAG.Pand.0363100012095711`
 
-These results are also made available as attributes in the GeoPackage file:
+Point cloud:
 
-- `underpass_dh = 3.9897`
-- `underpass_top_area = 262.5`
-- `underpass_bottom_area = 370.0`
-
-## Example Images
-
-Point cloud view:
-
-![Point cloud](images/pointcloud.png)
+![NL.IMBAG.Pand.0363100012095711 point cloud](images/NL.IMBAG.Pand.0363100012095711.png)
 
 Script output:
 
-![Peak grids overlay](images/peak_grids_overlay.png)
+![NL.IMBAG.Pand.0363100012095711 output](images/NL.IMBAG.Pand.0363100012095711_peak_grids_overlay.png)
+
+### `NL.IMBAG.Pand.0363100012122448`
+
+Point cloud:
+
+![NL.IMBAG.Pand.0363100012122448 point cloud](images/NL.IMBAG.Pand.0363100012122448.png)
+
+Script output:
+
+![NL.IMBAG.Pand.0363100012122448 output](images/NL.IMBAG.Pand.0363100012122448_peak_grids_overlay.png)
+
+### `NL.IMBAG.Pand.0363100012137139`
+
+Point cloud:
+
+![NL.IMBAG.Pand.0363100012137139 point cloud](images/NL.IMBAG.Pand.0363100012137139.png)
+
+Script output:
+
+![NL.IMBAG.Pand.0363100012137139 output](images/NL.IMBAG.Pand.0363100012137139_peak_grids_overlay.png)
+
+### `NL.IMBAG.Pand.0363100012146576`
+
+Point cloud:
+
+![NL.IMBAG.Pand.0363100012146576 point cloud](images/NL.IMBAG.Pand.0363100012146576.png)
+
+Script output:
+
+![NL.IMBAG.Pand.0363100012146576 output](images/NL.IMBAG.Pand.0363100012146576_peak_grids_overlay.png)
+
+### `NL.IMBAG.Pand.0363100012165755`
+
+Point cloud:
+
+![NL.IMBAG.Pand.0363100012165755 point cloud](images/NL.IMBAG.Pand.0363100012165755.png)
+
+Script output:
+
+![NL.IMBAG.Pand.0363100012165755 output](images/NL.IMBAG.Pand.0363100012165755_peak_grids_overlay.png)
+
+### `NL.IMBAG.Pand.0363100012170850`
+
+Point cloud:
+
+![NL.IMBAG.Pand.0363100012170850 point cloud](images/NL.IMBAG.Pand.0363100012170850.png)
+
+Script output:
+
+![NL.IMBAG.Pand.0363100012170850 output](images/NL.IMBAG.Pand.0363100012170850_peak_grids_overlay.png)
 
 ## Run With Nix
 
@@ -58,12 +96,6 @@ From this directory:
 
 ```bash
 nix develop -c python3 plot_z_histogram.py
-```
-
-For a headless run that writes the figure without opening a window:
-
-```bash
-nix develop -c env MPLBACKEND=Agg python3 plot_z_histogram.py
 ```
 
 ## Run Without Nix
@@ -80,15 +112,8 @@ Run the script:
 python3 plot_z_histogram.py
 ```
 
-For headless output:
-
-```bash
-MPLBACKEND=Agg python3 plot_z_histogram.py
-```
-
 ## Files
 
 - [`plot_z_histogram.py`](/Users/ravi/git/underpass-detection-experiments/height_from_streetlidar/plot_z_histogram.py): main analysis and plotting script
 - [`flake.nix`](/Users/ravi/git/underpass-detection-experiments/height_from_streetlidar/flake.nix): Nix development shell with Python dependencies
-- [`images/pointcloud.png`](/Users/ravi/git/underpass-detection-experiments/height_from_streetlidar/images/pointcloud.png): reference point cloud image
-- [`images/peak_grids_overlay.png`](/Users/ravi/git/underpass-detection-experiments/height_from_streetlidar/images/peak_grids_overlay.png): example script output image
+- [`images/`](/Users/ravi/git/underpass-detection-experiments/height_from_streetlidar/images): example point-cloud screenshots and BAG-specific script outputs

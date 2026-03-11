@@ -2,14 +2,41 @@ import laspy
 import matplotlib.pyplot as plt
 import numpy as np
 import sqlite3
+from pathlib import Path
+from matplotlib.colors import LinearSegmentedColormap
 from shapely import wkb
 
 
-LAS_PATH = "data/roofer-out/objects/0/crop/0_.las"
-GPKG_PATH = "data/roofer-out/objects/0/crop/0.gpkg"
+CASES = [
+    {
+        "las_path": "/Users/ravi/git/zigpip/output/weesperstraat/NL.IMBAG.Pand.0363100012165755.laz",
+        "gpkg_path": "/Users/ravi/git/zigpip/output/weesperstraat/NL.IMBAG.Pand.0363100012165755.gpkg"
+    },
+    {
+        "las_path": "/Users/ravi/git/zigpip/output/weesperstraat/NL.IMBAG.Pand.0363100012170850.laz",
+        "gpkg_path": "/Users/ravi/git/zigpip/output/weesperstraat/NL.IMBAG.Pand.0363100012170850.gpkg"
+    },
+    {
+        "las_path": "/Users/ravi/git/zigpip/output/beemsterstraat/NL.IMBAG.Pand.0363100012095711.laz",
+        "gpkg_path": "/Users/ravi/git/zigpip/output/beemsterstraat/NL.IMBAG.Pand.0363100012095711.gpkg",
+    },
+    {
+        "las_path": "/Users/ravi/git/zigpip/output/beemsterstraat/NL.IMBAG.Pand.0363100012122448.laz",
+        "gpkg_path": "/Users/ravi/git/zigpip/output/beemsterstraat/NL.IMBAG.Pand.0363100012122448.gpkg",
+    },
+    {
+        "las_path": "/Users/ravi/git/zigpip/output/beemsterstraat/NL.IMBAG.Pand.0363100012137139.laz",
+        "gpkg_path": "/Users/ravi/git/zigpip/output/beemsterstraat/NL.IMBAG.Pand.0363100012137139.gpkg",
+    },
+    {
+        "las_path": "/Users/ravi/git/zigpip/output/beemsterstraat/NL.IMBAG.Pand.0363100012146576.laz",
+        "gpkg_path": "/Users/ravi/git/zigpip/output/beemsterstraat/NL.IMBAG.Pand.0363100012146576.gpkg",
+    },
+]
 HISTOGRAM_BINS = 100
 GRID_CELLSIZE = 0.5
-OUTPUT_PATH = "peak_grids_overlay.png"
+LOWEST_PEAK_MIN_RELATIVE_COUNT = 0.1
+PEAK_BAND_WIDTH_METERS = 0.5
 
 
 def find_top_histogram_peaks(values, bins=100, smoothing_window=7, min_separation_bins=10):
@@ -22,22 +49,55 @@ def find_top_histogram_peaks(values, bins=100, smoothing_window=7, min_separatio
     kernel /= kernel.sum()
     smoothed_counts = np.convolve(counts, kernel, mode="same")
 
-    candidate_indices = np.where(
-        (smoothed_counts[1:-1] > smoothed_counts[:-2])
-        & (smoothed_counts[1:-1] >= smoothed_counts[2:])
-    )[0] + 1
+    candidate_indices = []
+    if len(smoothed_counts) == 1:
+        candidate_indices = [0]
+    else:
+        if smoothed_counts[0] > smoothed_counts[1]:
+            candidate_indices.append(0)
+
+        interior_candidates = np.where(
+            (smoothed_counts[1:-1] > smoothed_counts[:-2])
+            & (smoothed_counts[1:-1] >= smoothed_counts[2:])
+        )[0] + 1
+        candidate_indices.extend(interior_candidates.tolist())
+
+        if smoothed_counts[-1] > smoothed_counts[-2]:
+            candidate_indices.append(len(smoothed_counts) - 1)
+
+    candidate_indices = np.asarray(candidate_indices, dtype=int)
 
     ranked_candidates = candidate_indices[np.argsort(smoothed_counts[candidate_indices])[::-1]]
 
-    peak_indices = []
+    separated_candidates = []
     for idx in ranked_candidates:
-        if all(abs(idx - existing) >= min_separation_bins for existing in peak_indices):
-            peak_indices.append(idx)
-        if len(peak_indices) == 2:
-            break
+        if all(abs(idx - existing) >= min_separation_bins for existing in separated_candidates):
+            separated_candidates.append(idx)
+
+    if not separated_candidates:
+        return counts, bin_edges, bin_centers, smoothed_counts, [], []
+
+    # Keep the lowest-Z peak only when it is still substantial relative to the
+    # dominant peaks; otherwise treat tiny edge modes as outliers and use the
+    # strongest peaks instead.
+    lowest_peak_idx = min(separated_candidates, key=lambda idx: bin_centers[idx])
+    dominant_peak_idx = separated_candidates[0]
+    lowest_peak_ratio = smoothed_counts[lowest_peak_idx] / smoothed_counts[dominant_peak_idx]
+
+    if len(separated_candidates) == 1:
+        peak_indices = [lowest_peak_idx]
+    elif lowest_peak_ratio >= LOWEST_PEAK_MIN_RELATIVE_COUNT:
+        peak_indices = [lowest_peak_idx]
+        for idx in separated_candidates:
+            if idx != lowest_peak_idx:
+                peak_indices.append(idx)
+            if len(peak_indices) == 2:
+                break
+    else:
+        peak_indices = separated_candidates[:2]
 
     peak_indices.sort(key=lambda idx: bin_centers[idx])
-    return counts, bin_edges, bin_centers, smoothed_counts, peak_indices
+    return counts, bin_edges, bin_centers, smoothed_counts, separated_candidates, peak_indices
 
 
 def peak_cluster_from_index(bin_edges, smoothed_counts, peak_idx):
@@ -51,6 +111,13 @@ def peak_cluster_from_index(bin_edges, smoothed_counts, peak_idx):
         right_idx += 1
 
     return bin_edges[left_idx], bin_edges[right_idx + 1]
+
+
+def peak_band_from_center(peak_center, values_min, values_max, band_width_meters):
+    half_width = band_width_meters / 2
+    z_min = max(values_min, peak_center - half_width)
+    z_max = min(values_max, peak_center + half_width)
+    return z_min, z_max
 
 
 def feature_table_name(path):
@@ -177,6 +244,14 @@ def build_grid(x, y, x_edges, y_edges):
     return grid.T
 
 
+def make_truncated_cmap(name, start=0.25, end=1.0):
+    base_cmap = plt.get_cmap(name)
+    colors = base_cmap(np.linspace(start, end, 256))
+    cmap = LinearSegmentedColormap.from_list(f"{name}_truncated", colors)
+    cmap.set_bad((0, 0, 0, 0))
+    return cmap
+
+
 def plot_geometry_outline(ax, geometries):
     label_added = False
     for geometry in geometries:
@@ -191,19 +266,24 @@ def plot_geometry_outline(ax, geometries):
             label_added = True
 
 
-def main():
-    las = laspy.read(LAS_PATH)
+def process_case(las_path, gpkg_path):
+    bag_id = Path(las_path).stem
+    output_path = f"{bag_id}_peak_grids_overlay.png"
+
+    print(f"\n=== {bag_id} ===")
+
+    las = laspy.read(las_path)
     x = np.asarray(las.x, dtype=float)
     y = np.asarray(las.y, dtype=float)
     z = np.asarray(las.z, dtype=float)
 
-    counts, bin_edges, bin_centers, smoothed_counts, peak_indices = find_top_histogram_peaks(
+    counts, bin_edges, bin_centers, smoothed_counts, candidate_peak_indices, peak_indices = find_top_histogram_peaks(
         z,
         bins=HISTOGRAM_BINS,
         smoothing_window=7,
         min_separation_bins=10,
     )
-    geometries = load_polygon_geometries(GPKG_PATH)
+    geometries = load_polygon_geometries(gpkg_path)
 
     min_x, min_y, max_x, max_y = geometry_bounds(geometries)
     x_edges = np.arange(min_x, max_x + GRID_CELLSIZE, GRID_CELLSIZE)
@@ -217,11 +297,23 @@ def main():
     print(f"Number of points: {len(z)}")
     print(f"Z range: [{np.min(z):.2f}, {np.max(z):.2f}]")
     print(f"Z mean: {np.mean(z):.2f}, std: {np.std(z):.2f}")
+    print("Candidate peaks:")
+    for i, peak_idx in enumerate(sorted(candidate_peak_indices, key=lambda idx: bin_centers[idx]), start=1):
+        print(
+            f"  Candidate {i}: z ~= {bin_centers[peak_idx]:.2f} m, "
+            f"smoothed count {smoothed_counts[peak_idx]:.1f}, raw count {counts[peak_idx]}"
+        )
 
     peak_layers = []
     for i, peak_idx in enumerate(peak_indices, start=1):
-        z_min, z_max = peak_cluster_from_index(bin_edges, smoothed_counts, peak_idx)
-        if np.isclose(z_max, bin_edges[-1]):
+        peak_center = bin_centers[peak_idx]
+        z_min, z_max = peak_band_from_center(
+            peak_center,
+            np.min(z),
+            np.max(z),
+            PEAK_BAND_WIDTH_METERS,
+        )
+        if np.isclose(z_max, np.max(z)):
             mask = (z >= z_min) & (z <= z_max)
         else:
             mask = (z >= z_min) & (z < z_max)
@@ -241,7 +333,7 @@ def main():
         "underpass_top_area": peak_layers[-1][-1],
         "underpass_bottom_area": peak_layers[0][-1],
     }
-    update_gpkg_attributes(GPKG_PATH, underpass_attributes)
+    update_gpkg_attributes(gpkg_path, underpass_attributes)
     print(
         "Updated GPKG attributes: "
         f"underpass_dh={underpass_attributes['underpass_dh']:.2f}, "
@@ -249,10 +341,27 @@ def main():
         f"underpass_bottom_area={underpass_attributes['underpass_bottom_area']:.2f}"
     )
 
-    fig, axes = plt.subplots(1, 1 + len(peak_layers), figsize=(7 * (1 + len(peak_layers)), 7))
+    map_width = max_x - min_x
+    map_height = max_y - min_y
+    map_aspect_ratio = map_width / map_height if map_height > 0 else 1.0
+    map_panel_width_ratio = max(0.7, map_aspect_ratio)
+    width_ratios = [1.2] + [map_panel_width_ratio] * len(peak_layers)
+    fig, axes = plt.subplots(
+        1,
+        1 + len(peak_layers),
+        figsize=(5 * sum(width_ratios), 7),
+        gridspec_kw={"width_ratios": width_ratios, "wspace": 0.06},
+    )
     ax_hist = axes[0]
 
     ax_hist.hist(z, bins=HISTOGRAM_BINS, edgecolor="black", linewidth=0.3)
+    ax_hist.plot(
+        bin_centers,
+        smoothed_counts,
+        color="black",
+        linewidth=2,
+        label="Smoothed histogram",
+    )
     for i, peak_idx, z_min, z_max, _, _ in peak_layers:
         ax_hist.axvline(
             bin_centers[peak_idx],
@@ -268,7 +377,9 @@ def main():
         )
     ax_hist.set_xlabel("Z (m)")
     ax_hist.set_ylabel("Count")
-    ax_hist.set_title("Histogram of Z values")
+    ax_hist.set_title("Histogram of Z values", fontsize=13, pad=8)
+    ax_hist.spines["top"].set_visible(False)
+    ax_hist.spines["right"].set_visible(False)
 
     arrow_y = counts.max() * 0.92
     label_y = counts.max() * 0.97
@@ -291,34 +402,53 @@ def main():
     )
 
     extent = [x_edges[0], x_edges[-1], y_edges[0], y_edges[-1]]
-    color_maps = {1: "Blues", 2: "Oranges"}
+    color_maps = {
+        1: make_truncated_cmap("Blues", start=0.28),
+        2: make_truncated_cmap("Oranges", start=0.30),
+    }
 
-    for ax_map, (i, peak_idx, z_min, z_max, grid, area) in zip(axes[1:], peak_layers):
+    for map_idx, (ax_map, (i, peak_idx, z_min, z_max, grid, area)) in enumerate(
+        zip(axes[1:], peak_layers),
+        start=1,
+    ):
         masked_grid = np.ma.masked_where(grid == 0, grid)
+        ax_map.set_facecolor("#f3f3f3")
         ax_map.imshow(
             masked_grid,
             origin="lower",
             extent=extent,
             cmap=color_maps[i],
-            alpha=0.65,
+            alpha=0.9,
             interpolation="nearest",
         )
         plot_geometry_outline(ax_map, geometries)
         ax_map.set_xlabel("X")
-        ax_map.set_ylabel("Y")
+        if map_idx == 1:
+            ax_map.set_ylabel("Y")
+        else:
+            ax_map.set_ylabel("")
+            ax_map.tick_params(axis="y", which="both", left=False, labelleft=False)
         ax_map.set_title(
             f"Peak {i}: {bin_centers[peak_idx]:.2f} m\n"
-            f"Window [{z_min:.2f}, {z_max:.2f}) | Area {area:.2f} m^2"
+            f"Window [{z_min:.2f}, {z_max:.2f})\n"
+            f"Area {area:.2f} m^2",
+            fontsize=11,
+            pad=8,
         )
         ax_map.set_aspect("equal")
         ax_map.legend(loc="best")
 
-    plt.tight_layout()
-    if "agg" in plt.get_backend().lower():
-        plt.savefig(OUTPUT_PATH, dpi=200)
-        print(f"Saved overlay figure to {OUTPUT_PATH}")
-    else:
-        plt.show()
+    fig.suptitle(bag_id, fontsize=15, y=0.985)
+    fig.subplots_adjust(left=0.05, right=0.99, bottom=0.08, top=0.82)
+    plt.savefig(output_path, dpi=200)
+    print(f"Saved overlay figure to {output_path}")
+    plt.close(fig)
+
+
+def main():
+    # for case in CASES[1:2]:
+    for case in CASES:
+        process_case(case["las_path"], case["gpkg_path"])
 
 
 if __name__ == "__main__":
