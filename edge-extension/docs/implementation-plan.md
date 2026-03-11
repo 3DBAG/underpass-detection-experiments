@@ -1,0 +1,71 @@
+# Implementation Plan
+
+## Goal
+
+Implement robust partial polygon offsetting from split edge GeoJSON inputs:
+
+- `tests/data/exterior_one.geojson`: edges that may move
+- `tests/data/interior_one.geojson`: edges that must remain fixed
+
+The combined linework forms one valid polygon with holes. The library should offset only selected
+boundary segments and rebuild a valid polygon after extending neighboring edges to new
+intersections.
+
+`tests/data/polygon.geojson` is the reference geometry for reconstruction and should be treated as
+the ground truth output for the current fixture set.
+
+## Current State
+
+- GeoJSON feature collection I/O exists.
+- Polygon reconstruction from combined `MultiLineString` fixtures exists.
+- A simple edge-index-based polygon offset exists for already reconstructed polygon shells.
+
+## Phase 1: Reconstruct and Classify Boundary Segments
+
+1. Load both edge datasets and normalize them into individual `LineString` segments.
+2. Rebuild the polygon-with-holes from the combined linework.
+3. Extract oriented boundary rings from the reconstructed polygon.
+4. Snap input segments to the polygon boundary within a small tolerance.
+5. Classify each boundary segment as `movable` or `fixed`.
+
+Deliverable: a ring model that preserves segment order, ring membership, and move/fix labels.
+
+## Phase 2: Offset Movable Segments
+
+1. Represent each ring edge as an infinite supporting line.
+2. Move only `movable` lines along the outward normal of the ring.
+3. Leave `fixed` lines unchanged.
+4. Recompute vertices from adjacent line intersections.
+5. Rebuild each ring from the updated vertices.
+
+Deliverable: updated exterior and interior rings with preserved orientation.
+
+## Phase 3: Validity and Failure Handling
+
+1. Validate ring closure, minimum edge length, and non-parallel neighbor constraints.
+2. Detect self-intersections, ring inversions, and collapsed holes.
+3. Return structured errors when offsets are geometrically impossible.
+4. Add optional tolerance-based snapping for nearly intersecting lines.
+
+Deliverable: predictable behavior for invalid or unstable offset requests.
+
+## Recommended Algorithm Direction
+
+Start with line-based reconstruction because it matches the problem directly and is easy to reason
+about. If concave cases or large offsets become unstable, upgrade to a half-plane intersection or
+polygon clipping approach per ring.
+
+## Testing Plan
+
+- Unit tests on rectangles and L-shaped polygons
+- Fixture tests using `tests/data/*`
+- Exact reconstruction checks against `tests/data/polygon.geojson`
+- Cases with holes, concave corners, and parallel adjacent edges
+- Regression tests for invalid output polygons
+
+## Suggested File Additions
+
+- `src/edge_extension/rings.py`: ring extraction and segment classification
+- `src/edge_extension/offset_linework.py`: partial-offset implementation
+- `tests/test_linework_classification.py`
+- `tests/test_offset_linework.py`
