@@ -323,7 +323,7 @@ def process_case(las_path, gpkg_path):
 
         print(
             f"Peak {i}: z ~= {bin_centers[peak_idx]:.2f} m, "
-            f"window [{z_min:.2f}, {z_max:.2f}), "
+            f"Z range [{z_min:.2f}, {z_max:.2f}), "
             f"points {np.count_nonzero(mask)}, "
             f"area {area:.2f} m^2"
         )
@@ -354,7 +354,13 @@ def process_case(las_path, gpkg_path):
     )
     ax_hist = axes[0]
 
-    ax_hist.hist(z, bins=HISTOGRAM_BINS, edgecolor="black", linewidth=0.3)
+    ax_hist.hist(
+        z,
+        bins=HISTOGRAM_BINS,
+        color="lightgray",
+        edgecolor="black",
+        linewidth=0.3,
+    )
     ax_hist.plot(
         bin_centers,
         smoothed_counts,
@@ -430,8 +436,8 @@ def process_case(las_path, gpkg_path):
             ax_map.tick_params(axis="y", which="both", left=False, labelleft=False)
         ax_map.set_title(
             f"Peak {i}: {bin_centers[peak_idx]:.2f} m\n"
-            f"Window [{z_min:.2f}, {z_max:.2f})\n"
-            f"Area {area:.2f} m^2",
+            f"Z range [{z_min:.2f}, {z_max:.2f})\n"
+            f"Covered area {area:.2f} m^2",
             fontsize=11,
             pad=8,
         )
