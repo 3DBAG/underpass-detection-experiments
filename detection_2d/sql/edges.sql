@@ -1,7 +1,8 @@
 DROP TABLE IF EXISTS underpasses.edges;
-
-CREATE TABLE underpasses.edges AS (
-    SELECT
+CREATE TABLE underpasses.edges AS
+WITH
+    primary_edges AS (
+           SELECT
         un.identificatie,
         ST_Multi(
             ST_CollectionExtract(
@@ -25,13 +26,8 @@ CREATE TABLE underpasses.edges AS (
     JOIN underpasses.bag_bgt_join bbj 
         ON un.identificatie = bbj.identificatie
     WHERE NOT ST_IsEmpty(un.geom)
-);
+    ),
 
-
--- Get summary of exterior edge overlaps per building
-DROP TABLE IF EXISTS underpasses.edge_with_adjacency;
-CREATE TABLE underpasses.edge_with_adjacency AS
-WITH
     adjacent_buildings AS (
         SELECT
             ba.identificatie,
@@ -57,7 +53,6 @@ SELECT
     e.identificatie,
     e.exterior_edges,
     e.interior_edges,
-    ag.adjacent_id,
             ST_Multi(
             ST_CollectionExtract(
                 ST_Intersection(
@@ -69,17 +64,16 @@ SELECT
         ) AS intersection_geom,
         ST_Intersects(e.exterior_edges, ag.adjacent_geom) AS has_intersection
 FROM
-    underpasses.edges e
-    JOIN adjacent_geometries ag ON e.identificatie = ag.identificatie
+    primary_edges e
+    LEFT JOIN adjacent_geometries ag ON e.identificatie = ag.identificatie
 WHERE
     NOT ST_IsEmpty (e.exterior_edges)
 )
 SELECT
     identificatie,
-    exterior_edges,
     interior_edges,
     -- Only union non-empty intersections
-    ST_Union(intersection_geom) FILTER (WHERE NOT ST_IsEmpty(intersection_geom)) AS shared_boundary_edges,
+    ST_Union(intersection_geom) FILTER (WHERE NOT ST_IsEmpty(intersection_geom)) AS shared_edges,
     -- Non-intersection edges (exterior edges not touching adjacent buildings)
     CASE 
         WHEN ST_Union(intersection_geom) FILTER (WHERE NOT ST_IsEmpty(intersection_geom)) IS NOT NULL
@@ -93,8 +87,7 @@ SELECT
             )
         )
         ELSE exterior_edges
-    END AS new_exterior_edges,
-    COUNT(adjacent_id) AS total_adjacent_buildings
+    END AS exterior_edges
 FROM edge_intersections
 GROUP BY identificatie, exterior_edges, interior_edges
 ;
