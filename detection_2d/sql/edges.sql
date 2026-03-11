@@ -26,3 +26,75 @@ CREATE TABLE underpasses.edges AS (
         ON un.identificatie = bbj.identificatie
     WHERE NOT ST_IsEmpty(un.geom)
 );
+
+
+-- Get summary of exterior edge overlaps per building
+DROP TABLE IF EXISTS underpasses.edge_with_adjacency;
+CREATE TABLE underpasses.edge_with_adjacency AS
+WITH
+    adjacent_buildings AS (
+        SELECT
+            ba.identificatie,
+            UNNEST (ba.adjacent_ids) AS adjacent_id
+        FROM
+            building_types.bag_adjacency_3 ba
+        WHERE ba.adjacent_ids IS NOT NULL
+        AND array_length(ba.adjacent_ids, 1) > 0
+    ),
+    adjacent_geometries AS (
+        SELECT
+            ab.identificatie,
+            ab.adjacent_id,
+            bag.geometrie AS adjacent_geom
+        FROM
+            adjacent_buildings ab
+            JOIN lvbag.pandactueelbestaand bag 
+            ON bag.identificatie = ab.adjacent_id
+            WHERE NOT ST_IsEmpty(bag.geometrie)
+    ),
+edge_intersections AS (
+SELECT
+    e.identificatie,
+    e.exterior_edges,
+    e.interior_edges,
+    ag.adjacent_id,
+            ST_Multi(
+            ST_CollectionExtract(
+                ST_Intersection(
+                    e.exterior_edges,
+                    ST_Boundary(ST_Snap(ag.adjacent_geom, e.exterior_edges, 0.03))
+                ),
+                2
+            )
+        ) AS intersection_geom,
+        ST_Intersects(e.exterior_edges, ag.adjacent_geom) AS has_intersection
+FROM
+    underpasses.edges e
+    JOIN adjacent_geometries ag ON e.identificatie = ag.identificatie
+WHERE
+    NOT ST_IsEmpty (e.exterior_edges)
+)
+SELECT
+    identificatie,
+    exterior_edges,
+    interior_edges,
+    -- Only union non-empty intersections
+    ST_Union(intersection_geom) FILTER (WHERE NOT ST_IsEmpty(intersection_geom)) AS shared_boundary_edges,
+    -- Non-intersection edges (exterior edges not touching adjacent buildings)
+    CASE 
+        WHEN ST_Union(intersection_geom) FILTER (WHERE NOT ST_IsEmpty(intersection_geom)) IS NOT NULL
+        THEN ST_Multi(
+            ST_CollectionExtract(
+                ST_Difference(
+                    exterior_edges, 
+                    ST_Union(intersection_geom) FILTER (WHERE NOT ST_IsEmpty(intersection_geom))
+                ), 
+                2
+            )
+        )
+        ELSE exterior_edges
+    END AS new_exterior_edges,
+    COUNT(adjacent_id) AS total_adjacent_buildings
+FROM edge_intersections
+GROUP BY identificatie, exterior_edges, interior_edges
+;
