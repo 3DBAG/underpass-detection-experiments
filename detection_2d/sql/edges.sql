@@ -1,8 +1,8 @@
 DROP TABLE IF EXISTS underpasses.edges;
+
 CREATE TABLE underpasses.edges AS
-WITH
-    primary_edges AS (
-           SELECT
+WITH primary_edges AS (
+    SELECT
         un.identificatie,
         ST_Multi(
             ST_CollectionExtract(
@@ -26,34 +26,31 @@ WITH
     JOIN underpasses.bag_bgt_join bbj 
         ON un.identificatie = bbj.identificatie
     WHERE NOT ST_IsEmpty(un.geom)
-    ),
-
-    adjacent_buildings AS (
-        SELECT
-            ba.identificatie,
-            UNNEST (ba.adjacent_ids) AS adjacent_id
-        FROM
-            building_types.bag_adjacency_3 ba
-        WHERE ba.adjacent_ids IS NOT NULL
+),
+adjacent_buildings AS (
+    SELECT
+        ba.identificatie,
+        UNNEST(ba.adjacent_ids) AS adjacent_id
+    FROM building_types.bag_adjacency_3 ba
+    WHERE ba.adjacent_ids IS NOT NULL
         AND array_length(ba.adjacent_ids, 1) > 0
-    ),
-    adjacent_geometries AS (
-        SELECT
-            ab.identificatie,
-            ab.adjacent_id,
-            bag.geometrie AS adjacent_geom
-        FROM
-            adjacent_buildings ab
-            JOIN lvbag.pandactueelbestaand bag 
-            ON bag.identificatie = ab.adjacent_id
-            WHERE NOT ST_IsEmpty(bag.geometrie)
-    ),
+),
+adjacent_geometries AS (
+    SELECT
+        ab.identificatie,
+        ab.adjacent_id,
+        bag.geometrie AS adjacent_geom
+    FROM adjacent_buildings ab
+    JOIN lvbag.pandactueelbestaand bag 
+        ON bag.identificatie = ab.adjacent_id
+    WHERE NOT ST_IsEmpty(bag.geometrie)
+),
 edge_intersections AS (
-SELECT
-    e.identificatie,
-    e.exterior_edges,
-    e.interior_edges,
-            ST_Multi(
+    SELECT
+        e.identificatie,
+        e.exterior_edges,
+        e.interior_edges,
+        ST_Multi(
             ST_CollectionExtract(
                 ST_Intersection(
                     e.exterior_edges,
@@ -63,11 +60,10 @@ SELECT
             )
         ) AS intersection_geom,
         ST_Intersects(e.exterior_edges, ag.adjacent_geom) AS has_intersection
-FROM
-    primary_edges e
-    LEFT JOIN adjacent_geometries ag ON e.identificatie = ag.identificatie
-WHERE
-    NOT ST_IsEmpty (e.exterior_edges)
+    FROM primary_edges e
+    LEFT JOIN adjacent_geometries ag 
+        ON e.identificatie = ag.identificatie
+    WHERE NOT ST_IsEmpty(e.exterior_edges)
 )
 SELECT
     identificatie,
@@ -89,5 +85,4 @@ SELECT
         ELSE exterior_edges
     END AS exterior_edges
 FROM edge_intersections
-GROUP BY identificatie, exterior_edges, interior_edges
-;
+GROUP BY identificatie, exterior_edges, interior_edges;
