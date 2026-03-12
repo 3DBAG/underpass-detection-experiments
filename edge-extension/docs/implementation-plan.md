@@ -56,7 +56,7 @@ the original polygon.
 
 Start with line-based reconstruction because it matches the problem directly and is easy to reason
 about. If concave cases or large offsets become unstable, upgrade to a half-plane intersection or
-polygon clipping approach per ring.
+boolean patching approach per ring.
 
 ## Testing Plan
 

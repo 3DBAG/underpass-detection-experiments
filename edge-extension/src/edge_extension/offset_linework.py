@@ -3,12 +3,15 @@ from math import isclose
 from math import sqrt
 from pathlib import Path
 
+from shapely.geometry import Point as GeometryPoint
 from shapely.geometry import Polygon
+from shapely.geometry.base import BaseGeometry
 from shapely.geometry.polygon import orient
 
 from edge_extension.geojson import Feature
 from edge_extension.geojson import write_feature_collection
 from edge_extension.rings import BoundaryRing
+from edge_extension.rings import BoundarySegment
 from edge_extension.rings import ClassifiedPolygon
 from edge_extension.rings import Point
 from edge_extension.rings import classify_polygon_from_edge_geojson
@@ -20,6 +23,26 @@ class _OffsetLine:
     direction: Point
 
 
+@dataclass(frozen=True, slots=True)
+class _MovableChain:
+    ring_index: int
+    segment_indices: tuple[int, ...]
+    vertices: tuple[Point, ...]
+    previous_segment_index: int | None
+    next_segment_index: int | None
+    is_full_ring: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _ChainPatch:
+    patch: Polygon
+    sample_point: Point
+
+
+class _GeometryOffsetError(ValueError):
+    """Raised when a requested partial offset cannot be resolved safely."""
+
+
 def offset_polygon_from_edge_geojson(
     *,
     movable_edges_path: Path,
@@ -27,6 +50,7 @@ def offset_polygon_from_edge_geojson(
     distance: float,
     output_path: Path | None = None,
     tolerance: float = 1e-6,
+    strategy: str = "boolean_patch",
 ) -> Polygon:
     classified_polygon = classify_polygon_from_edge_geojson(
         movable_edges_path=movable_edges_path,
@@ -37,13 +61,17 @@ def offset_polygon_from_edge_geojson(
         classified_polygon,
         distance=distance,
         tolerance=tolerance,
+        strategy=strategy,
     )
     if output_path is not None:
         write_feature_collection(
             [
                 Feature(
                     geometry=polygon,
-                    properties={"offset_distance": distance},
+                    properties={
+                        "offset_distance": distance,
+                        "strategy": strategy,
+                    },
                 )
             ],
             path=output_path,
@@ -56,15 +84,89 @@ def offset_polygon_from_classified_polygon(
     *,
     distance: float,
     tolerance: float = 1e-6,
+    strategy: str = "boolean_patch",
 ) -> Polygon:
     if tolerance <= 0:
         raise ValueError("Offset tolerance must be greater than zero.")
 
-    if classified_polygon.polygon.is_empty or isclose(distance, 0.0, abs_tol=tolerance):
+    original_polygon = classified_polygon.polygon
+    if original_polygon.is_empty or isclose(distance, 0.0, abs_tol=tolerance):
+        return original_polygon
+
+    if strategy == "boolean_patch":
+        try:
+            updated = _offset_polygon_with_boolean_patches(
+                classified_polygon,
+                distance=distance,
+                tolerance=tolerance,
+            )
+            return _normalize_polygon_result(updated, tolerance=tolerance)
+        except _GeometryOffsetError:
+            return original_polygon
+
+    if strategy == "linework":
+        try:
+            updated = _offset_polygon_with_linework(
+                classified_polygon,
+                distance=distance,
+                tolerance=tolerance,
+            )
+            return _normalize_polygon_result(updated, tolerance=tolerance)
+        except _GeometryOffsetError:
+            return original_polygon
+
+    raise ValueError("Unknown offset strategy. Expected 'boolean_patch' or 'linework'.")
+
+
+def _offset_polygon_with_boolean_patches(
+    classified_polygon: ClassifiedPolygon,
+    *,
+    distance: float,
+    tolerance: float,
+) -> Polygon:
+    chains_by_ring = [
+        _build_movable_chains(ring)
+        for ring in classified_polygon.rings
+    ]
+    if not any(chains_by_ring):
         return classified_polygon.polygon
 
+    if any(chain.is_full_ring for chains in chains_by_ring for chain in chains):
+        return _offset_polygon_with_linework(
+            classified_polygon,
+            distance=distance,
+            tolerance=tolerance,
+        )
+
+    polygon = classified_polygon.polygon
+    for ring, chains in zip(classified_polygon.rings, chains_by_ring, strict=True):
+        for chain in chains:
+            chain_patch = _build_chain_patch(
+                ring=ring,
+                chain=chain,
+                distance=distance,
+                tolerance=tolerance,
+            )
+            if chain_patch is None:
+                continue
+            polygon = _apply_chain_patch(
+                polygon=polygon,
+                original_polygon=classified_polygon.polygon,
+                chain_patch=chain_patch,
+                tolerance=tolerance,
+            )
+
+    return polygon
+
+
+def _offset_polygon_with_linework(
+    classified_polygon: ClassifiedPolygon,
+    *,
+    distance: float,
+    tolerance: float,
+) -> Polygon:
     rebuilt_rings = [
-        _offset_ring(
+        _offset_ring_with_support_lines(
             ring,
             distance=distance,
             tolerance=tolerance,
@@ -73,22 +175,17 @@ def offset_polygon_from_classified_polygon(
     ]
     shell = rebuilt_rings[0]
     holes = rebuilt_rings[1:]
-
-    polygon = orient(Polygon(shell=shell, holes=holes), sign=1.0)
-    if not polygon.is_valid:
-        raise ValueError("Offset edges produced an invalid polygon.")
-
-    return polygon
+    return Polygon(shell=shell, holes=holes)
 
 
-def _offset_ring(
+def _offset_ring_with_support_lines(
     ring: BoundaryRing,
     *,
     distance: float,
     tolerance: float,
 ) -> list[Point]:
     if len(ring.vertices) < 3:
-        raise ValueError("Polygon rings must contain at least three vertices.")
+        raise _GeometryOffsetError("Polygon rings must contain at least three vertices.")
 
     lines = [
         _build_offset_line(
@@ -111,6 +208,149 @@ def _offset_ring(
     ]
 
 
+def _build_movable_chains(ring: BoundaryRing) -> tuple[_MovableChain, ...]:
+    movable_count = sum(1 for segment in ring.segments if segment.is_movable)
+    if movable_count == 0:
+        return ()
+
+    segment_count = len(ring.segments)
+    if movable_count == segment_count:
+        return (
+            _MovableChain(
+                ring_index=ring.ring_index,
+                segment_indices=tuple(range(segment_count)),
+                vertices=ring.vertices + (ring.vertices[0],),
+                previous_segment_index=None,
+                next_segment_index=None,
+                is_full_ring=True,
+            ),
+        )
+
+    chains: list[_MovableChain] = []
+    for index, segment in enumerate(ring.segments):
+        previous_segment = ring.segments[index - 1]
+        if not segment.is_movable or previous_segment.is_movable:
+            continue
+
+        segment_indices: list[int] = []
+        vertices = [segment.start]
+        current_index = index
+        while ring.segments[current_index].is_movable:
+            current_segment = ring.segments[current_index]
+            segment_indices.append(current_index)
+            vertices.append(current_segment.end)
+            current_index = (current_index + 1) % segment_count
+
+        chains.append(
+            _MovableChain(
+                ring_index=ring.ring_index,
+                segment_indices=tuple(segment_indices),
+                vertices=tuple(vertices),
+                previous_segment_index=(index - 1) % segment_count,
+                next_segment_index=current_index,
+                is_full_ring=False,
+            )
+        )
+
+    return tuple(chains)
+
+
+def _build_chain_patch(
+    *,
+    ring: BoundaryRing,
+    chain: _MovableChain,
+    distance: float,
+    tolerance: float,
+) -> _ChainPatch | None:
+    if chain.is_full_ring or chain.previous_segment_index is None or chain.next_segment_index is None:
+        raise _GeometryOffsetError(
+            "Boolean patching requires fixed edges on both sides of a movable chain."
+        )
+
+    previous_segment = ring.segments[chain.previous_segment_index]
+    next_segment = ring.segments[chain.next_segment_index]
+    movable_segments = [ring.segments[index] for index in chain.segment_indices]
+    if not movable_segments:
+        return None
+
+    previous_line = _build_offset_line(
+        start=previous_segment.start,
+        end=previous_segment.end,
+        distance=0.0,
+        is_counter_clockwise=ring.is_counter_clockwise,
+    )
+    shifted_lines = [
+        _build_offset_line(
+            start=segment.start,
+            end=segment.end,
+            distance=distance,
+            is_counter_clockwise=ring.is_counter_clockwise,
+        )
+        for segment in movable_segments
+    ]
+    next_line = _build_offset_line(
+        start=next_segment.start,
+        end=next_segment.end,
+        distance=0.0,
+        is_counter_clockwise=ring.is_counter_clockwise,
+    )
+
+    replacement_vertices = [
+        _resolve_vertex(
+            original_vertex=chain.vertices[0],
+            previous_line=previous_line,
+            current_line=shifted_lines[0],
+            tolerance=tolerance,
+        )
+    ]
+    for index in range(1, len(shifted_lines)):
+        replacement_vertices.append(
+            _resolve_vertex(
+                original_vertex=chain.vertices[index],
+                previous_line=shifted_lines[index - 1],
+                current_line=shifted_lines[index],
+                tolerance=tolerance,
+            )
+        )
+    replacement_vertices.append(
+        _resolve_vertex(
+            original_vertex=chain.vertices[-1],
+            previous_line=shifted_lines[-1],
+            current_line=next_line,
+            tolerance=tolerance,
+        )
+    )
+
+    patch = Polygon([*chain.vertices, *reversed(replacement_vertices)])
+    if patch.is_empty or patch.area <= tolerance:
+        return None
+    if not patch.is_valid:
+        raise _GeometryOffsetError("Patch polygon is invalid.")
+
+    sample_point = _build_patch_sample_point(
+        segment=movable_segments[0],
+        distance=distance,
+        is_counter_clockwise=ring.is_counter_clockwise,
+    )
+    return _ChainPatch(patch=patch, sample_point=sample_point)
+
+
+def _apply_chain_patch(
+    *,
+    polygon: Polygon,
+    original_polygon: Polygon,
+    chain_patch: _ChainPatch,
+    tolerance: float,
+) -> Polygon:
+    sample_point = GeometryPoint(chain_patch.sample_point)
+    if original_polygon.covers(sample_point):
+        updated_geometry = polygon.difference(chain_patch.patch)
+    else:
+        updated_geometry = polygon.union(chain_patch.patch)
+
+    return _normalize_polygon_result(updated_geometry, tolerance=tolerance)
+
+
 def _build_offset_line(
     *,
     start: Point,
@@ -121,13 +361,13 @@ def _build_offset_line(
     direction = (end[0] - start[0], end[1] - start[1])
     length = sqrt((direction[0] ** 2) + (direction[1] ** 2))
     if isclose(length, 0.0):
-        raise ValueError("Polygon contains a zero-length edge.")
+        raise _GeometryOffsetError("Polygon contains a zero-length edge.")
 
     unit_direction = (direction[0] / length, direction[1] / length)
-    if is_counter_clockwise:
-        outward_normal = (unit_direction[1], -unit_direction[0])
-    else:
-        outward_normal = (-unit_direction[1], unit_direction[0])
+    outward_normal = _build_outward_normal(
+        unit_direction=unit_direction,
+        is_counter_clockwise=is_counter_clockwise,
+    )
 
     return _OffsetLine(
         point=(
@@ -158,9 +398,73 @@ def _resolve_vertex(
         )
 
     if not _parallel_lines_are_compatible(previous_line, current_line, tolerance=tolerance):
-        raise ValueError("Adjacent offset edges are parallel and cannot be reconnected.")
+        raise _GeometryOffsetError("Adjacent offset edges are parallel and cannot be reconnected.")
 
     return _project_point_onto_line(original_vertex, previous_line)
+
+
+def _normalize_polygon_result(
+    geometry: BaseGeometry,
+    *,
+    tolerance: float = 1e-6,
+) -> Polygon:
+    if geometry.is_empty:
+        raise _GeometryOffsetError("Offset produced an empty geometry.")
+
+    if isinstance(geometry, Polygon):
+        polygon = geometry
+    elif geometry.geom_type == "MultiPolygon" and len(geometry.geoms) == 1:
+        candidate = geometry.geoms[0]
+        if not isinstance(candidate, Polygon):
+            raise _GeometryOffsetError("Offset produced a non-polygon geometry.")
+        polygon = candidate
+    else:
+        raise _GeometryOffsetError("Offset produced multiple polygon parts.")
+
+    normalized_polygon = orient(polygon, sign=1.0)
+    if not normalized_polygon.is_valid:
+        raise _GeometryOffsetError("Offset produced an invalid polygon.")
+    if normalized_polygon.area <= tolerance:
+        raise _GeometryOffsetError("Offset polygon collapsed below the minimum area.")
+    return normalized_polygon
+
+
+def _build_patch_sample_point(
+    *,
+    segment: BoundarySegment,
+    distance: float,
+    is_counter_clockwise: bool,
+) -> Point:
+    start = segment.start
+    end = segment.end
+    midpoint = (
+        (start[0] + end[0]) / 2.0,
+        (start[1] + end[1]) / 2.0,
+    )
+    direction = (end[0] - start[0], end[1] - start[1])
+    length = sqrt((direction[0] ** 2) + (direction[1] ** 2))
+    if isclose(length, 0.0):
+        raise _GeometryOffsetError("Polygon contains a zero-length edge.")
+
+    unit_direction = (direction[0] / length, direction[1] / length)
+    outward_normal = _build_outward_normal(
+        unit_direction=unit_direction,
+        is_counter_clockwise=is_counter_clockwise,
+    )
+    return (
+        midpoint[0] + (outward_normal[0] * (distance / 2.0)),
+        midpoint[1] + (outward_normal[1] * (distance / 2.0)),
+    )
+
+
+def _build_outward_normal(
+    *,
+    unit_direction: Point,
+    is_counter_clockwise: bool,
+) -> Point:
+    if is_counter_clockwise:
+        return (unit_direction[1], -unit_direction[0])
+    return (-unit_direction[1], unit_direction[0])
 
 
 def _parallel_lines_are_compatible(

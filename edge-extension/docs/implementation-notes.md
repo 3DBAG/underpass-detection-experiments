@@ -48,3 +48,70 @@
 - `uv run pytest` passes with the new classifier and linework-offset tests.
 - `uv run ruff check` passes after the implementation landed.
 - The fixture-driven offset path writes GeoJSON output into `tests/output`.
+
+## 2026-03-12
+
+### Boolean Patching Upgrade Direction
+
+- Prefer a per-chain patch model over a full-ring rebuild.
+- Group consecutive movable boundary segments into one `movable chain` and compute one patch
+  polygon per chain.
+- Apply each patch to the original polygon material with boolean operations instead of manually
+  stitching the entire output boundary.
+
+### Proposed Geometry Pipeline
+
+- Reconstruct and classify the input polygon as the current implementation already does.
+- For each ring, collapse consecutive movable segments into chain objects that also record the
+  previous and next fixed segments.
+- Shift each movable segment along its polygon-outward normal by the requested distance.
+- Build a replacement chain from support-line intersections:
+  - start vertex = previous fixed line with first shifted line
+  - interior vertices = adjacent shifted-line intersections
+  - end vertex = last shifted line with next fixed line
+- Form a patch polygon from the original chain path, the replacement chain path, and the two end
+  connectors.
+
+### Boolean Application Rule
+
+- Determine whether the patch adds or removes polygon material with a midpoint containment test on
+  the shifted chain.
+- If the shifted chain lies outside the original polygon material, apply `polygon.union(patch)`.
+- If the shifted chain lies inside the original polygon material, apply
+  `polygon.difference(patch)`.
+- After each patch, require a single valid polygon result; if invalid, fall back to the original
+  input polygon.
+
+### Suggested Module Shape
+
+- Add a chain model in `src/edge_extension/rings.py` so classification can expose grouped movable
+  runs directly.
+- Add patch builders in `src/edge_extension/offset_linework.py` instead of replacing the current
+  API surface.
+- Keep public entry points explicit and keyword-driven, for example
+  `offset_polygon_from_edge_geojson(..., strategy="linework" | "boolean_patch")`.
+
+### Expected Failure Modes
+
+- Nearly parallel start or end junctions may create numerically unstable patch vertices.
+- A patch may overlap unrelated polygon regions in highly concave cases.
+- Boolean operations may yield a `MultiPolygon` when a single polygon is required.
+- Any of the above should trigger the documented fallback to the original input polygon.
+
+### Implemented Boolean Patch Path
+
+- `src/edge_extension/offset_linework.py` now uses `strategy="boolean_patch"` by default.
+- Consecutive movable segments are grouped into per-ring chains before any geometry update is
+  attempted.
+- Each chain builds one patch polygon from the original chain, the shifted replacement chain, and
+  the implicit end connectors formed by the closed patch boundary.
+- The patch is applied with `union` or `difference` based on whether a midpoint sample along the
+  shifted chain falls outside or inside the original polygon material.
+- Any empty, invalid, or multi-part boolean result raises an internal geometry error and causes the
+  public API to return the original input polygon.
+
+### Compatibility Notes
+
+- The previous support-line reconstruction path remains available as `strategy="linework"`.
+- Fully movable rings currently fall back to the linework path because the boolean patch model
+  needs fixed anchor edges at both ends of a movable chain.

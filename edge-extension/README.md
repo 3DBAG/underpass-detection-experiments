@@ -14,7 +14,8 @@ The current implementation keeps the project intentionally small:
 - operate on `shapely` polygons
 - offset selected exterior edges by moving each edge along its outward perpendicular
 - offset selected linework segments directly from split movable/fixed GeoJSON inputs
-- rebuild the polygon by intersecting adjacent supporting lines
+- rebuild the polygon with boolean patching by default
+- fall back to the original polygon if an offset result is invalid
 
 ## Install
 
@@ -45,17 +46,15 @@ expanded = offset_polygon_from_edge_geojson(
 
 ## Algorithm Note
 
-The implemented approach is simple and works well for straightforward polygons and split edge
-fixtures:
+The default implementation uses a boolean patch workflow:
 
-1. Treat every polygon edge as an infinite supporting line.
-2. Reconstruct and classify boundary segments from the supplied movable/fixed linework.
-3. Move only the movable supporting lines along their outward normals.
-4. Keep fixed edges in place.
-5. Recompute each vertex as the intersection of two adjacent lines.
+1. Reconstruct and classify boundary segments from the supplied movable/fixed linework.
+2. Group consecutive movable segments into chains.
+3. Build a patch polygon between the original chain and its shifted replacement chain.
+4. Apply each patch with `union` or `difference` against the original polygon material.
+5. Return the original polygon if the boolean result is invalid.
 
-That directly handles the "extend open edges until they intersect again" part of the problem.
+The previous support-line reconstruction path is still available with `strategy="linework"`.
 
-For more difficult cases, a more robust next step would be a constrained half-plane intersection
-approach or a straight-skeleton-style reconstruction for concave polygons, very large offsets, and
-polygons with holes that may collapse or self-intersect.
+The boolean patch path is more robust for disconnected movable edge runs, holes, and cases where
+local corner stitching is not enough.
