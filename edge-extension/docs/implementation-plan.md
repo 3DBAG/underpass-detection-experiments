@@ -44,10 +44,13 @@ Deliverable: updated exterior and interior rings with preserved orientation.
 
 1. Validate ring closure, minimum edge length, and non-parallel neighbor constraints.
 2. Detect self-intersections, ring inversions, and collapsed holes.
-3. Return structured errors when offsets are geometrically impossible.
-4. Add optional tolerance-based snapping for nearly intersecting lines.
+3. Require the final output polygon to pass `.is_valid`.
+4. If the extended polygon is invalid, return the original input polygon instead of the offset result.
+5. Return structured errors when offsets are geometrically impossible.
+6. Add optional tolerance-based snapping for nearly intersecting lines.
 
-Deliverable: predictable behavior for invalid or unstable offset requests.
+Deliverable: predictable behavior for invalid or unstable offset requests, with a safe fallback to
+the original polygon.
 
 ## Recommended Algorithm Direction
 
@@ -61,7 +64,7 @@ polygon clipping approach per ring.
 - Fixture tests using `tests/data/*`
 - Exact reconstruction checks against `tests/data/polygon.geojson`
 - Cases with holes, concave corners, and parallel adjacent edges
-- Regression tests for invalid output polygons
+- Regression tests that confirm invalid offset results fall back to the original input polygon
 
 ## Suggested File Additions
 
