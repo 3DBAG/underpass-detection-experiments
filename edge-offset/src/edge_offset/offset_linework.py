@@ -16,6 +16,8 @@ from edge_offset.rings import ClassifiedPolygon
 from edge_offset.rings import Point
 from edge_offset.rings import classify_polygon_from_edge_geojson
 
+_DEFAULT_MITER_LIMIT = 10.0
+
 
 @dataclass(frozen=True, slots=True)
 class _OffsetLine:
@@ -196,15 +198,40 @@ def _offset_ring_with_support_lines(
         for segment in ring.segments
     ]
 
-    return [
-        _resolve_vertex(
-            original_vertex=ring.vertices[index],
-            previous_line=lines[index - 1],
-            current_line=lines[index],
+    rebuilt_vertices: list[Point] = []
+    for index in range(len(lines)):
+        previous_index = index - 1
+        effective_distance = (
+            distance
+            if ring.segments[previous_index].is_movable or ring.segments[index].is_movable
+            else 0.0
+        )
+        _extend_unique_points(
+            rebuilt_vertices,
+            _resolve_join_vertices(
+                original_vertex=ring.vertices[index],
+                previous_line=lines[previous_index],
+                current_line=lines[index],
+                fallback_points=(
+                    _project_point_onto_line(
+                        ring.segments[previous_index].end,
+                        lines[previous_index],
+                    ),
+                    _project_point_onto_line(
+                        ring.segments[index].start,
+                        lines[index],
+                    ),
+                ),
+                distance=effective_distance,
+                tolerance=tolerance,
+            ),
             tolerance=tolerance,
         )
-        for index in range(len(lines))
-    ]
+
+    if len(rebuilt_vertices) < 3:
+        raise _GeometryOffsetError("Offset ring collapsed below three vertices.")
+
+    return rebuilt_vertices
 
 
 def _build_movable_chains(ring: BoundaryRing) -> tuple[_MovableChain, ...]:
@@ -298,30 +325,14 @@ def _build_chain_patch(
         is_counter_clockwise=ring.is_counter_clockwise,
     )
 
-    replacement_vertices = [
-        _resolve_vertex(
-            original_vertex=chain.vertices[0],
-            previous_line=previous_line,
-            current_line=shifted_lines[0],
-            tolerance=tolerance,
-        )
-    ]
-    for index in range(1, len(shifted_lines)):
-        replacement_vertices.append(
-            _resolve_vertex(
-                original_vertex=chain.vertices[index],
-                previous_line=shifted_lines[index - 1],
-                current_line=shifted_lines[index],
-                tolerance=tolerance,
-            )
-        )
-    replacement_vertices.append(
-        _resolve_vertex(
-            original_vertex=chain.vertices[-1],
-            previous_line=shifted_lines[-1],
-            current_line=next_line,
-            tolerance=tolerance,
-        )
+    replacement_vertices = _build_replacement_vertices(
+        chain_vertices=chain.vertices,
+        movable_segments=tuple(movable_segments),
+        shifted_lines=tuple(shifted_lines),
+        previous_line=previous_line,
+        next_line=next_line,
+        distance=distance,
+        tolerance=tolerance,
     )
 
     patch = Polygon([*chain.vertices, *reversed(replacement_vertices)])
@@ -336,6 +347,79 @@ def _build_chain_patch(
         is_counter_clockwise=ring.is_counter_clockwise,
     )
     return _ChainPatch(patch=patch, sample_point=sample_point)
+
+
+def _build_replacement_vertices(
+    *,
+    chain_vertices: tuple[Point, ...],
+    movable_segments: tuple[BoundarySegment, ...],
+    shifted_lines: tuple[_OffsetLine, ...],
+    previous_line: _OffsetLine,
+    next_line: _OffsetLine,
+    distance: float,
+    tolerance: float,
+) -> tuple[Point, ...]:
+    if not shifted_lines:
+        raise _GeometryOffsetError("Movable chains must contain at least one segment.")
+
+    replacement_vertices: list[Point] = []
+    _extend_unique_points(
+        replacement_vertices,
+        _resolve_join_vertices(
+            original_vertex=chain_vertices[0],
+            previous_line=previous_line,
+            current_line=shifted_lines[0],
+            fallback_points=(
+                _project_point_onto_line(chain_vertices[0], shifted_lines[0]),
+            ),
+            distance=distance,
+            tolerance=tolerance,
+        ),
+        tolerance=tolerance,
+    )
+
+    for index in range(1, len(shifted_lines)):
+        _extend_unique_points(
+            replacement_vertices,
+            _resolve_join_vertices(
+                original_vertex=chain_vertices[index],
+                previous_line=shifted_lines[index - 1],
+                current_line=shifted_lines[index],
+                fallback_points=(
+                    _project_point_onto_line(
+                        movable_segments[index - 1].end,
+                        shifted_lines[index - 1],
+                    ),
+                    _project_point_onto_line(
+                        movable_segments[index].start,
+                        shifted_lines[index],
+                    ),
+                ),
+                distance=distance,
+                tolerance=tolerance,
+            ),
+            tolerance=tolerance,
+        )
+
+    _extend_unique_points(
+        replacement_vertices,
+        _resolve_join_vertices(
+            original_vertex=chain_vertices[-1],
+            previous_line=shifted_lines[-1],
+            current_line=next_line,
+            fallback_points=(
+                _project_point_onto_line(chain_vertices[-1], shifted_lines[-1]),
+            ),
+            distance=distance,
+            tolerance=tolerance,
+        ),
+        tolerance=tolerance,
+    )
+
+    if len(replacement_vertices) < 2:
+        raise _GeometryOffsetError("Replacement chain collapsed below two vertices.")
+
+    return tuple(replacement_vertices)
 
 
 def _apply_chain_patch(
@@ -408,6 +492,31 @@ def _resolve_vertex(
         )
 
     return _project_point_onto_line(original_vertex, previous_line)
+
+
+def _resolve_join_vertices(
+    *,
+    original_vertex: Point,
+    previous_line: _OffsetLine,
+    current_line: _OffsetLine,
+    fallback_points: tuple[Point, ...],
+    distance: float,
+    tolerance: float,
+) -> tuple[Point, ...]:
+    resolved_vertex = _resolve_vertex(
+        original_vertex=original_vertex,
+        previous_line=previous_line,
+        current_line=current_line,
+        tolerance=tolerance,
+    )
+    if _is_within_miter_limit(
+        original_vertex=original_vertex,
+        resolved_vertex=resolved_vertex,
+        distance=distance,
+        tolerance=tolerance,
+    ):
+        return (resolved_vertex,)
+    return fallback_points
 
 
 def _normalize_polygon_result(
@@ -487,6 +596,35 @@ def _parallel_lines_are_compatible(
     return isclose(_cross(delta, first.direction), 0.0, abs_tol=tolerance)
 
 
+def _is_within_miter_limit(
+    *,
+    original_vertex: Point,
+    resolved_vertex: Point,
+    distance: float,
+    tolerance: float,
+) -> bool:
+    offset_distance = abs(distance)
+    if isclose(offset_distance, 0.0, abs_tol=tolerance):
+        return True
+
+    return (
+        _distance_between_points(original_vertex, resolved_vertex)
+        <= max(offset_distance * _DEFAULT_MITER_LIMIT, tolerance)
+    )
+
+
+def _extend_unique_points(
+    points: list[Point],
+    new_points: tuple[Point, ...],
+    *,
+    tolerance: float,
+) -> None:
+    for point in new_points:
+        if points and _points_are_close(points[-1], point, tolerance=tolerance):
+            continue
+        points.append(point)
+
+
 def _project_point_onto_line(point: Point, line: _OffsetLine) -> Point:
     delta = (
         point[0] - line.point[0],
@@ -503,5 +641,13 @@ def _cross(first: Point, second: Point) -> float:
     return (first[0] * second[1]) - (first[1] * second[0])
 
 
+def _distance_between_points(first: Point, second: Point) -> float:
+    return sqrt(((first[0] - second[0]) ** 2) + ((first[1] - second[1]) ** 2))
+
+
 def _dot(first: Point, second: Point) -> float:
     return (first[0] * second[0]) + (first[1] * second[1])
+
+
+def _points_are_close(first: Point, second: Point, *, tolerance: float) -> bool:
+    return _distance_between_points(first, second) <= tolerance

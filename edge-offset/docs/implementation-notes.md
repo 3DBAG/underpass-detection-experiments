@@ -132,3 +132,34 @@
 - `uv sync` installs `psycopg` into the project environment.
 - `uv run pytest` passes with the new PostGIS adapter tests.
 - `uv run ruff check .` passes after the database-backed export path landed.
+
+### Near-Parallel Spike Fix
+
+- Two live database rows produced incorrect offset spikes:
+  `identificatie='NL.IMBAG.Pand.0363100012165490', poly_id=118` and
+  `identificatie='NL.IMBAG.Pand.0363100012165490', poly_id=119`.
+- Both failures came from a near-parallel join between a movable chain edge and its neighboring
+  fixed edge.
+- The previous implementation accepted the infinite-line intersection at that join, which created a
+  very long miter vertex far away from the original building footprint even for a `0.25` meter
+  offset request.
+
+### Implemented Join Limit
+
+- Add a miter limit to line-based corner resolution in `src/edge_offset/offset_linework.py`.
+- If the resolved join vertex lands more than `10x` the requested offset distance away from the
+  original polygon vertex, do not use that infinite-line intersection.
+- Instead, fall back to a bevel-style join formed from the projected endpoints of the shifted
+  segments.
+- Apply the same safeguard in both the default `strategy="boolean_patch"` path and the legacy
+  `strategy="linework"` path so both public APIs remain consistent.
+
+### Regression Coverage
+
+- Export the failing live database rows into:
+  - `tests/data/pand_0363100012165490_poly_118_movable.geojson`
+  - `tests/data/pand_0363100012165490_poly_118_fixed.geojson`
+  - `tests/data/pand_0363100012165490_poly_119_movable.geojson`
+  - `tests/data/pand_0363100012165490_poly_119_fixed.geojson`
+- Add regression tests in `tests/test_offset_linework.py` that confirm both strategies keep the
+  offset geometry local to the source polygon instead of producing a long spike.
