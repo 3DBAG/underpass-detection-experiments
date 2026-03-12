@@ -209,7 +209,7 @@ def visualize_critical_walls(gdf_critical_walls):
     plotter.show()
 
 
-def infere_image_visibility(gdf_image_footprints, gdf_critical_walls):
+def infere_image_visibility(gdf_image_footprints, gdf_critical_walls, theta):
 
    # Intersect image footprints with critical walls
     gdf_image_footprints = gdf_image_footprints.to_crs(gdf_critical_walls.crs)
@@ -228,10 +228,11 @@ def infere_image_visibility(gdf_image_footprints, gdf_critical_walls):
 
     gdf_image_visibility = gdf_image_visibility[['image_id', 'wall_id', 'camera_x', 'camera_y', 'camera_z']].rename(columns={'wall_id': 'visible_walls'})
 
-    # Check for the visibility of the walls, remove if not visible. One criterion: wall plane normal points towards camera plane
-    # Other criteria to explore: angle bteween camera plane and facade less than a threshold; occlusion by other buildings
-    # Create a column to store cosine between facade and camera plane. Later used for height correction.
-    gdf_image_visibility['cos_theta'] = None
+    # Check for the visibility of the walls, remove if not visible. The two criterion are the following:
+    # 1) The wall normal should face the camera
+    # 2) The angle between the wall normal and the and the camera plane normal should be less than a threshold theta (remove too oblique views)
+    # SUGGESTION: explore other criteria such as facade occlusion by other objects
+
     for idx, row in gdf_image_visibility.iterrows():
 
         wall_ids = row['visible_walls']
@@ -240,7 +241,6 @@ def infere_image_visibility(gdf_image_footprints, gdf_critical_walls):
         camera_z = row['camera_z']
 
         filtered_walls = []
-        cos_theta_list = []
         for wall_id in wall_ids:
             # Get 3D geometry of the wall to calculate normal
             wall_geom_3d = gdf_critical_walls[gdf_critical_walls['wall_id'] == wall_id]['geometry'].iloc[0]
@@ -270,28 +270,14 @@ def infere_image_visibility(gdf_image_footprints, gdf_critical_walls):
             if v_norm != 0:
                 v = v / v_norm
 
-            cos_horizontal_angle = np.abs(np.dot(wall_normal, v))
-
-            # Compute wall vertical direction
-            bottom = np.array(coords[0])
-            top = np.array(coords[1])
-            wall_vertical = top - bottom
-            wall_vertical_norm = np.linalg.norm(wall_vertical)
-            if wall_vertical_norm != 0:
-                wall_vertical = wall_vertical / wall_vertical_norm
-
-            cos_vertical_angle = np.abs(np.dot(wall_vertical, v))
-
-            cos_theta = cos_horizontal_angle * cos_vertical_angle
-
             # Perform dot product test. Remove if wall faces away the camera (<= 0)
             dot_product = np.dot(wall_normal, v)
-            if dot_product < 0:
+            angle_rad = np.arccos(np.clip(abs(dot_product), -1.0, 1.0))
+            angle_deg = np.degrees(angle_rad)
+            if dot_product < 0 and angle_deg < theta:
                 filtered_walls.append(wall_id)
-                cos_theta_list.append(cos_vertical_angle)
 
         gdf_image_visibility.at[idx, 'visible_walls'] = filtered_walls
-        gdf_image_visibility.at[idx, 'cos_theta'] = cos_theta_list
 
     return gdf_image_visibility
     

@@ -82,7 +82,7 @@ for filename in os.listdir(tiles_directory):
     gdf_critical_walls = data_preprocessing.find_critical_walls(gdf_critical_segments, 
                                                                 gdf_building_3d, 
                                                                 buf_tol=0.5,
-                                                                extend_length=1)
+                                                                extend_length=0)
     
     # print("Critical walls table: \n", gdf_critical_walls.head(), "\n")
     # Visualize critical walls in 3d
@@ -92,7 +92,8 @@ for filename in os.listdir(tiles_directory):
     # 6. CONSTRUCT IMAGE - WALL VISIBILITY TABLE (INTERSECTION OF CRITICAL WALLS WITH IMAGE FOOTPRINTS)
     # ----------------------------------
     gdf_image_visibility = data_preprocessing.infere_image_visibility(gdf_image_footprints, 
-                                                                      gdf_critical_walls)
+                                                                      gdf_critical_walls,
+                                                                      theta=70)
 
     print("Selected images table: \n", gdf_image_visibility.head(), "\n")
 
@@ -123,7 +124,7 @@ for filename in os.listdir(tiles_directory):
                                                       df_camera_parameters, 
                                                       gdf_critical_walls)
         # Visualize image with projected walls
-        # perspective_projection.display_image(rectangles_2d, oblique_image)
+        perspective_projection.display_image(rectangles_2d, oblique_image)
 
         # ----------------------------------
         # 8. EXTRACT FACADE TEXTURE FROM EVERY PROJECTED WALL
@@ -133,7 +134,7 @@ for filename in os.listdir(tiles_directory):
             facade_image = facade_extraction.extract_facade(rect_2d, oblique_image)
 
             # Display facade image
-            facade_extraction.display_facade_image(facade_image)
+            # facade_extraction.display_facade_image(facade_image)
 
             # ----------------------------------
             # 9. ESTIMATE UNDERPASS HEIGHT APPLYING SELECTED METHOD

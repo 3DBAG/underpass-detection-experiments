@@ -71,7 +71,7 @@ def apply_cc_method(facade_image, facade_height, min_height, ground_dist, top_di
     # plt.title("Computed edges")
     # plt.show()
 
-    # Apply morphology
+    # Apply morphology to close edges and create more complete contours
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
     edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
     # plt.imshow(edges)
@@ -153,7 +153,7 @@ def apply_depth_method(facade_image, facade_height, depth_map_model, k):
 
     depth_map = depth_map_model.infer_image(facade_image.copy())
 
-    # plt.imshow(depth)
+    # plt.imshow(depth_map)
     # plt.title("Predicted Depth Map")
     # plt.show()
 
@@ -187,7 +187,6 @@ def apply_depth_method(facade_image, facade_height, depth_map_model, k):
 
     # plt.imshow(segmented)
     # plt.title("Depth Clusters")
-    # plt.colorbar()
     # plt.show()
 
     # Deepest cluster = cluster with largest center value
@@ -245,8 +244,7 @@ def apply_unet_method(facade_image, facade_height, unet_model, device):
     # Convert mask to uint8 image
     mask = (pred_mask.squeeze().numpy() * 255).astype(np.uint8)
 
-    # plt.imshow(mask, cmap='gray')  
-    # plt.axis('off')                 
+    # plt.imshow(mask, cmap='gray')                 
     # plt.title("Predicted Mask")
     # plt.show()
 
@@ -257,6 +255,10 @@ def apply_unet_method(facade_image, facade_height, unet_model, device):
     bottoms = stats[:, cv2.CC_STAT_TOP] + stats[:, cv2.CC_STAT_HEIGHT]
     target_component_idx = np.argmax(bottoms[1:]) + 1
     component_mask = (labels == target_component_idx).astype(np.uint8) * 255
+
+    # plt.imshow(component_mask, cmap='gray')                 
+    # plt.title("Selected Component Mask")
+    # plt.show()
 
     ys, xs = np.nonzero(component_mask)
     top_y = np.min(ys)

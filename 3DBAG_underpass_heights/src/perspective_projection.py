@@ -85,13 +85,20 @@ def project_walls_on_image(image, image_id, img_prefix, wall_ids, df_camera_para
 
 def display_image(rectangles_2d, image):
 
-    display_image = cv2.resize(image, (0, 0), fx=0.1, fy=0.1)
+    limit_width = 1920
+    limit_height = 1080
+
+    image_h, image_w = image.shape[:2]
     
     for rect_2d in rectangles_2d:
         cv2.polylines(image, [rect_2d], True, (0, 0, 255), 10)
 
-    cv2.imshow("Projected facades", image)
+    if image_h > limit_height or image_w > limit_width:
+        display_image = cv2.resize(image, (0, 0), fx=0.1, fy=0.1)
+
+    else:
+        display_image = image
+
+    cv2.imshow("Projected facades", display_image)
     cv2.waitKey(0)
     cv2.destroyAllWindows()
-
-    cv2.imwrite('projected_walls.jpg', image)
