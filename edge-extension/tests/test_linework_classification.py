@@ -61,20 +61,30 @@ def test_classify_polygon_from_fixture_edge_geojson_uses_all_segments() -> None:
     )
 
     movable_segment_count = sum(
-        1 for ring in classified.rings for segment in ring.segments if segment.is_movable
+        1
+        for ring in classified.rings
+        for segment in ring.segments
+        if segment.is_movable
     )
     fixed_segment_count = sum(
-        1 for ring in classified.rings for segment in ring.segments if not segment.is_movable
+        1
+        for ring in classified.rings
+        for segment in ring.segments
+        if not segment.is_movable
     )
 
     assert classified.polygon.is_valid
     assert len(classified.rings) == 2
-    assert movable_segment_count == len(explode_multiline(MultiLineString(
-        read_coords(data_dir / "exterior_one.geojson")
-    )))
-    assert fixed_segment_count == len(explode_multiline(MultiLineString(
-        read_coords(data_dir / "interior_one.geojson")
-    )))
+    assert movable_segment_count == len(
+        explode_multiline(
+            MultiLineString(read_coords(data_dir / "exterior_one.geojson"))
+        )
+    )
+    assert fixed_segment_count == len(
+        explode_multiline(
+            MultiLineString(read_coords(data_dir / "interior_one.geojson"))
+        )
+    )
 
 
 def read_coords(path: Path) -> list[list[tuple[float, float]]]:

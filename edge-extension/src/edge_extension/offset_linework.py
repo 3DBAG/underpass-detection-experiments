@@ -124,10 +124,7 @@ def _offset_polygon_with_boolean_patches(
     distance: float,
     tolerance: float,
 ) -> Polygon:
-    chains_by_ring = [
-        _build_movable_chains(ring)
-        for ring in classified_polygon.rings
-    ]
+    chains_by_ring = [_build_movable_chains(ring) for ring in classified_polygon.rings]
     if not any(chains_by_ring):
         return classified_polygon.polygon
 
@@ -185,7 +182,9 @@ def _offset_ring_with_support_lines(
     tolerance: float,
 ) -> list[Point]:
     if len(ring.vertices) < 3:
-        raise _GeometryOffsetError("Polygon rings must contain at least three vertices.")
+        raise _GeometryOffsetError(
+            "Polygon rings must contain at least three vertices."
+        )
 
     lines = [
         _build_offset_line(
@@ -262,7 +261,11 @@ def _build_chain_patch(
     distance: float,
     tolerance: float,
 ) -> _ChainPatch | None:
-    if chain.is_full_ring or chain.previous_segment_index is None or chain.next_segment_index is None:
+    if (
+        chain.is_full_ring
+        or chain.previous_segment_index is None
+        or chain.next_segment_index is None
+    ):
         raise _GeometryOffsetError(
             "Boolean patching requires fixed edges on both sides of a movable chain."
         )
@@ -397,8 +400,12 @@ def _resolve_vertex(
             previous_line.point[1] + (distance * previous_line.direction[1]),
         )
 
-    if not _parallel_lines_are_compatible(previous_line, current_line, tolerance=tolerance):
-        raise _GeometryOffsetError("Adjacent offset edges are parallel and cannot be reconnected.")
+    if not _parallel_lines_are_compatible(
+        previous_line, current_line, tolerance=tolerance
+    ):
+        raise _GeometryOffsetError(
+            "Adjacent offset edges are parallel and cannot be reconnected."
+        )
 
     return _project_point_onto_line(original_vertex, previous_line)
 

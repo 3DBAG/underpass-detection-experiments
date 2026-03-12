@@ -115,3 +115,20 @@
 - The previous support-line reconstruction path remains available as `strategy="linework"`.
 - Fully movable rings currently fall back to the linework path because the boolean patch model
   needs fixed anchor edges at both ends of a movable chain.
+
+### Database Input Integration
+
+- Add a dedicated PostGIS adapter instead of teaching the geometry modules about SQL or connection
+  lifecycle.
+- Keep the main batch API connection-injected: the caller supplies a configured `psycopg`
+  connection and a schema-qualified `psycopg.sql.Identifier` for the edge table.
+- Read `exterior_edges` as movable linework and merge `shared_edges` with `interior_edges` into
+  the fixed linework input expected by the existing classifier.
+- Continue to keep local `.env` handling outside the core library path; a thin export script can
+  load `.env` and create the connection for local development without changing the library API.
+
+### Validation
+
+- `uv sync` installs `psycopg` into the project environment.
+- `uv run pytest` passes with the new PostGIS adapter tests.
+- `uv run ruff check .` passes after the database-backed export path landed.

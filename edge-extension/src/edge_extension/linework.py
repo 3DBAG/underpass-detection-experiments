@@ -4,6 +4,7 @@ from shapely import build_area
 from shapely.geometry import LineString
 from shapely.geometry import MultiLineString
 from shapely.geometry import Polygon
+from shapely.geometry.base import BaseGeometry
 from shapely.ops import unary_union
 
 from edge_extension.geojson import Feature
@@ -51,13 +52,35 @@ def read_multiline_feature(path: Path) -> MultiLineString:
     if len(features) != 1:
         raise ValueError("GeoJSON edge input must contain exactly one feature.")
 
-    geometry = features[0].geometry
+    return coerce_multiline_geometry(features[0].geometry)
+
+
+def coerce_multiline_geometry(geometry: BaseGeometry | None) -> MultiLineString:
+    if geometry is None or geometry.is_empty:
+        return MultiLineString()
     if isinstance(geometry, MultiLineString):
         return geometry
     if isinstance(geometry, LineString):
         return MultiLineString([geometry.coords])
 
-    raise ValueError("GeoJSON edge input must contain a LineString or MultiLineString feature.")
+    if hasattr(geometry, "geoms"):
+        line_parts: list[LineString] = []
+        for part in geometry.geoms:
+            multiline = coerce_multiline_geometry(part)
+            line_parts.extend(multiline.geoms)
+        return MultiLineString([list(line.coords) for line in line_parts])
+
+    raise ValueError(
+        "Edge input must contain only LineString or MultiLineString geometry."
+    )
+
+
+def merge_multiline_geometries(*geometries: BaseGeometry | None) -> MultiLineString:
+    line_parts: list[LineString] = []
+    for geometry in geometries:
+        multiline = coerce_multiline_geometry(geometry)
+        line_parts.extend(multiline.geoms)
+    return MultiLineString([list(line.coords) for line in line_parts])
 
 
 def build_polygon_from_edge_sets(

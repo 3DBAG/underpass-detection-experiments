@@ -60,10 +60,7 @@ def read_feature_collection(path: Path) -> list[Feature]:
 def write_feature_collection(features: list[Feature], *, path: Path) -> None:
     payload = {
         "type": "FeatureCollection",
-        "features": [
-            _serialize_feature(feature)
-            for feature in features
-        ],
+        "features": [_serialize_feature(feature) for feature in features],
     }
 
     path.parent.mkdir(parents=True, exist_ok=True)

@@ -58,6 +58,16 @@ Start with line-based reconstruction because it matches the problem directly and
 about. If concave cases or large offsets become unstable, upgrade to a half-plane intersection or
 boolean patching approach per ring.
 
+## Phase 4: Database Batch Input
+
+1. Read grouped edge rows from PostGIS with an injected `psycopg` connection.
+2. Accept the source table as a schema-qualified `psycopg.sql.Identifier`.
+3. Treat `exterior_edges` as movable linework.
+4. Merge `shared_edges` and `interior_edges` into the fixed linework input.
+5. Reuse the existing reconstruction, classification, and offset pipeline for each
+   `identificatie`/`poly_id` group.
+6. Write all output polygons into one GeoJSON `FeatureCollection`.
+
 ## Testing Plan
 
 - Unit tests on rectangles and L-shaped polygons
@@ -65,6 +75,7 @@ boolean patching approach per ring.
 - Exact reconstruction checks against `tests/data/polygon.geojson`
 - Cases with holes, concave corners, and parallel adjacent edges
 - Regression tests that confirm invalid offset results fall back to the original input polygon
+- Mocked database adapter tests that verify row mapping and GeoJSON batch output
 
 ## Suggested File Additions
 

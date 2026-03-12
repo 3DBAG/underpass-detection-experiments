@@ -65,7 +65,9 @@ def test_offset_polygon_from_classified_polygon_supports_linework_strategy() -> 
 
 def test_offset_polygon_from_edge_geojson_writes_output() -> None:
     data_dir = Path(__file__).resolve().parent / "data"
-    output_path = Path(__file__).resolve().parent / "output" / "offset_polygon_from_edges.geojson"
+    output_path = (
+        Path(__file__).resolve().parent / "output" / "offset_polygon_from_edges.geojson"
+    )
 
     updated = offset_polygon_from_edge_geojson(
         movable_edges_path=data_dir / "exterior_one.geojson",
@@ -112,7 +114,9 @@ def test_offset_polygon_falls_back_to_original_polygon_when_result_is_invalid(
         del classified_polygon, distance, tolerance
         return Polygon([(0.0, 0.0), (4.0, 4.0), (4.0, 0.0), (0.0, 4.0)])
 
-    monkeypatch.setattr(offset_linework, "_offset_polygon_with_boolean_patches", invalid_offset)
+    monkeypatch.setattr(
+        offset_linework, "_offset_polygon_with_boolean_patches", invalid_offset
+    )
 
     updated = offset_polygon_from_classified_polygon(
         classified,

@@ -75,10 +75,12 @@ def classify_polygon_from_edge_sets(
     movable_segments = explode_multiline(movable_edges)
     fixed_segments = explode_multiline(fixed_edges)
     movable_keys = Counter(
-        _segment_key_from_linestring(segment, tolerance=tolerance) for segment in movable_segments
+        _segment_key_from_linestring(segment, tolerance=tolerance)
+        for segment in movable_segments
     )
     fixed_keys = Counter(
-        _segment_key_from_linestring(segment, tolerance=tolerance) for segment in fixed_segments
+        _segment_key_from_linestring(segment, tolerance=tolerance)
+        for segment in fixed_segments
     )
 
     rings: list[BoundaryRing] = []
@@ -105,14 +107,20 @@ def classify_polygon_from_edge_sets(
         )
 
     if movable_keys:
-        raise ValueError("Some movable input segments could not be matched to the polygon boundary.")
+        raise ValueError(
+            "Some movable input segments could not be matched to the polygon boundary."
+        )
     if fixed_keys:
-        raise ValueError("Some fixed input segments could not be matched to the polygon boundary.")
+        raise ValueError(
+            "Some fixed input segments could not be matched to the polygon boundary."
+        )
 
     return ClassifiedPolygon(polygon=polygon, rings=tuple(rings))
 
 
-def explode_multiline(multiline: MultiLineString | LineString) -> tuple[LineString, ...]:
+def explode_multiline(
+    multiline: MultiLineString | LineString,
+) -> tuple[LineString, ...]:
     if isinstance(multiline, LineString):
         return _explode_linestring(multiline)
 
@@ -156,9 +164,13 @@ def _classify_ring(
         fixed_count = fixed_keys[segment_key]
 
         if movable_count and fixed_count:
-            raise ValueError("Boundary segment matched both movable and fixed input linework.")
+            raise ValueError(
+                "Boundary segment matched both movable and fixed input linework."
+            )
         if not movable_count and not fixed_count:
-            raise ValueError("Polygon boundary segment was not found in the supplied input linework.")
+            raise ValueError(
+                "Polygon boundary segment was not found in the supplied input linework."
+            )
 
         is_movable = movable_count > 0
         if is_movable:
@@ -193,7 +205,9 @@ def _consume_segment_key(counter: Counter[SegmentKey], segment_key: SegmentKey) 
     counter[segment_key] = count - 1
 
 
-def _segment_key_from_linestring(linestring: LineString, *, tolerance: float) -> SegmentKey:
+def _segment_key_from_linestring(
+    linestring: LineString, *, tolerance: float
+) -> SegmentKey:
     coords = [(float(x), float(y)) for x, y in linestring.coords]
     return _segment_key(coords[0], coords[1], tolerance=tolerance)
 

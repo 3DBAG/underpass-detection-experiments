@@ -27,7 +27,9 @@ def test_read_and_write_feature_collection_round_trip(tmp_path: Path) -> None:
 
 def test_load_polygon_from_supplied_edge_sets() -> None:
     data_dir = Path(__file__).resolve().parent / "data"
-    output_path = Path(__file__).resolve().parent / "output" / "polygon_from_edges.geojson"
+    output_path = (
+        Path(__file__).resolve().parent / "output" / "polygon_from_edges.geojson"
+    )
 
     polygon = write_polygon_from_edge_geojson(
         movable_edges_path=data_dir / "exterior_one.geojson",

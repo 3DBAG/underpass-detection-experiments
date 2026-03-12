@@ -63,11 +63,15 @@ def offset_polygon_edges(polygon: Polygon, offsets: list[EdgeOffset]) -> Polygon
     return orient(rebuilt, sign=orientation_sign)
 
 
-def _validate_offsets(*, offsets: list[EdgeOffset], edge_count: int) -> dict[int, float]:
+def _validate_offsets(
+    *, offsets: list[EdgeOffset], edge_count: int
+) -> dict[int, float]:
     distance_by_edge: dict[int, float] = {}
     for offset in offsets:
         if offset.edge_index < 0 or offset.edge_index >= edge_count:
-            raise ValueError(f"Edge index {offset.edge_index} is outside the polygon shell.")
+            raise ValueError(
+                f"Edge index {offset.edge_index} is outside the polygon shell."
+            )
         if offset.edge_index in distance_by_edge:
             raise ValueError(f"Duplicate offset for edge index {offset.edge_index}.")
         distance_by_edge[offset.edge_index] = offset.distance
@@ -99,7 +103,9 @@ def _build_offset_line(
     return _OffsetLine(point=offset_point, direction=unit_direction)
 
 
-def _line_intersection(*, first: _OffsetLine, second: _OffsetLine) -> tuple[float, float]:
+def _line_intersection(
+    *, first: _OffsetLine, second: _OffsetLine
+) -> tuple[float, float]:
     delta = (
         second.point[0] - first.point[0],
         second.point[1] - first.point[1],
