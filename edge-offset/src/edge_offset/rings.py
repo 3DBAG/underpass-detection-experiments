@@ -8,8 +8,8 @@ from shapely.geometry import MultiLineString
 from shapely.geometry import Polygon
 from shapely.geometry.polygon import orient
 
-from edge_extension.linework import build_polygon_from_edge_sets
-from edge_extension.linework import read_multiline_feature
+from edge_offset.linework import build_polygon_from_edge_sets
+from edge_offset.linework import read_multiline_feature
 
 type Point = tuple[float, float]
 type PointKey = tuple[int, int]

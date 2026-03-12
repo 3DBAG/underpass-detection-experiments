@@ -1,4 +1,4 @@
-# edge-extension
+# edge-offset
 
 Minimal Python library skeleton for reading polygon data from GeoJSON files and modifying selected
 polygon edges, including batch processing from a PostGIS edge table.
@@ -30,8 +30,8 @@ uv sync
 ```python
 from pathlib import Path
 
-from edge_extension.linework import load_polygon_from_edge_geojson
-from edge_extension.offset_linework import offset_polygon_from_edge_geojson
+from edge_offset.linework import load_polygon_from_edge_geojson
+from edge_offset.offset_linework import offset_polygon_from_edge_geojson
 
 polygon = load_polygon_from_edge_geojson(
     movable_edges_path=Path("tests/data/exterior_one.geojson"),
@@ -54,7 +54,7 @@ from pathlib import Path
 from psycopg import connect
 from psycopg.sql import Identifier
 
-from edge_extension.postgis import write_offset_polygons_from_db
+from edge_offset.postgis import write_offset_polygons_from_db
 
 with connect(host="localhost", port=5557, dbname="baseregisters", user="bdukai") as connection:
     write_offset_polygons_from_db(

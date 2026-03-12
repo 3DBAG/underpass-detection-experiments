@@ -79,7 +79,7 @@ boolean patching approach per ring.
 
 ## Suggested File Additions
 
-- `src/edge_extension/rings.py`: ring extraction and segment classification
-- `src/edge_extension/offset_linework.py`: partial-offset implementation
+- `src/edge_offset/rings.py`: ring extraction and segment classification
+- `src/edge_offset/offset_linework.py`: partial-offset implementation
 - `tests/test_linework_classification.py`
 - `tests/test_offset_linework.py`

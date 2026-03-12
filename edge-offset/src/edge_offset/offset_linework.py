@@ -8,13 +8,13 @@ from shapely.geometry import Polygon
 from shapely.geometry.base import BaseGeometry
 from shapely.geometry.polygon import orient
 
-from edge_extension.geojson import Feature
-from edge_extension.geojson import write_feature_collection
-from edge_extension.rings import BoundaryRing
-from edge_extension.rings import BoundarySegment
-from edge_extension.rings import ClassifiedPolygon
-from edge_extension.rings import Point
-from edge_extension.rings import classify_polygon_from_edge_geojson
+from edge_offset.geojson import Feature
+from edge_offset.geojson import write_feature_collection
+from edge_offset.rings import BoundaryRing
+from edge_offset.rings import BoundarySegment
+from edge_offset.rings import ClassifiedPolygon
+from edge_offset.rings import Point
+from edge_offset.rings import classify_polygon_from_edge_geojson
 
 
 @dataclass(frozen=True, slots=True)

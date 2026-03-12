@@ -3,7 +3,7 @@ requires = ["hatchling>=1.27.0"]
 build-backend = "hatchling.build"
 
 [project]
-name = "edge-extension"
+name = "edge-offset"
 version = "0.1.0"
 description = "Small library for reading GeoJSON polygon data and offsetting selected polygon edges."
 readme = "README.md"
@@ -20,7 +20,7 @@ dev = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/edge_extension"]
+packages = ["src/edge_offset"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

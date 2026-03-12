@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-Core library code lives under `src/edge_extension/`.
+Core library code lives under `src/edge_offset/`.
 Use:
 
 - `geojson.py` for GeoJSON feature collection I/O

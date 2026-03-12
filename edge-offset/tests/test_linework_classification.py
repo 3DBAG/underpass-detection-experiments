@@ -2,10 +2,10 @@ from pathlib import Path
 
 from shapely.geometry import MultiLineString
 
-from edge_extension.linework import read_multiline_feature
-from edge_extension.rings import classify_polygon_from_edge_geojson
-from edge_extension.rings import classify_polygon_from_edge_sets
-from edge_extension.rings import explode_multiline
+from edge_offset.linework import read_multiline_feature
+from edge_offset.rings import classify_polygon_from_edge_geojson
+from edge_offset.rings import classify_polygon_from_edge_sets
+from edge_offset.rings import explode_multiline
 
 
 def test_classify_polygon_from_edge_sets_marks_expected_segments() -> None:

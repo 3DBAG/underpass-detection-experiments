@@ -1,8 +1,8 @@
 import pytest
 from shapely.geometry import Polygon
 
-from edge_extension.polygon_ops import EdgeOffset
-from edge_extension.polygon_ops import offset_polygon_edges
+from edge_offset.polygon_ops import EdgeOffset
+from edge_offset.polygon_ops import offset_polygon_edges
 
 
 def test_offset_polygon_edges_moves_one_edge_outward() -> None:

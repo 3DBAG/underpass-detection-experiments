@@ -3,11 +3,11 @@ from pathlib import Path
 from shapely.geometry import MultiLineString
 from shapely.geometry import Polygon
 
-import edge_extension.offset_linework as offset_linework
-from edge_extension.geojson import read_feature_collection
-from edge_extension.offset_linework import offset_polygon_from_classified_polygon
-from edge_extension.offset_linework import offset_polygon_from_edge_geojson
-from edge_extension.rings import classify_polygon_from_edge_sets
+import edge_offset.offset_linework as offset_linework
+from edge_offset.geojson import read_feature_collection
+from edge_offset.offset_linework import offset_polygon_from_classified_polygon
+from edge_offset.offset_linework import offset_polygon_from_edge_geojson
+from edge_offset.rings import classify_polygon_from_edge_sets
 
 
 def test_offset_polygon_from_classified_polygon_moves_only_movable_edges() -> None:

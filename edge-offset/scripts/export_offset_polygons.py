@@ -5,7 +5,7 @@ import sys
 from psycopg import connect
 from psycopg.sql import Identifier
 
-from edge_extension.postgis import write_offset_polygons_from_db
+from edge_offset.postgis import write_offset_polygons_from_db
 
 DEFAULT_EDGES_TABLE = Identifier("underpasses_edge_extension", "edges")
 ENV_PATH = Path(".env")
@@ -14,20 +14,20 @@ ENV_PATH = Path(".env")
 def main() -> int:
     _load_dotenv(ENV_PATH)
 
-    output_path_value = environ.get("EDGE_EXTENSION_OUTPUT_PATH")
+    output_path_value = environ.get("EDGE_OFFSET_OUTPUT_PATH")
     if not output_path_value:
-        raise ValueError("EDGE_EXTENSION_OUTPUT_PATH must be set.")
+        raise ValueError("EDGE_OFFSET_OUTPUT_PATH must be set.")
 
-    distance_value = environ.get("EDGE_EXTENSION_OFFSET_DISTANCE")
+    distance_value = environ.get("EDGE_OFFSET_OFFSET_DISTANCE")
     if not distance_value:
-        raise ValueError("EDGE_EXTENSION_OFFSET_DISTANCE must be set.")
+        raise ValueError("EDGE_OFFSET_OFFSET_DISTANCE must be set.")
 
     connection = connect(
-        host=_require_env("EDGE_EXTENSION_DB_HOST"),
-        port=int(_require_env("EDGE_EXTENSION_DB_PORT")),
-        dbname=_require_env("EDGE_EXTENSION_DB_NAME"),
-        user=_require_env("EDGE_EXTENSION_DB_USER"),
-        password=environ.get("EDGE_EXTENSION_DB_PASSWORD", ""),
+        host=_require_env("EDGE_OFFSET_DB_HOST"),
+        port=int(_require_env("EDGE_OFFSET_DB_PORT")),
+        dbname=_require_env("EDGE_OFFSET_DB_NAME"),
+        user=_require_env("EDGE_OFFSET_DB_USER"),
+        password=environ.get("EDGE_OFFSET_DB_PASSWORD", ""),
     )
     with connection:
         write_offset_polygons_from_db(

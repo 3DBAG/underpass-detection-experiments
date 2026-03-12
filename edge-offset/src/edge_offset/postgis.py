@@ -8,12 +8,12 @@ from psycopg.sql import SQL
 from shapely import from_wkb
 from shapely.geometry import MultiLineString
 
-from edge_extension.geojson import Feature
-from edge_extension.geojson import write_feature_collection
-from edge_extension.linework import coerce_multiline_geometry
-from edge_extension.linework import merge_multiline_geometries
-from edge_extension.offset_linework import offset_polygon_from_classified_polygon
-from edge_extension.rings import classify_polygon_from_edge_sets
+from edge_offset.geojson import Feature
+from edge_offset.geojson import write_feature_collection
+from edge_offset.linework import coerce_multiline_geometry
+from edge_offset.linework import merge_multiline_geometries
+from edge_offset.offset_linework import offset_polygon_from_classified_polygon
+from edge_offset.rings import classify_polygon_from_edge_sets
 
 
 @dataclass(frozen=True, slots=True)

@@ -2,10 +2,10 @@ from pathlib import Path
 
 from shapely.geometry import Polygon
 
-from edge_extension.geojson import Feature
-from edge_extension.geojson import read_feature_collection
-from edge_extension.geojson import write_feature_collection
-from edge_extension.linework import write_polygon_from_edge_geojson
+from edge_offset.geojson import Feature
+from edge_offset.geojson import read_feature_collection
+from edge_offset.geojson import write_feature_collection
+from edge_offset.linework import write_polygon_from_edge_geojson
 
 
 def test_read_and_write_feature_collection_round_trip(tmp_path: Path) -> None:

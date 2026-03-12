@@ -10,9 +10,9 @@
 
 ### Design Direction
 
-- Add `src/edge_extension/rings.py` to classify reconstructed polygon boundary segments as
+- Add `src/edge_offset/rings.py` to classify reconstructed polygon boundary segments as
   movable or fixed.
-- Add `src/edge_extension/offset_linework.py` to offset only movable segments and rebuild valid
+- Add `src/edge_offset/offset_linework.py` to offset only movable segments and rebuild valid
   rings from supporting-line intersections.
 - Keep file output in the library API so tests can materialize GeoJSON into `tests/output`.
 
@@ -84,9 +84,9 @@
 
 ### Suggested Module Shape
 
-- Add a chain model in `src/edge_extension/rings.py` so classification can expose grouped movable
+- Add a chain model in `src/edge_offset/rings.py` so classification can expose grouped movable
   runs directly.
-- Add patch builders in `src/edge_extension/offset_linework.py` instead of replacing the current
+- Add patch builders in `src/edge_offset/offset_linework.py` instead of replacing the current
   API surface.
 - Keep public entry points explicit and keyword-driven, for example
   `offset_polygon_from_edge_geojson(..., strategy="linework" | "boolean_patch")`.
@@ -100,7 +100,7 @@
 
 ### Implemented Boolean Patch Path
 
-- `src/edge_extension/offset_linework.py` now uses `strategy="boolean_patch"` by default.
+- `src/edge_offset/offset_linework.py` now uses `strategy="boolean_patch"` by default.
 - Consecutive movable segments are grouped into per-ring chains before any geometry update is
   attempted.
 - Each chain builds one patch polygon from the original chain, the shifted replacement chain, and

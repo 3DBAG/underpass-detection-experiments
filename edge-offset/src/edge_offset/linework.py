@@ -7,9 +7,9 @@ from shapely.geometry import Polygon
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import unary_union
 
-from edge_extension.geojson import Feature
-from edge_extension.geojson import read_feature_collection
-from edge_extension.geojson import write_feature_collection
+from edge_offset.geojson import Feature
+from edge_offset.geojson import read_feature_collection
+from edge_offset.geojson import write_feature_collection
 
 
 def load_polygon_from_edge_geojson(

@@ -6,10 +6,10 @@ from shapely.geometry import LineString
 from shapely.geometry import MultiLineString
 from shapely.geometry import Polygon
 
-from edge_extension.geojson import read_feature_collection
-from edge_extension.postgis import load_edge_records_from_db
-from edge_extension.postgis import offset_polygon_features_from_db
-from edge_extension.postgis import write_offset_polygons_from_db
+from edge_offset.geojson import read_feature_collection
+from edge_offset.postgis import load_edge_records_from_db
+from edge_offset.postgis import offset_polygon_features_from_db
+from edge_offset.postgis import write_offset_polygons_from_db
 
 
 class FakeCursor:
