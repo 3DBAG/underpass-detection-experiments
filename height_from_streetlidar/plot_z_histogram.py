@@ -1,3 +1,4 @@
+import csv
 import laspy
 import matplotlib.pyplot as plt
 import numpy as np
@@ -35,8 +36,9 @@ CASES = [
 ]
 HISTOGRAM_BINS = 100
 GRID_CELLSIZE = 0.5
-LOWEST_PEAK_MIN_RELATIVE_COUNT = 0.1
+LOWEST_PEAK_MIN_RELATIVE_AREA = 0.1
 PEAK_BAND_WIDTH_METERS = 0.5
+OUTPUT_CSV_PATH = "underpass_heights.csv"
 
 
 def find_top_histogram_peaks(values, bins=100, smoothing_window=7, min_separation_bins=10):
@@ -74,30 +76,14 @@ def find_top_histogram_peaks(values, bins=100, smoothing_window=7, min_separatio
         if all(abs(idx - existing) >= min_separation_bins for existing in separated_candidates):
             separated_candidates.append(idx)
 
-    if not separated_candidates:
-        return counts, bin_edges, bin_centers, smoothed_counts, [], []
-
-    # Keep the lowest-Z peak only when it is still substantial relative to the
-    # dominant peaks; otherwise treat tiny edge modes as outliers and use the
-    # strongest peaks instead.
-    lowest_peak_idx = min(separated_candidates, key=lambda idx: bin_centers[idx])
-    dominant_peak_idx = separated_candidates[0]
-    lowest_peak_ratio = smoothed_counts[lowest_peak_idx] / smoothed_counts[dominant_peak_idx]
-
-    if len(separated_candidates) == 1:
-        peak_indices = [lowest_peak_idx]
-    elif lowest_peak_ratio >= LOWEST_PEAK_MIN_RELATIVE_COUNT:
-        peak_indices = [lowest_peak_idx]
-        for idx in separated_candidates:
-            if idx != lowest_peak_idx:
-                peak_indices.append(idx)
-            if len(peak_indices) == 2:
-                break
-    else:
-        peak_indices = separated_candidates[:2]
-
-    peak_indices.sort(key=lambda idx: bin_centers[idx])
-    return counts, bin_edges, bin_centers, smoothed_counts, separated_candidates, peak_indices
+    return (
+        counts,
+        bin_edges,
+        bin_centers,
+        smoothed_counts,
+        ranked_candidates.tolist(),
+        separated_candidates,
+    )
 
 
 def peak_cluster_from_index(bin_edges, smoothed_counts, peak_idx):
@@ -244,6 +230,73 @@ def build_grid(x, y, x_edges, y_edges):
     return grid.T
 
 
+def largest_contiguous_component_area(grid, cellsize):
+    occupied = grid > 0
+    if not np.any(occupied):
+        return 0.0
+
+    visited = np.zeros_like(occupied, dtype=bool)
+    rows, cols = occupied.shape
+    largest_component_cells = 0
+
+    for row in range(rows):
+        for col in range(cols):
+            if not occupied[row, col] or visited[row, col]:
+                continue
+
+            stack = [(row, col)]
+            visited[row, col] = True
+            component_cells = 0
+
+            while stack:
+                current_row, current_col = stack.pop()
+                component_cells += 1
+
+                for neighbor_row in range(max(0, current_row - 1), min(rows, current_row + 2)):
+                    for neighbor_col in range(max(0, current_col - 1), min(cols, current_col + 2)):
+                        if neighbor_row == current_row and neighbor_col == current_col:
+                            continue
+                        if occupied[neighbor_row, neighbor_col] and not visited[neighbor_row, neighbor_col]:
+                            visited[neighbor_row, neighbor_col] = True
+                            stack.append((neighbor_row, neighbor_col))
+
+            largest_component_cells = max(largest_component_cells, component_cells)
+
+    return largest_component_cells * (cellsize ** 2)
+
+
+def select_underpass_peak_indices(candidate_layers, bin_centers):
+    if not candidate_layers:
+        return []
+
+    area_ranked_layers = sorted(
+        candidate_layers,
+        key=lambda layer: (layer["largest_component_area"], layer["area"]),
+        reverse=True,
+    )
+    dominant_layer = area_ranked_layers[0]
+    lowest_layer = min(candidate_layers, key=lambda layer: layer["peak_center"])
+    lowest_peak_ratio = (
+        lowest_layer["largest_component_area"] / dominant_layer["largest_component_area"]
+        if dominant_layer["largest_component_area"] > 0
+        else 0.0
+    )
+
+    if len(candidate_layers) == 1:
+        selected_layers = [lowest_layer]
+    elif lowest_peak_ratio >= LOWEST_PEAK_MIN_RELATIVE_AREA:
+        selected_layers = [lowest_layer]
+        for layer in area_ranked_layers:
+            if layer["peak_idx"] != lowest_layer["peak_idx"]:
+                selected_layers.append(layer)
+                break
+    else:
+        selected_layers = area_ranked_layers[:2]
+
+    selected_layers.sort(key=lambda layer: layer["peak_center"])
+    return [layer["peak_idx"] for layer in selected_layers]
+
+
 def make_truncated_cmap(name, start=0.25, end=1.0):
     base_cmap = plt.get_cmap(name)
     colors = base_cmap(np.linspace(start, end, 256))
@@ -277,7 +330,14 @@ def process_case(las_path, gpkg_path):
     y = np.asarray(las.y, dtype=float)
     z = np.asarray(las.z, dtype=float)
 
-    counts, bin_edges, bin_centers, smoothed_counts, candidate_peak_indices, peak_indices = find_top_histogram_peaks(
+    (
+        counts,
+        bin_edges,
+        bin_centers,
+        smoothed_counts,
+        ranked_candidate_indices,
+        candidate_peak_indices,
+    ) = find_top_histogram_peaks(
         z,
         bins=HISTOGRAM_BINS,
         smoothing_window=7,
@@ -294,18 +354,7 @@ def process_case(las_path, gpkg_path):
     if y_edges[-1] < max_y:
         y_edges = np.append(y_edges, max_y)
 
-    print(f"Number of points: {len(z)}")
-    print(f"Z range: [{np.min(z):.2f}, {np.max(z):.2f}]")
-    print(f"Z mean: {np.mean(z):.2f}, std: {np.std(z):.2f}")
-    print("Candidate peaks:")
-    for i, peak_idx in enumerate(sorted(candidate_peak_indices, key=lambda idx: bin_centers[idx]), start=1):
-        print(
-            f"  Candidate {i}: z ~= {bin_centers[peak_idx]:.2f} m, "
-            f"smoothed count {smoothed_counts[peak_idx]:.1f}, raw count {counts[peak_idx]}"
-        )
-
-    peak_layers = []
-    for i, peak_idx in enumerate(peak_indices, start=1):
+    def build_peak_layer(peak_idx):
         peak_center = bin_centers[peak_idx]
         z_min, z_max = peak_band_from_center(
             peak_center,
@@ -319,19 +368,85 @@ def process_case(las_path, gpkg_path):
             mask = (z >= z_min) & (z < z_max)
         grid = build_grid(x[mask], y[mask], x_edges, y_edges)
         area = np.count_nonzero(grid) * (GRID_CELLSIZE ** 2)
-        peak_layers.append((i, peak_idx, z_min, z_max, grid, area))
+        return {
+            "peak_idx": peak_idx,
+            "peak_center": peak_center,
+            "z_min": z_min,
+            "z_max": z_max,
+            "point_count": np.count_nonzero(mask),
+            "grid": grid,
+            "area": area,
+            "largest_component_area": largest_contiguous_component_area(grid, GRID_CELLSIZE),
+            "smoothed_count": smoothed_counts[peak_idx],
+            "raw_count": counts[peak_idx],
+        }
 
+    candidate_layer_by_idx = {
+        peak_idx: build_peak_layer(peak_idx)
+        for peak_idx in ranked_candidate_indices
+    }
+    separated_candidate_layers = [
+        candidate_layer_by_idx[peak_idx]
+        for peak_idx in candidate_peak_indices
+    ]
+    peak_indices = select_underpass_peak_indices(separated_candidate_layers, bin_centers)
+    selected_peak_layers = [candidate_layer_by_idx[peak_idx] for peak_idx in peak_indices]
+
+    print(f"Number of points: {len(z)}")
+    print(f"Z range: [{np.min(z):.2f}, {np.max(z):.2f}]")
+    print(f"Z mean: {np.mean(z):.2f}, std: {np.std(z):.2f}")
+    print("Candidate peaks ranked by largest contiguous XY area:")
+    ranked_candidate_layers = sorted(
+        (candidate_layer_by_idx[peak_idx] for peak_idx in ranked_candidate_indices),
+        key=lambda layer: (layer["largest_component_area"], layer["area"], layer["smoothed_count"]),
+        reverse=True,
+    )
+    for i, layer in enumerate(ranked_candidate_layers, start=1):
         print(
-            f"Peak {i}: z ~= {bin_centers[peak_idx]:.2f} m, "
-            f"Z range [{z_min:.2f}, {z_max:.2f}), "
-            f"points {np.count_nonzero(mask)}, "
-            f"area {area:.2f} m^2"
+            f"  Candidate {i}: z ~= {layer['peak_center']:.2f} m, "
+            f"largest contiguous area {layer['largest_component_area']:.2f} m^2, "
+            f"covered area {layer['area']:.2f} m^2, "
+            f"smoothed count {layer['smoothed_count']:.1f}, raw count {layer['raw_count']}"
+        )
+
+    display_peak_indices = list(peak_indices)
+    area_ranked_candidate_indices = [
+        layer["peak_idx"] for layer in ranked_candidate_layers
+    ]
+    between_peak_candidates = [
+        peak_idx
+        for peak_idx in area_ranked_candidate_indices
+        if peak_idx not in display_peak_indices
+        and bin_centers[peak_indices[0]] < bin_centers[peak_idx] < bin_centers[peak_indices[-1]]
+    ]
+    if between_peak_candidates:
+        display_peak_indices.append(between_peak_candidates[0])
+    else:
+        for peak_idx in area_ranked_candidate_indices:
+            if peak_idx not in display_peak_indices:
+                display_peak_indices.append(peak_idx)
+                break
+    display_peak_layers = [candidate_layer_by_idx[peak_idx] for peak_idx in display_peak_indices]
+
+    for i, layer in enumerate(display_peak_layers, start=1):
+        print(
+            f"Peak {i}: z ~= {layer['peak_center']:.2f} m, "
+            f"Z range [{layer['z_min']:.2f}, {layer['z_max']:.2f}), "
+            f"points {layer['point_count']}, "
+            f"area {layer['area']:.2f} m^2, "
+            f"largest contiguous area {layer['largest_component_area']:.2f} m^2"
         )
 
     underpass_attributes = {
         "underpass_dh": bin_centers[peak_indices[-1]] - bin_centers[peak_indices[0]],
-        "underpass_top_area": peak_layers[-1][-1],
-        "underpass_bottom_area": peak_layers[0][-1],
+        "underpass_top_area": selected_peak_layers[-1]["area"],
+        "underpass_bottom_area": selected_peak_layers[0]["area"],
+    }
+    underpass_metrics = {
+        "identificatie": bag_id,
+        "underpass_z_min": selected_peak_layers[0]["z_min"],
+        "underpass_z_max": selected_peak_layers[-1]["z_max"],
+        "underpass_h": underpass_attributes["underpass_dh"],
     }
     update_gpkg_attributes(gpkg_path, underpass_attributes)
     print(
@@ -345,10 +460,10 @@ def process_case(las_path, gpkg_path):
     map_height = max_y - min_y
     map_aspect_ratio = map_width / map_height if map_height > 0 else 1.0
     map_panel_width_ratio = max(0.7, map_aspect_ratio)
-    width_ratios = [1.2] + [map_panel_width_ratio] * len(peak_layers)
+    width_ratios = [1.2] + [map_panel_width_ratio] * len(display_peak_layers)
     fig, axes = plt.subplots(
         1,
-        1 + len(peak_layers),
+        1 + len(display_peak_layers),
         figsize=(5 * sum(width_ratios), 7),
         gridspec_kw={"width_ratios": width_ratios, "wspace": 0.06},
     )
@@ -357,9 +472,9 @@ def process_case(las_path, gpkg_path):
     ax_hist.hist(
         z,
         bins=HISTOGRAM_BINS,
-        color="lightgray",
-        edgecolor="black",
-        linewidth=0.3,
+        color="gray",
+        edgecolor="#999999",
+        linewidth=0.25,
     )
     ax_hist.plot(
         bin_centers,
@@ -368,18 +483,19 @@ def process_case(las_path, gpkg_path):
         linewidth=2,
         label="Smoothed histogram",
     )
-    for i, peak_idx, z_min, z_max, _, _ in peak_layers:
+    peak_colors = {1: "C0", 2: "C1", 3: "C2"}
+    for i, layer in enumerate(display_peak_layers, start=1):
         ax_hist.axvline(
-            bin_centers[peak_idx],
+            layer["peak_center"],
             linestyle="--",
-            linewidth=2,
-            color="C0" if i == 1 else "C1",
+            linewidth=1.5,
+            color=peak_colors.get(i, "C3"),
         )
         ax_hist.axvspan(
-            z_min,
-            z_max,
+            layer["z_min"],
+            layer["z_max"],
             alpha=0.15,
-            color="C0" if i == 1 else "C1",
+            color=peak_colors.get(i, "C3"),
         )
     ax_hist.set_xlabel("Z (m)")
     ax_hist.set_ylabel("Count")
@@ -411,19 +527,20 @@ def process_case(las_path, gpkg_path):
     color_maps = {
         1: make_truncated_cmap("Blues", start=0.28),
         2: make_truncated_cmap("Oranges", start=0.30),
+        3: make_truncated_cmap("Greens", start=0.30),
     }
 
-    for map_idx, (ax_map, (i, peak_idx, z_min, z_max, grid, area)) in enumerate(
-        zip(axes[1:], peak_layers),
+    for map_idx, (ax_map, layer) in enumerate(
+        zip(axes[1:], display_peak_layers),
         start=1,
     ):
-        masked_grid = np.ma.masked_where(grid == 0, grid)
+        masked_grid = np.ma.masked_where(layer["grid"] == 0, layer["grid"])
         ax_map.set_facecolor("#f3f3f3")
         ax_map.imshow(
             masked_grid,
             origin="lower",
             extent=extent,
-            cmap=color_maps[i],
+            cmap=color_maps[map_idx],
             alpha=0.9,
             interpolation="nearest",
         )
@@ -435,9 +552,10 @@ def process_case(las_path, gpkg_path):
             ax_map.set_ylabel("")
             ax_map.tick_params(axis="y", which="both", left=False, labelleft=False)
         ax_map.set_title(
-            f"Peak {i}: {bin_centers[peak_idx]:.2f} m\n"
-            f"Z range [{z_min:.2f}, {z_max:.2f})\n"
-            f"Covered area {area:.2f} m^2",
+            f"Peak {map_idx}: {layer['peak_center']:.2f} m\n"
+            f"Z range [{layer['z_min']:.2f}, {layer['z_max']:.2f})\n"
+            f"Covered area {layer['area']:.2f} m^2\n"
+            f"Largest contiguous area {layer['largest_component_area']:.2f} m^2",
             fontsize=11,
             pad=8,
         )
@@ -449,12 +567,27 @@ def process_case(las_path, gpkg_path):
     plt.savefig(output_path, dpi=200)
     print(f"Saved overlay figure to {output_path}")
     plt.close(fig)
+    return underpass_metrics
+
+
+def write_metrics_csv(rows, output_path):
+    with open(output_path, "w", newline="") as csv_file:
+        writer = csv.DictWriter(
+            csv_file,
+            fieldnames=["identificatie", "underpass_z_min", "underpass_z_max", "underpass_h"],
+        )
+        writer.writeheader()
+        writer.writerows(rows)
 
 
 def main():
+    rows = []
     # for case in CASES[1:2]:
     for case in CASES:
-        process_case(case["las_path"], case["gpkg_path"])
+        rows.append(process_case(case["las_path"], case["gpkg_path"]))
+
+    write_metrics_csv(rows, OUTPUT_CSV_PATH)
+    print(f"Saved CSV summary to {OUTPUT_CSV_PATH}")
 
 
 if __name__ == "__main__":
