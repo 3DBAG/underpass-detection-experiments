@@ -564,7 +564,7 @@ def process_case(las_path, gpkg_path):
 
     fig.suptitle(bag_id, fontsize=15, y=0.985)
     fig.subplots_adjust(left=0.05, right=0.99, bottom=0.08, top=0.82)
-    plt.savefig(output_path, dpi=200)
+    plt.savefig(output_path, dpi=200, transparent=True)
     print(f"Saved overlay figure to {output_path}")
     plt.close(fig)
     return underpass_metrics
