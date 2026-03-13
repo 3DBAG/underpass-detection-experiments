@@ -120,7 +120,7 @@ The module <strong>perspective_projection.py</strong> contains all functions to 
 1. Extracts all visible walls per image
 
 2. Computes the camera matrix $K$ for the current image. We can easily define it using the parameters in <strong>camera_parameters.txt</strong> as follows.
-
+```math
 $$
 K = 
 \begin{bmatrix}
@@ -129,13 +129,11 @@ f_x & 0 & c_x \\
 0 & 0 & 1
 \end{bmatrix}
 $$
+```
 
 3. Calculates the rotation matrix $R = R_\kappa \times \times R_\phi \times R_\omega $. We can find the angles $\kappa$, $\phi$ and $\omega$ in <strong>camera_parameters.txt</strong>, and then compute:
-
-
-<tr>
-<td align="center">
-
+  
+```math
 $$
 R_\omega =
 \begin{bmatrix}
@@ -144,10 +142,9 @@ R_\omega =
 0 & \sin\omega & \cos\omega
 \end{bmatrix}
 $$
+```
 
-</td>
-<td align="center"> 
-
+```math
 $$
 R_\phi =
 \begin{bmatrix}
@@ -156,10 +153,9 @@ R_\phi =
 -\sin\phi & 0 & \cos\phi
 \end{bmatrix}
 $$
+```
 
-</td>
-<td align="center">
-
+```math
 $$
 R_\kappa =
 \begin{bmatrix}
@@ -168,10 +164,7 @@ R_\kappa =
 0 & 0 & 1
 \end{bmatrix}
 $$
-
-</td>
-</tr>
-</table>
+```
 
   > [!CAUTION]
   > The multiplication order of rotation matrices depends on the convention chosen for the rotation angles. The given order <code>R = Rκ Rφ Rω</code> is standard for photogrammetry datasets, however, this might be different in your dataset (e.g. <code>R = Rω Rφ Rκ</code>).
@@ -184,6 +177,7 @@ $$
 
 4. Computes the translation vector $t$. This is straightforward when knowing the camera position $X, Y, Z$, which are defined in <strong>camera_parameters.txt</strong>
 
+```math
 $$
 t = 
 - R \times \begin{bmatrix}
@@ -192,27 +186,34 @@ Y \\
 Z
 \end{bmatrix}
 $$
+```
 
 
 5. Computes the projection matrix $M$ for the current image.
 
+```math
 $$
 M = K \space [R \mid t]
 $$
+```
 
 
 6. For each visible wall, extracts the wall geometry and projects it onto the image plane using the projection matrix $M$.
 
+```math
    $$
    \begin{bmatrix} u_h \\ v_h \\ w_h \end{bmatrix} 
    = M \, X_w 
    $$
+```
 
    The 2D pixel coordinates are obtained by normalizing the homogeneous coordinates.
 
+```math
    $$
    u = \frac{u_h}{w_h}, \quad v = \frac{v_h}{w_h}
    $$
+```
 
 <strong>Figure 5</strong> shows an example of critical walls projected onto the oblique image plane. These  2D polygons will be used in the facade texture extraction.
 
@@ -239,7 +240,7 @@ The module <strong>facade_extraction.py</strong> includes the functions to extra
 
 3. The output image rectangle will be defined as:
 
-  ```code
+  ```python
 output_rectangle = np.array([
                 [0, 0],
                 [0, height-1],
