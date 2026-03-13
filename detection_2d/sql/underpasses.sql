@@ -141,3 +141,12 @@ SELECT
 FROM filtered f 
 JOIN exploded_with_id e ON f.poly_id = e.poly_id
 GROUP BY e.identificatie;
+
+
+-- Also create index on identificatie for joins
+CREATE INDEX IF NOT EXISTS idx_underpasses_geometries_identificatie
+    ON underpasses.geometries (identificatie);
+
+-- Create spatial index on underpasses.geometries if it doesn't exist
+CREATE INDEX IF NOT EXISTS idx_underpasses_geometries_geom 
+    ON underpasses.geometries USING GIST (geom);

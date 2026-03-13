@@ -206,3 +206,8 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
+rotterdam3d_underpass_extraction/data/
+3DBAG_underpass_heights/result/
+3DBAG_underpass_heights/import/
+3DBAG_underpass_heights/image/
+3DBAG_underpass_heights/template/
