@@ -2,6 +2,7 @@ import csv
 import laspy
 import matplotlib.pyplot as plt
 import numpy as np
+import rerun as rr
 import sqlite3
 from pathlib import Path
 from matplotlib.colors import LinearSegmentedColormap
@@ -38,7 +39,15 @@ HISTOGRAM_BINS = 100
 GRID_CELLSIZE = 0.5
 LOWEST_PEAK_MIN_RELATIVE_AREA = 0.1
 PEAK_BAND_WIDTH_METERS = 0.5
+SNAP_PEAK_TO_RAW_BIN_WITHIN_CLUSTER = False
 OUTPUT_CSV_PATH = "underpass_heights.csv"
+RERUN_OUTPUT_SUFFIX = "_peak_planes.rrd"
+RERUN_BASE_POINT_COLOR = (150, 150, 150)
+PEAK_RGB_COLORS = {
+    1: (31, 119, 180),
+    2: (255, 127, 14),
+    3: (44, 160, 44),
+}
 
 
 def find_top_histogram_peaks(values, bins=100, smoothing_window=7, min_separation_bins=10):
@@ -86,7 +95,7 @@ def find_top_histogram_peaks(values, bins=100, smoothing_window=7, min_separatio
     )
 
 
-def peak_cluster_from_index(bin_edges, smoothed_counts, peak_idx):
+def peak_cluster_index_bounds(smoothed_counts, peak_idx):
     left_idx = peak_idx
     while left_idx > 0 and smoothed_counts[left_idx - 1] <= smoothed_counts[left_idx]:
         left_idx -= 1
@@ -96,7 +105,21 @@ def peak_cluster_from_index(bin_edges, smoothed_counts, peak_idx):
     while right_idx < max_idx and smoothed_counts[right_idx + 1] <= smoothed_counts[right_idx]:
         right_idx += 1
 
+    return left_idx, right_idx
+
+
+def peak_cluster_from_index(bin_edges, smoothed_counts, peak_idx):
+    left_idx, right_idx = peak_cluster_index_bounds(smoothed_counts, peak_idx)
     return bin_edges[left_idx], bin_edges[right_idx + 1]
+
+
+def refine_peak_index_within_cluster(counts, smoothed_counts, peak_idx):
+    left_idx, right_idx = peak_cluster_index_bounds(smoothed_counts, peak_idx)
+    cluster_counts = counts[left_idx:right_idx + 1]
+    max_count = np.max(cluster_counts)
+    max_indices = np.flatnonzero(cluster_counts == max_count) + left_idx
+    refined_peak_idx = max_indices[np.argmin(np.abs(max_indices - peak_idx))]
+    return refined_peak_idx
 
 
 def peak_band_from_center(peak_center, values_min, values_max, band_width_meters):
@@ -319,6 +342,57 @@ def plot_geometry_outline(ax, geometries):
             label_added = True
 
 
+def write_rerun_visualization(bag_id, x, y, z, min_x, min_y, max_x, max_y, peak_layers):
+    output_path = f"{bag_id}{RERUN_OUTPUT_SUFFIX}"
+    rr.init(f"underpass_height_{bag_id}", spawn=False)
+    rr.save(output_path)
+
+    origin_x = (min_x + max_x) / 2
+    origin_y = (min_y + max_y) / 2
+    rr.log(
+        "metadata/rd_origin",
+        rr.TextDocument(
+            f"BAG id: {bag_id}\n"
+            f"RD origin x: {origin_x:.3f}\n"
+            f"RD origin y: {origin_y:.3f}\n"
+            "Geometry in this recording is expressed in local coordinates "
+            "relative to the origin above."
+        ),
+    )
+
+    local_x = x - origin_x
+    local_y = y - origin_y
+    points = np.column_stack((local_x, local_y, z)).astype(np.float32)
+    rr.log(
+        "local/pointcloud/all",
+        rr.Points3D(points, radii=0.02, colors=[RERUN_BASE_POINT_COLOR]),
+    )
+
+    center_x = ((min_x + max_x) / 2) - origin_x
+    center_y = ((min_y + max_y) / 2) - origin_y
+    half_size_x = (max_x - min_x) / 2
+    half_size_y = (max_y - min_y) / 2
+
+    for peak_number, layer in enumerate(peak_layers, start=1):
+        if np.isclose(layer["z_max"], np.max(z)):
+            mask = (z >= layer["z_min"]) & (z <= layer["z_max"])
+        else:
+            mask = (z >= layer["z_min"]) & (z < layer["z_max"])
+        peak_points = np.column_stack((local_x[mask], local_y[mask], z[mask])).astype(np.float32)
+
+        rr.log(
+            f"local/pointcloud/peak_{peak_number}",
+            rr.Points3D(
+                peak_points,
+                radii=0.03,
+                colors=[PEAK_RGB_COLORS[peak_number]],
+            ),
+        )
+
+    rr.disconnect()
+    print(f"Saved Rerun visualization to {output_path}")
+
+
 def process_case(las_path, gpkg_path):
     bag_id = Path(las_path).stem
     output_path = f"{bag_id}_peak_grids_overlay.png"
@@ -355,7 +429,10 @@ def process_case(las_path, gpkg_path):
         y_edges = np.append(y_edges, max_y)
 
     def build_peak_layer(peak_idx):
-        peak_center = bin_centers[peak_idx]
+        refined_peak_idx = peak_idx
+        if SNAP_PEAK_TO_RAW_BIN_WITHIN_CLUSTER:
+            refined_peak_idx = refine_peak_index_within_cluster(counts, smoothed_counts, peak_idx)
+        peak_center = bin_centers[refined_peak_idx]
         z_min, z_max = peak_band_from_center(
             peak_center,
             np.min(z),
@@ -370,6 +447,7 @@ def process_case(las_path, gpkg_path):
         area = np.count_nonzero(grid) * (GRID_CELLSIZE ** 2)
         return {
             "peak_idx": peak_idx,
+            "refined_peak_idx": refined_peak_idx,
             "peak_center": peak_center,
             "z_min": z_min,
             "z_max": z_max,
@@ -378,7 +456,7 @@ def process_case(las_path, gpkg_path):
             "area": area,
             "largest_component_area": largest_contiguous_component_area(grid, GRID_CELLSIZE),
             "smoothed_count": smoothed_counts[peak_idx],
-            "raw_count": counts[peak_idx],
+            "raw_count": counts[refined_peak_idx],
         }
 
     candidate_layer_by_idx = {
@@ -438,7 +516,7 @@ def process_case(las_path, gpkg_path):
         )
 
     underpass_attributes = {
-        "underpass_dh": bin_centers[peak_indices[-1]] - bin_centers[peak_indices[0]],
+        "underpass_dh": selected_peak_layers[-1]["peak_center"] - selected_peak_layers[0]["peak_center"],
         "underpass_top_area": selected_peak_layers[-1]["area"],
         "underpass_bottom_area": selected_peak_layers[0]["area"],
     }
@@ -567,6 +645,18 @@ def process_case(las_path, gpkg_path):
     plt.savefig(output_path, dpi=200, transparent=True)
     print(f"Saved overlay figure to {output_path}")
     plt.close(fig)
+
+    write_rerun_visualization(
+        bag_id,
+        x,
+        y,
+        z,
+        min_x,
+        min_y,
+        max_x,
+        max_y,
+        display_peak_layers,
+    )
     return underpass_metrics
 
 
