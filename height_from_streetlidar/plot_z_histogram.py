@@ -35,11 +35,29 @@ CASES = [
         "gpkg_path": "data/beemsterstraat/NL.IMBAG.Pand.0363100012146576.gpkg",
     },
 ]
+
+# Peak-detection and output parameters.
+# `HISTOGRAM_BINS` controls the Z histogram resolution used both for plotting
+# and for peak detection.
 HISTOGRAM_BINS = 100
+
+# XY raster cell size in meters for the per-peak occupancy grids.
 GRID_CELLSIZE = 0.5
+
+# If the lowest-Z peak has less than this fraction of the dominant peak's
+# contiguous raster area, it is treated as insignificant and not forced in as
+# one of the two main underpass peaks.
 LOWEST_PEAK_MIN_RELATIVE_AREA = 0.1
+
+# Width of the Z band, centered on each selected peak, used to subset LAS
+# points for the raster outputs and reported peak windows.
 PEAK_BAND_WIDTH_METERS = 0.5
+
+# When enabled, the selected peak is snapped from the smoothed local maximum to
+# the highest raw histogram bin inside that smoothed peak cluster.
 SNAP_PEAK_TO_RAW_BIN_WITHIN_CLUSTER = False
+
+# Output filenames and visualization colors.
 OUTPUT_CSV_PATH = "underpass_heights.csv"
 RERUN_OUTPUT_SUFFIX = "_peak_planes.rrd"
 RERUN_BASE_POINT_COLOR = (150, 150, 150)
