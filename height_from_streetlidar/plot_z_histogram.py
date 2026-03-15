@@ -5,7 +5,8 @@ import numpy as np
 import rerun as rr
 import sqlite3
 from pathlib import Path
-from matplotlib.colors import LinearSegmentedColormap
+from matplotlib.colors import LinearSegmentedColormap, ListedColormap
+from matplotlib.patches import Patch
 from shapely import wkb
 
 
@@ -53,18 +54,24 @@ LOWEST_PEAK_MIN_RELATIVE_AREA = 0.1
 # points for the raster outputs and reported peak windows.
 PEAK_BAND_WIDTH_METERS = 0.5
 
+# Number of peak layers to display in the diagnostic output. The first two are
+# the selected underpass peaks; any additional peaks are diagnostic only.
+DISPLAY_PEAK_COUNT = 4
+
 # When enabled, the selected peak is snapped from the smoothed local maximum to
 # the highest raw histogram bin inside that smoothed peak cluster.
 SNAP_PEAK_TO_RAW_BIN_WITHIN_CLUSTER = False
 
-# Output filenames and visualization colors.
+# Output filenames, Rerun mode, and visualization colors.
 OUTPUT_CSV_PATH = "underpass_heights.csv"
+RERUN_OUTPUT_MODE = "viewer"  # "rrd" or "viewer"
 RERUN_OUTPUT_SUFFIX = "_peak_planes.rrd"
 RERUN_BASE_POINT_COLOR = (150, 150, 150)
 PEAK_RGB_COLORS = {
     1: (31, 119, 180),
     2: (255, 127, 14),
     3: (44, 160, 44),
+    4: (214, 39, 40),
 }
 
 
@@ -271,6 +278,36 @@ def build_grid(x, y, x_edges, y_edges):
     return grid.T
 
 
+def build_min_z_grid(x, y, z, x_edges, y_edges):
+    rows = len(y_edges) - 1
+    cols = len(x_edges) - 1
+    min_grid = np.full((rows, cols), np.nan, dtype=float)
+
+    x_idx = np.searchsorted(x_edges, x, side="right") - 1
+    y_idx = np.searchsorted(y_edges, y, side="right") - 1
+    valid = (
+        (x_idx >= 0)
+        & (x_idx < cols)
+        & (y_idx >= 0)
+        & (y_idx < rows)
+    )
+    if not np.any(valid):
+        return min_grid
+
+    flat_indices = y_idx[valid] * cols + x_idx[valid]
+    flat_min = np.full(rows * cols, np.inf, dtype=float)
+    np.minimum.at(flat_min, flat_indices, z[valid])
+    flat_min[np.isinf(flat_min)] = np.nan
+    return flat_min.reshape(rows, cols)
+
+
+def band_mask(values, value_min, value_max):
+    mask = values >= value_min
+    if np.isclose(value_max, np.max(values)):
+        return mask & (values <= value_max)
+    return mask & (values < value_max)
+
+
 def largest_contiguous_component_area(grid, cellsize):
     occupied = grid > 0
     if not np.any(occupied):
@@ -360,10 +397,26 @@ def plot_geometry_outline(ax, geometries):
             label_added = True
 
 
-def write_rerun_visualization(bag_id, x, y, z, min_x, min_y, max_x, max_y, peak_layers):
+def write_rerun_visualization(
+    bag_id,
+    x,
+    y,
+    z,
+    min_x,
+    min_y,
+    max_x,
+    max_y,
+    peak_layers,
+):
     output_path = f"{bag_id}{RERUN_OUTPUT_SUFFIX}"
-    rr.init(f"underpass_height_{bag_id}", spawn=False)
-    rr.save(output_path)
+    send_to_viewer = RERUN_OUTPUT_MODE == "viewer"
+    rr.init(
+        f"underpass_height_{bag_id}",
+        recording_id=bag_id,
+        spawn=send_to_viewer,
+    )
+    if not send_to_viewer:
+        rr.save(output_path)
 
     origin_x = (min_x + max_x) / 2
     origin_y = (min_y + max_y) / 2
@@ -408,7 +461,10 @@ def write_rerun_visualization(bag_id, x, y, z, min_x, min_y, max_x, max_y, peak_
         )
 
     rr.disconnect()
-    print(f"Saved Rerun visualization to {output_path}")
+    if send_to_viewer:
+        print(f"Sent Rerun visualization for {bag_id} to viewer")
+    else:
+        print(f"Saved Rerun visualization to {output_path}")
 
 
 def process_case(las_path, gpkg_path):
@@ -457,10 +513,7 @@ def process_case(las_path, gpkg_path):
             np.max(z),
             PEAK_BAND_WIDTH_METERS,
         )
-        if np.isclose(z_max, np.max(z)):
-            mask = (z >= z_min) & (z <= z_max)
-        else:
-            mask = (z >= z_min) & (z < z_max)
+        mask = band_mask(z, z_min, z_max)
         grid = build_grid(x[mask], y[mask], x_edges, y_edges)
         area = np.count_nonzero(grid) * (GRID_CELLSIZE ** 2)
         return {
@@ -506,23 +559,63 @@ def process_case(las_path, gpkg_path):
         )
 
     display_peak_indices = list(peak_indices)
-    area_ranked_candidate_indices = [
-        layer["peak_idx"] for layer in ranked_candidate_layers
-    ]
+    area_ranked_candidate_indices = [layer["peak_idx"] for layer in ranked_candidate_layers]
     between_peak_candidates = [
         peak_idx
         for peak_idx in area_ranked_candidate_indices
         if peak_idx not in display_peak_indices
         and bin_centers[peak_indices[0]] < bin_centers[peak_idx] < bin_centers[peak_indices[-1]]
     ]
-    if between_peak_candidates:
-        display_peak_indices.append(between_peak_candidates[0])
-    else:
-        for peak_idx in area_ranked_candidate_indices:
-            if peak_idx not in display_peak_indices:
-                display_peak_indices.append(peak_idx)
-                break
+    for peak_idx in between_peak_candidates:
+        if len(display_peak_indices) >= DISPLAY_PEAK_COUNT:
+            break
+        display_peak_indices.append(peak_idx)
+
+    for peak_idx in area_ranked_candidate_indices:
+        if len(display_peak_indices) >= DISPLAY_PEAK_COUNT:
+            break
+        if peak_idx not in display_peak_indices:
+            display_peak_indices.append(peak_idx)
     display_peak_layers = [candidate_layer_by_idx[peak_idx] for peak_idx in display_peak_indices]
+    floor_excluded_mask = ~band_mask(
+        z,
+        selected_peak_layers[0]["z_min"],
+        selected_peak_layers[0]["z_max"],
+    )
+    min_z_excluding_floor_grid = build_min_z_grid(
+        x[floor_excluded_mask],
+        y[floor_excluded_mask],
+        z[floor_excluded_mask],
+        x_edges,
+        y_edges,
+    )
+    higher_peak_cell_mask = np.zeros_like(min_z_excluding_floor_grid, dtype=bool)
+    for layer in display_peak_layers[1:]:
+        higher_peak_cell_mask |= layer["grid"] > 0
+    peak_origin_grid = np.full(min_z_excluding_floor_grid.shape, np.nan, dtype=float)
+    for display_peak_idx, layer in sorted(
+        enumerate(display_peak_layers[1:], start=2),
+        key=lambda item: item[1]["peak_center"],
+    ):
+        layer_cell_mask = (layer["grid"] > 0) & np.isnan(peak_origin_grid)
+        peak_origin_grid[layer_cell_mask] = display_peak_idx
+    min_z_excluding_floor_grid = np.where(
+        higher_peak_cell_mask,
+        min_z_excluding_floor_grid,
+        np.nan,
+    )
+    min_z_excluding_floor_values = min_z_excluding_floor_grid[~np.isnan(min_z_excluding_floor_grid)]
+    if len(min_z_excluding_floor_values) > 0:
+        min_z_hist_counts, min_z_hist_edges = np.histogram(
+            min_z_excluding_floor_values,
+            bins=HISTOGRAM_BINS,
+        )
+        min_z_hist_centers = (min_z_hist_edges[:-1] + min_z_hist_edges[1:]) / 2
+        min_z_hist_widths = np.diff(min_z_hist_edges)
+    else:
+        min_z_hist_counts = np.array([0.0], dtype=float)
+        min_z_hist_centers = np.array([0.0], dtype=float)
+        min_z_hist_widths = np.array([1.0], dtype=float)
 
     for i, layer in enumerate(display_peak_layers, start=1):
         print(
@@ -556,14 +649,24 @@ def process_case(las_path, gpkg_path):
     map_height = max_y - min_y
     map_aspect_ratio = map_width / map_height if map_height > 0 else 1.0
     map_panel_width_ratio = max(0.7, map_aspect_ratio)
-    width_ratios = [1.2] + [map_panel_width_ratio] * len(display_peak_layers)
-    fig, axes = plt.subplots(
-        1,
-        1 + len(display_peak_layers),
-        figsize=(5 * sum(width_ratios), 7),
-        gridspec_kw={"width_ratios": width_ratios, "wspace": 0.06},
+    ncols = len(display_peak_layers)
+    width_ratios = [map_panel_width_ratio] * ncols
+    figure_width = 5 * sum(width_ratios)
+    fig = plt.figure(figsize=(figure_width, 15))
+    bottom_map_stop = max(1, ncols - 2)
+    grid_spec = fig.add_gridspec(
+        3,
+        ncols,
+        width_ratios=width_ratios,
+        height_ratios=[1.0, 1.0, 1.0],
+        wspace=0.06,
+        hspace=0.32,
     )
-    ax_hist = axes[0]
+    ax_hist = fig.add_subplot(grid_spec[0, :])
+    peak_axes = [fig.add_subplot(grid_spec[1, idx]) for idx in range(ncols)]
+    ax_min_z = fig.add_subplot(grid_spec[2, :bottom_map_stop])
+    ax_peak_origin = fig.add_subplot(grid_spec[2, bottom_map_stop])
+    ax_min_z_hist = fig.add_subplot(grid_spec[2, bottom_map_stop + 1])
 
     ax_hist.hist(
         z,
@@ -579,7 +682,7 @@ def process_case(las_path, gpkg_path):
         linewidth=2,
         label="Smoothed histogram",
     )
-    peak_colors = {1: "C0", 2: "C1", 3: "C2"}
+    peak_colors = {1: "C0", 2: "C1", 3: "C2", 4: "C3"}
     for i, layer in enumerate(display_peak_layers, start=1):
         ax_hist.axvline(
             layer["peak_center"],
@@ -624,12 +727,11 @@ def process_case(las_path, gpkg_path):
         1: make_truncated_cmap("Blues", start=0.28),
         2: make_truncated_cmap("Oranges", start=0.30),
         3: make_truncated_cmap("Greens", start=0.30),
+        4: make_truncated_cmap("Reds", start=0.30),
+        "min_z": make_truncated_cmap("cividis", start=0.20),
     }
 
-    for map_idx, (ax_map, layer) in enumerate(
-        zip(axes[1:], display_peak_layers),
-        start=1,
-    ):
+    for map_idx, (ax_map, layer) in enumerate(zip(peak_axes, display_peak_layers), start=1):
         masked_grid = np.ma.masked_where(layer["grid"] == 0, layer["grid"])
         ax_map.set_facecolor("#f3f3f3")
         ax_map.imshow(
@@ -658,9 +760,95 @@ def process_case(las_path, gpkg_path):
         ax_map.set_aspect("equal")
         ax_map.legend(loc="best")
 
+    masked_min_z_grid = np.ma.masked_invalid(min_z_excluding_floor_grid)
+    ax_min_z.set_facecolor("#f3f3f3")
+    min_z_image = ax_min_z.imshow(
+        masked_min_z_grid,
+        origin="lower",
+        extent=extent,
+        cmap=color_maps["min_z"],
+        alpha=0.95,
+        interpolation="nearest",
+    )
+    plot_geometry_outline(ax_min_z, geometries)
+    ax_min_z.set_xlabel("X")
+    ax_min_z.set_ylabel("Y")
+    if len(min_z_excluding_floor_values) > 0:
+        min_z_range_text = (
+            f"Cell min Z range "
+            f"[{np.min(min_z_excluding_floor_values):.2f}, {np.max(min_z_excluding_floor_values):.2f}]"
+        )
+    else:
+        min_z_range_text = "No cells after floor exclusion"
+    ax_min_z.set_title(
+        "Min elevation per cell\n"
+        f"Cells from Peaks 2-{len(display_peak_layers)}; excluding Peak 1 "
+        f"[{selected_peak_layers[0]['z_min']:.2f}, {selected_peak_layers[0]['z_max']:.2f})\n"
+        f"{min_z_range_text}",
+        fontsize=11,
+        pad=8,
+    )
+    ax_min_z.set_aspect("equal")
+    ax_min_z.legend(loc="best")
+    colorbar = fig.colorbar(min_z_image, ax=ax_min_z, fraction=0.046, pad=0.04)
+    colorbar.set_label("Min Z (m)")
+
+    peak_origin_colors = [
+        peak_colors.get(display_peak_idx, "C3")
+        for display_peak_idx in range(2, len(display_peak_layers) + 1)
+    ]
+    masked_peak_origin_grid = np.ma.masked_invalid(peak_origin_grid)
+    ax_peak_origin.set_facecolor("#f3f3f3")
+    ax_peak_origin.imshow(
+        masked_peak_origin_grid,
+        origin="lower",
+        extent=extent,
+        cmap=ListedColormap(peak_origin_colors),
+        interpolation="nearest",
+        vmin=1.5,
+        vmax=len(display_peak_layers) + 0.5,
+    )
+    plot_geometry_outline(ax_peak_origin, geometries)
+    ax_peak_origin.set_xlabel("X")
+    ax_peak_origin.set_ylabel("")
+    ax_peak_origin.tick_params(axis="y", which="both", left=False, labelleft=False)
+    ax_peak_origin.set_title(
+        "Peak origin per cell\n"
+        f"Lowest occupying peak among Peaks 2-{len(display_peak_layers)}",
+        fontsize=11,
+        pad=8,
+    )
+    ax_peak_origin.set_aspect("equal")
+    peak_origin_legend = [
+        Patch(
+            facecolor=peak_colors.get(display_peak_idx, "C3"),
+            edgecolor="none",
+            label=f"Peak {display_peak_idx}",
+        )
+        for display_peak_idx in range(2, len(display_peak_layers) + 1)
+    ]
+    ax_peak_origin.legend(handles=peak_origin_legend, loc="best")
+
+    ax_min_z_hist.hist(
+        min_z_excluding_floor_values,
+        bins=HISTOGRAM_BINS,
+        color="lightgray",
+        edgecolor="#999999",
+        linewidth=0.25,
+    )
+    ax_min_z_hist.set_xlabel("Cell min Z (m)")
+    ax_min_z_hist.set_ylabel("Cell count")
+    ax_min_z_hist.set_title(
+        f"Histogram of cell min Z\ncells from Peaks 2-{len(display_peak_layers)}",
+        fontsize=11,
+        pad=8,
+    )
+    ax_min_z_hist.spines["top"].set_visible(False)
+    ax_min_z_hist.spines["right"].set_visible(False)
+
     fig.suptitle(bag_id, fontsize=15, y=0.985)
-    fig.subplots_adjust(left=0.05, right=0.99, bottom=0.08, top=0.82)
-    plt.savefig(output_path, dpi=200, transparent=True)
+    fig.subplots_adjust(left=0.05, right=0.99, bottom=0.06, top=0.90)
+    plt.savefig(output_path, dpi=200, transparent=False)
     print(f"Saved overlay figure to {output_path}")
     plt.close(fig)
 
