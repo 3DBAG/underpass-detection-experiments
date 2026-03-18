@@ -29,9 +29,7 @@ primary_edges AS (
     SELECT
         un.underpass_id,
         un.identificatie,
-        ST_Multi(
-            ST_CollectionExtract(
-                ST_Intersection(
+                st_linemerge(ST_Intersection(
                     ST_ExteriorRing(un.geom),
                     CASE 
                         WHEN ST_GeometryType(ST_Snap(bbj.bgt_geometrie, un.geom, 0.03)) = 'ST_MultiPolygon' 
@@ -40,13 +38,9 @@ primary_edges AS (
                         ))
                         ELSE ST_ExteriorRing(ST_Snap(bbj.bgt_geometrie, un.geom, 0.03))
                     END
-                ),
-                2
             )
         ) AS interior_edges,
-        ST_Multi(
-            ST_CollectionExtract(
-                ST_Difference(
+                st_linemerge(ST_Difference(
                     ST_ExteriorRing(un.geom),
                     CASE 
                         WHEN ST_GeometryType(ST_Snap(bbj.bgt_geometrie, un.geom, 0.03)) = 'ST_MultiPolygon' 
@@ -55,8 +49,6 @@ primary_edges AS (
                         ))
                         ELSE ST_ExteriorRing(ST_Snap(bbj.bgt_geometrie, un.geom, 0.03))
                     END
-                ),
-                2
             )
         ) AS exterior_edges
     FROM underpasses.geometries un
@@ -71,9 +63,7 @@ edge_intersection_with_adjacent AS (
         e.underpass_id,
         e.identificatie,
         e.exterior_edges,
-        ST_Multi(
-            ST_CollectionExtract(
-                ST_Intersection(
+                st_linemerge(ST_Intersection(
                     e.exterior_edges,
                     CASE 
                         WHEN ST_GeometryType(ST_Snap(ag.adjacent_geom, e.exterior_edges, 0.03)) = 'ST_MultiPolygon' 
@@ -82,9 +72,7 @@ edge_intersection_with_adjacent AS (
                         ))
                         ELSE ST_ExteriorRing(ST_Snap(ag.adjacent_geom, e.exterior_edges, 0.03))
                     END
-                ),
-                2
-            )
+        )
         ) AS intersection_geom
     FROM primary_edges e
     LEFT JOIN adjacent_geometries ag
@@ -102,15 +90,13 @@ edges_merged AS (
         -- Non-intersection edges (exterior edges not touching adjacent buildings)
         CASE
             WHEN ST_Union(intersection_geom) FILTER (WHERE NOT ST_IsEmpty(intersection_geom)) IS NOT NULL
-            THEN ST_Multi(
-                ST_CollectionExtract(
+            THEN 
+                ST_linemerge(
                     ST_Difference(
                         exterior_edges,
                         ST_Union(intersection_geom) FILTER (WHERE NOT ST_IsEmpty(intersection_geom))
-                    ),
-                    2
+                    )
                 )
-            )
             ELSE exterior_edges
         END AS exterior_edges
     FROM edge_intersection_with_adjacent
@@ -120,33 +106,54 @@ edges_merged AS (
 -- Dump MULTILINESTRING to individual linestrings, keep LINESTRING intact
 interior_segments AS (
     SELECT
-        pe.underpass_id,
-        pe.identificatie,
+        t.underpass_id,
+        t.identificatie,
         'interior' AS edge_type,
-        interior_edges as geom
-    FROM primary_edges pe
-    WHERE pe.interior_edges IS NOT NULL
-        AND NOT ST_IsEmpty(pe.interior_edges)
+        (t.dump_result).path[1] AS linestring_id,
+        (t.dump_result).geom AS geom
+    FROM (
+        SELECT 
+            underpass_id,
+            identificatie,
+            ST_Dump(interior_edges) AS dump_result
+        FROM primary_edges as pe
+        WHERE interior_edges IS NOT NULL 
+            AND NOT ST_IsEmpty(interior_edges)
+    ) t
 ),
 exterior_segments AS (
-    SELECT
-        em.underpass_id,
-        em.identificatie,
+    SELECT 
+        t.underpass_id,
+        t.identificatie,
         'exterior' AS edge_type,
-        exterior_edges as geom
-    FROM edges_merged em
-    WHERE em.exterior_edges IS NOT NULL
-        AND NOT ST_IsEmpty(em.exterior_edges)
+        (t.dump_result).path[1] AS linestring_id,
+        (t.dump_result).geom AS geom
+    FROM (
+        SELECT 
+            underpass_id,
+            identificatie,
+            ST_Dump(exterior_edges) AS dump_result
+        FROM edges_merged
+        WHERE exterior_edges IS NOT NULL 
+            AND NOT ST_IsEmpty(exterior_edges)
+    ) t
 ),
 shared_segments AS (
-    SELECT
-        em.underpass_id,
-        em.identificatie,
+    SELECT 
+        t.underpass_id,
+        t.identificatie,
         'shared' AS edge_type,
-        shared_edges as geom
-    FROM edges_merged em
-    WHERE em.shared_edges IS NOT NULL
-        AND NOT ST_IsEmpty(em.shared_edges)
+        (t.dump_result).path[1] AS linestring_id,
+        (t.dump_result).geom AS geom
+    FROM (
+        SELECT 
+            underpass_id,
+            identificatie,
+            ST_Dump(shared_edges) AS dump_result
+        FROM edges_merged
+        WHERE shared_edges IS NOT NULL 
+            AND NOT ST_IsEmpty(shared_edges)
+) t
 )
 SELECT
     ROW_NUMBER() OVER() AS edge_id,
