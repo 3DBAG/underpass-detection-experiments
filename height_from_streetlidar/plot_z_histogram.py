@@ -766,6 +766,13 @@ def process_case(las_path, gpkg_path):
         linewidth=2,
         label="Smoothed histogram",
     )
+    ax_hist.axhline(
+        display_raw_count_threshold,
+        color="red",
+        linestyle=":",
+        linewidth=1.5,
+        alpha=0.85,
+    )
     for i, layer in enumerate(display_peak_layers, start=1):
         ax_hist.axvline(
             layer["peak_center"],
