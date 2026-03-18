@@ -1,6 +1,6 @@
 # Underpass Height From Street LiDAR
 
-This directory contains a Python workflow for estimating an underpass height from a cropped LAS/LAZ point cloud and a matching polygon stored in a GeoPackage.
+This directory contains a Python workflow for estimating underpass height from cropped LAS/LAZ point clouds and matching polygons stored in GeoPackages.
 
 > The cropped point cloud was generated using roofer:
 > ```
@@ -8,7 +8,9 @@ This directory contains a Python workflow for estimating an underpass height fro
 > ```
 > The GPKG file contains the underpass polygon of interest from the 2D detection pipeline. The pointcloud is one of the files Amsterdam gave to us. To save space, these two files are not included in this repository, but the relvant roofer output is included.
 
-The script loops over a list of BAG cases, reads each LAS/LAZ file and its matching GeoPackage polygon, finds two Z peaks, rasterizes the corresponding point subsets onto the XY plane at `0.5 m` resolution, and overlays those rasters with the polygon footprint.
+The script loops over a list of BAG cases, reads each LAS/LAZ file and its matching GeoPackage polygon, detects Z-peak candidates from a smoothed histogram, rasterizes each candidate to the XY plane at `0.5 m` resolution, and ranks peaks by the largest contiguous occupied raster area.
+
+The two selected underpass peaks are then used for the height estimate and GeoPackage attributes. A third peak is also rendered as a diagnostic panel in the output figure. Each selected peak uses a fixed `0.5 m` vertical band centered on the peak.
 
 It also writes the derived attributes back into the GeoPackage feature table:
 
@@ -18,9 +20,13 @@ It also writes the derived attributes back into the GeoPackage feature table:
 
 ## What The Script Produces
 
-- A histogram of Z values with the raw histogram, the smoothed histogram, the two selected peak lines, fixed `0.5 m` selection bands, and a double-headed height-difference annotation
-- One XY raster subplot for the lower peak and one for the upper peak, each overlaid with the polygon outline
+- A histogram of Z values with raw bars, a smoothed curve, three peak markers, fixed `0.5 m` peak bands, and a double-headed height-difference annotation for the two selected underpass peaks
+- Three XY raster subplots:
+  - selected lower peak
+  - selected upper peak
+  - third diagnostic peak
 - One PNG per BAG id, named `<bag_id>_peak_grids_overlay.png`
+- A CSV summary written to `underpass_heights.csv`
 - Updated attributes in each input GeoPackage:
   - `underpass_dh`
   - `underpass_top_area`
@@ -114,6 +120,7 @@ python3 plot_z_histogram.py
 
 ## Files
 
-- [`plot_z_histogram.py`](/Users/ravi/git/underpass-detection-experiments/height_from_streetlidar/plot_z_histogram.py): main analysis and plotting script
-- [`flake.nix`](/Users/ravi/git/underpass-detection-experiments/height_from_streetlidar/flake.nix): Nix development shell with Python dependencies
-- [`images/`](/Users/ravi/git/underpass-detection-experiments/height_from_streetlidar/images): example point-cloud screenshots and BAG-specific script outputs
+- `plot_z_histogram.py`: main analysis and plotting script
+- `flake.nix`: Nix development shell with Python dependencies
+- `underpass_heights.csv`: CSV summary written by the script
+- `images/`: example point-cloud screenshots and BAG-specific script outputs

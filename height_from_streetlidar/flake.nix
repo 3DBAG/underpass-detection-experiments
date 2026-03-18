@@ -16,6 +16,7 @@
             laspy
             matplotlib
             numpy
+            rerun-sdk
             shapely
           ]);
         in
