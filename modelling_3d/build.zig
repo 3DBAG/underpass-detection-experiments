@@ -59,6 +59,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("zityjson/src/zfcb.zig"),
             .target = target,
             .optimize = optimize,
+            .link_libc = true,
         }),
     });
     zfcb_lib.bundle_compiler_rt = true;
@@ -71,6 +72,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("zityjson/src/zityjson.zig"),
             .target = target,
             .optimize = optimize,
+            .link_libc = true,
         }),
     });
     zityjson_lib.bundle_compiler_rt = true;
