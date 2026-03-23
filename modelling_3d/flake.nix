@@ -45,8 +45,6 @@
           boost
           eigen
 
-          # geogram - geometry processing library
-          geogram
           zlib
 
           # GDAL with features
@@ -60,11 +58,16 @@
           arrow-cpp
         ];
 
+        # Optional: geogram dependencies (pass -Dgeogram=true to zig build)
+        geogramDeps = with pkgs; [
+          geogram
+        ];
+
       in
       {
-        # Development shell
+        # Development shell (includes geogram for optional use)
         devShells.default = pkgs.mkShell {
-          buildInputs = cppDeps ++ buildTools ++ [ pkgs.wget pkgs.just ];
+          buildInputs = cppDeps ++ geogramDeps ++ buildTools ++ [ pkgs.wget pkgs.just ];
 
           # Environment variables
           GDAL_DATA = "${pkgs.gdal}/share/gdal";
@@ -83,6 +86,7 @@
             echo "  zig build"
             echo ""
             echo "  (To compile in release mode add: -Doptimize=ReleaseFast)"
+            echo "  (To enable geogram support add: -Dgeogram=true)"
             echo ""
             echo "To run the program with sample data:"
             echo "  ./zig-out/bin/add_underpass ./sample_data/amsterdam_beemsterstraat_42.gpkg ./sample_data/9-444-728_sm.fcb ./sample_data/out.fcb hoogte identificatie"

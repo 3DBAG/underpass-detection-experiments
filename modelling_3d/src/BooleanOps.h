@@ -15,7 +15,9 @@ enum class BooleanMethod {
     Manifold,
     CgalNef,
     CgalPMP,
-    Geogram
+#ifdef ENABLE_GEOGRAM
+    Geogram,
+#endif
 };
 
 struct BooleanOpTiming {
@@ -35,10 +37,12 @@ Surface_mesh corefine_boolean_difference(
     const std::vector<Surface_mesh>& meshes_b,
     BooleanOpTiming* timing = nullptr);
 
+#ifdef ENABLE_GEOGRAM
 // Geogram mesh boolean difference
 Surface_mesh geogram_boolean_difference(
     const Surface_mesh& mesh_a,
     const std::vector<Surface_mesh>& meshes_b,
     BooleanOpTiming* timing = nullptr);
+#endif
 
 #endif // BOOLEAN_OPS_H

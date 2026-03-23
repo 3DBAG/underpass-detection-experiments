@@ -50,6 +50,7 @@ pub fn build(b: *std.Build) void {
 
     // Build options
     const enable_rerun = b.option(bool, "rerun", "Enable Rerun visualization support (only tested on macOS arm64)") orelse false;
+    const enable_geogram = b.option(bool, "geogram", "Enable Geogram boolean operations support") orelse false;
 
     // Build zfcb static library (streaming FlatCityBuf reader)
     const zfcb_lib = b.addLibrary(.{
@@ -78,10 +79,11 @@ pub fn build(b: *std.Build) void {
     zityjson_lib.bundle_compiler_rt = true;
 
     // C++ flags
-    const cpp_flags: []const []const u8 = if (enable_rerun)
-        &.{ "-std=c++20", "-DENABLE_RERUN=1" }
-    else
-        &.{"-std=c++20"};
+    var cpp_flags_list: std.ArrayListUnmanaged([]const u8) = .empty;
+    cpp_flags_list.append(b.allocator, "-std=c++20") catch @panic("OOM");
+    if (enable_rerun) cpp_flags_list.append(b.allocator, "-DENABLE_RERUN=1") catch @panic("OOM");
+    if (enable_geogram) cpp_flags_list.append(b.allocator, "-DENABLE_GEOGRAM=1") catch @panic("OOM");
+    const cpp_flags = cpp_flags_list.items;
 
     // Create the main executable module
     const exe_mod = b.createModule(.{
@@ -94,7 +96,7 @@ pub fn build(b: *std.Build) void {
         .name = "add_underpass",
         .root_module = exe_mod,
     });
-    addGeogramIncludePathFromNixFlags(b, exe.root_module);
+    if (enable_geogram) addGeogramIncludePathFromNixFlags(b, exe.root_module);
 
     // 1. C++ Setup
     exe.root_module.addCSourceFile(.{
@@ -121,10 +123,12 @@ pub fn build(b: *std.Build) void {
         .file = b.path("src/BooleanOpsPMP.cpp"),
         .flags = cpp_flags,
     });
-    exe.root_module.addCSourceFile(.{
-        .file = b.path("src/BooleanOpsGeogram.cpp"),
-        .flags = cpp_flags,
-    });
+    if (enable_geogram) {
+        exe.root_module.addCSourceFile(.{
+            .file = b.path("src/BooleanOpsGeogram.cpp"),
+            .flags = cpp_flags,
+        });
+    }
     exe.root_module.addCSourceFile(.{
         .file = b.path("src/BooleanOpsManifold.cpp"),
         .flags = cpp_flags,
@@ -141,7 +145,7 @@ pub fn build(b: *std.Build) void {
     // 2. Linking System Libraries
     // Note: Zig automatically picks up NIX_CFLAGS_COMPILE and NIX_LDFLAGS from the environment
     exe.root_module.linkSystemLibrary("manifold", .{});
-    exe.root_module.linkSystemLibrary("geogram", .{});
+    if (enable_geogram) exe.root_module.linkSystemLibrary("geogram", .{});
 
     // CGAL dependencies
     exe.root_module.linkSystemLibrary("gmp", .{});
