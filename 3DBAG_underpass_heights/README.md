@@ -397,7 +397,10 @@ This method consists of applying a convolutional neural network that is trained 
 </p>
 
 ### 2.5. Output data
-The estimated heights are stored in the underpass GeoDataFrame. Once the code has iterated over all tiles, it writes the underpass polygons with the estimated heights to a GeoJSON file.
+
+Every time that an underpass height is estimated, the value is stored in an observations list for the underpass. Then, the estimates height is recalculated as the average of all observations.
+
+One all tiles have been iterated, the estimated heights will be the last computed values stored in the underpass GeoDataFrame. The code then writes the underpass polygons with the estimated heights to a GeoJSON file.
 
 
 ## 3. Assessment of results
@@ -540,21 +543,21 @@ Table 3 presents an evaluation of performance under different error tolerances. 
 </div>
 
 ## 4. Conclusions and recommendations
-From the analysis in Section 3, we can conclude that none of the methods is currently reliable to obtain accurate underpass height estimations using oblique images. Moreover, the general process is subject of improvements. In this section we will give recommendations for further developement of each part of the method that needs it.
+From the analysis in Section 3,  it can be concluded that none of the evaluated methods currently provides reliable underpass height estimations from oblique images. Moreover, the general process is subject to several improvements. In this section we outline recommendations to imrpove each stage of the method.
 
 #### Data preprocessing 
-One cause of height estimation errors was directly caused by the underpasses geometry, since some of the input underpasses are still merged with underground surfaces (usually corresponding to parking areas). This may cause several underpasses to merge in one (thus returning one single height value for both). Also, the current method may find critical walls corresponding to these underground areas, thus later extracting incorrect facade textures.
+Some estimation errors originate from the geometry of the underpasses themselves. For example, certain underpasses are merged with underground surfaces (e.g., parking areas), which can lead to multiple underpasses being represented as a single feature, returning only one height value. Moreover, critical walls corresponding to these underground areas may be incorrectly identified, resulting in extraction of incorrect facade textures. Therefore, it is recommended to input clean, independent underpass geometries.
 
-When creating the image visibility table, currently two criteria are used for filtering: angle facade-camera plane and direction of the facade normal. However, there are occassions where other buildings are occluding the projected facades in the image. Therefore, incorporating an occlusion filtering criteria will be helpful to avoid for incorrect facade texture extraction. This can be done by projecting a line of sight from the camera center to the critical wall and check for intersection with other walls (extracted from the 3D model).
+Currently, two criteria are used to filter images in the visibility table: the angle between the facade and camera plane, and the direction of the facade normal. However, there are occassions where other buildings are occluding the projected facades in the image. Therefore, incorporating an occlusion filtering criteria could be helpful to avoid incorrect facade texture extraction. This could be done by projecting a line of sight from the camera center to the critical wall and checking for intersection with other walls (extracted from the 3D model).
 
 #### Perspective projection
-The accuracy of the camera parameters is crucial for the correct outcome of the perspective projection. Also, orientation consistency is a must for a good outcome accross all cvameras (if multi-camera model). Therefore, it is recommended to use high quality dataset such as the ones frovided by ProRail.
+Accurate camera parameters are crucial for correct perspective projection. Furthermore, orientation consistency is a must when multiple cameras are used. Using high-quality datasets  is recommended to obtain reliable results.
 
 #### Height estimation methods
-The U-Net method is the most promising even though it has still a very low accuracy. However, it must be mentioned that this method was trained with only around 250 images, while normal amounts are of the order of 1000. Moreover, the training parameters were kept in the modest size since no powerful hardware was avilable. A correct training of the model with good quality training data and powerful hardware could potentially yield much better accurate results. Appendix B offers a description of this method and gives an overview of the process, as well as indications for better training.
+The U-Net method currently shows the most promsising results, even though its accuracy remains low. This is partly due to the limited training set (approximately 250 images) and modest training parameters due to hardware constraints. A larger training dataset (around 1000 images) and more powerful hardware would enable the model to achieve much higher accuracies. Apendix B offers a description of this method as well as indications for better future training.
 
 #### Output data
-Another source of error is the way the height is estimated. Currently, each observation is stored in a list, and estimated height is computed as the average of all the observations. This causes that outliers influence highly in the estimated height, since no filtering criteria is applied. In a quick test for this, instead of the average, the meadian was taken in the U-Net method. Other methods could be explored such as the Interquartile Range (IQR) filtering, however, this generally needs a larger amount of observations. RUN FOR MEDIAN AND IQR!
+Currently, each observation is stored in a list, and the estimated height is computed as the average of all the observations. This apprach is sensitive to outliers, affecting the final estimation. Preliminary tests indicate that removing outliers via trimming before averaging heights returns more accurate predictions. Further exploration of statistical aggregation methods is recommended to improve robustness.
 
 
 ## APPENDIX A - Running the code
