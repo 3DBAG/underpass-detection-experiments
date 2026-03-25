@@ -282,17 +282,18 @@ This naive method consists of applying image segmentation through detecting conn
 
 3. Apply filtering criteria to detect the underpass opening. The selected component must:
 
-   <p> a) Be higher than a threshold (= 2 m) </p>
-   <p> b) Be close to the ground (< 100 px away from the bottom of the image) </p>
-   <p> c) Be separated from the top (> 50 px away from the top of the image) </p>
-   <p> d) Have a parallelogram shape. This is measured by computing the solidity of the component, which is the area of its bounding box which is actually covered by the component. It is defined as:
+   a) Be higher than a threshold (= 2 m) 
 
-  ```math
-  solidity = \frac{component \space area}{component \space height \times component \space width}
-  ```
+   b) Be close to the ground (< 100 px away from the bottom of the image) 
+   
+   c) Be separated from the top (> 50 px away from the top of the image) 
 
-   </p>
-   <p> e) Be centered in the image, since the image of the facade is constructed based on the underpass 2D geometry.</p>
+   d) Have a parallelogram shape. This is measured by computing the solidity of the component, which is the area of its bounding box which is actually covered by the component. It is defined as:
+
+   ```math
+   solidity = \frac{component \space area}{component \space height \times component \space width}
+   ```
+   e) Be centered in the image, since the image of the facade is constructed based on the underpass 2D geometry.
 
 4. Takes the top pixel y-coordinate (<strong>pixel row</strong>) of the selected component, assuming that this corresponds to the underpass ceiling.
 
