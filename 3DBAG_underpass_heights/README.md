@@ -322,8 +322,6 @@ This method uses a deep learning model that assigns depth values to each pixel i
 
   $$ underpass \space height = facade \space height \times \frac{1 - pixel \space row \space}{image \space height} $$
 
-<strong>Figure 8</strong> shows the applied method and the resulting estimated height.
-
   <table align="center">
     <tr>
     <td align="center">
@@ -341,6 +339,10 @@ This method uses a deep learning model that assigns depth values to each pixel i
     </tr>
     </table>
 <p align="center">
+
+<p align="center">
+  <strong>Figure 9.</strong> application of the depth map model method. 
+</p>
 
 #### U-Net model method
 This method consists of applying a convolutional neural network that is trained to detect the underpass opening. The model was trained using images from facades extracted from oblique images. The limitations of the training data availability and hardware capabilities resulted in a still inaccurate model. However, it can be potentially improved in future research. Details on how to train the model are given in Apendix B.
