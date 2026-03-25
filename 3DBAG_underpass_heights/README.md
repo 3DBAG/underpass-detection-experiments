@@ -8,7 +8,7 @@
 > 2.4. Height estimation methods \
 > 2.5. Output data 
 > 3. Assessment of results 
-> 4. Conlcusions and recommendations \
+> 4. Conlcusions and recommendations
 
 > Appendix A - Running the code \
 > Appendix B - The U-Net model \
@@ -16,9 +16,9 @@
 
 
 ## 1. Introduction
-This repository focuses on developing a process to estimate <strong>underpasses heights using oblqie images </strong>. The code is still in an experimental phase and is subject to improvements. In this report, we will provide a detailed explanation of the proposed process, highlighting points that require special attention, and give recommendations for further development.
+This repository focuses on developing a process to estimate <strong>underpasses heights using oblique images </strong>. The code is still in an experimental phase and is subject to improvements. In this report, we will provide a detailed explanation of the proposed process, highlighting points that require special attention, and give recommendations for further development.
 
-Section 2 presents the proposed pipeline step by step, including the underlying principles and logic behind them. Section 3 provides an assessment of the results by comparing the three height estimation models, outlying their advantages and drawbacks. In addition, a comparison with ground-truth data is presented.
+Section 2 presents the proposed pipeline step by step, including the underlying principles and logic behind them. Section 3 presents the assessment of the methods based on a design experiment, comparing the three height estimation models, and outlying their advantages and drawbacks. Lastly, Section 4 gathers the main conclusions and provides recommendations for further research.
 
 Appendix A provides instructions on how to run the code. Appendix B explains details of the U-Net model and includes recommendations for further improvement. Appendix C presents an overview of how the input files must be strcutured.
 
@@ -30,20 +30,18 @@ Appendix A provides instructions on how to run the code. Appendix B explains det
 </p>
 
 <p>
-The general pipeline is depicted in <strong>Figure 1</strong>. The code takes as inputs the underpasses polygons in GeoJSON format, a data set of oblique images with their corresponding camera parameters and image footprints polygons (<i>camera_parameters.txt, image_footprints.geojson</i>) and a set of 3D BAG tiles in GeoPackage format. 
+The general pipeline is depicted in <strong>Figure 1</strong>. The code takes as inputs the underpass polygons in GeoJSON format, a data set of oblique images with their corresponding camera parameters and image footprint polygons (<i>camera_parameters.txt, image_footprints.geojson</i>) and a set of 3D BAG tiles in GeoPackage format. 
 
-The code iterates over each 3D BAG tile, and updates the estimated height of each observed underpass. Once it has iterated over all tiles, writes a GeoJSON file with final height estimations for each underpass.
-
-A more detailed description of each step is given in the upcoming sections.
+The code iterates over each 3D BAG tile, and updates the estimated height of each observed underpass. Once it has iterated over all tiles, writes a GeoJSON file with final height estimations for each underpass. A more detailed description of each step is given in the upcoming sections.
 </p>
 
 ### 2.1. Data preprocessing
 <p>
 The script <strong>data_preprocessing.py</strong> contains the functions for loading and processing input data. It fulfills the following tasks:
 
-1. Loads the camera parameters, the image footprints, the underpass polygons into <i>GeoDataFrames</i>.
+1. Loads the camera parameters, the image footprints, and the underpass polygons into <i>GeoDataFrames</i>.
 
-2. In each iteration, loads the corresponding lod-0 (building footprints) and lod-22 (3D buildings) geometries in two different <i>GeoDataFrames</i>.
+2. In each iteration, loads the corresponding lod-22 in 2D (building footprints) and in 3D in two different <i>GeoDataFrames</i>.
 
 3. Finds the underpass polygons which match the building footprints of the 3D BAG tile, and computes <strong>critical segments</strong>. The critical segments are the intersection between the underpass polygon boundary (buffered) and the building footprint boundary. This segments match the openings of the underpass. <strong>Figure 2</strong> shows four examples of computed critical segments and their corresponding facades in real life.
 
@@ -63,7 +61,7 @@ The script <strong>data_preprocessing.py</strong> contains the functions for loa
 </p>
 
 > [!NOTE]
-> The critical edges step can be skipped if a dataset of the underpass edges is provided. This is recommended due to efficiency and more accurate results.
+> The critical edges step can be skipped if a dataset of the underpass edges is provided. This is recommended for higher efficiency and accuracy.
 
 4. Computes the critical walls, which are 3D equivalents to the critical segments. This is done by intersecting the critical segments (buffered) with the 3D building geometries, which returns a set of 3D polygons (walls). Out of this set, we are interested in <strong>min_z</strong> and <strong>max_z</strong>. We will use these values combined with the critical segment coordinates to construct the critical wall geometry. The height of the critical wall is computed as <strong>max_z</strong> - <strong>min_z</strong> and stored as an attribute. <strong>Figure 3</strong> the corresponding critical walls of the critical segments shown in <strong>Figure 2</strong>.
 
@@ -114,8 +112,8 @@ The script <strong>data_preprocessing.py</strong> contains the functions for loa
      <strong>Figure 4.</strong> Filtering criteria to determine wall visibility
    </p>
 
-  > [!SUGGESTION]
-  > In future implementations investigate facade occlusion as filtering criteria
+  > [!NOTE]
+  > In future implementations, investigate facade occlusion as filtering criteria
 
 </p>
 
@@ -126,49 +124,41 @@ The module <strong>perspective_projection.py</strong> contains all functions to 
 
 2. Computes the camera matrix $K$ for the current image. We can easily define it using the parameters in <strong>camera_parameters.txt</strong> as follows.
 ```math
-$$
 K = 
 \begin{bmatrix}
 f_x & 0 & c_x \\
 0 & f_y & c_y \\
 0 & 0 & 1
 \end{bmatrix}
-$$
 ```
 
 3. Calculates the rotation matrix $R = R_\kappa \times \times R_\phi \times R_\omega $. We can find the angles $\kappa$, $\phi$ and $\omega$ in <strong>camera_parameters.txt</strong>, and then compute:
   
 ```math
-$$
 R_\omega =
 \begin{bmatrix}
 1 & 0 & 0 \\
 0 & \cos\omega & -\sin\omega \\
 0 & \sin\omega & \cos\omega
 \end{bmatrix}
-$$
 ```
 
 ```math
-$$
 R_\phi =
 \begin{bmatrix}
 \cos\phi & 0 & \sin\phi \\
 0 & 1 & 0 \\
 -\sin\phi & 0 & \cos\phi
 \end{bmatrix}
-$$
 ```
 
 ```math
-$$
 R_\kappa =
 \begin{bmatrix}
 \cos\kappa & -\sin\kappa & 0 \\
 \sin\kappa & \cos\kappa & 0 \\
 0 & 0 & 1
 \end{bmatrix}
-$$
 ```
 
   > [!CAUTION]
@@ -178,45 +168,40 @@ $$
   > [!CAUTION]
   > <code>R</code> might need to be transposed <code>R = R.T</code>. This applies when the rotation matrices are defined as rotations from the camera axes to the world axes. 
 
+  > [!CAUTION]
+  > <code>R</code> might need an axis flip. In some cases, the world coordinate system for certain axis has the opposite direction in the camera coordinate system.
 
 
-4. Computes the translation vector $t$. This is straightforward when knowing the camera position $X, Y, Z$, which are defined in <strong>camera_parameters.txt</strong>
+
+4. Computes the translation vector $t$. This is straightforward when knowing the camera position coordinates $X, Y, Z$, which are defined in <strong>camera_parameters.txt</strong>
 
 ```math
-$$
 t = - R \times \begin{bmatrix}
 X \\
 Y \\
 Z
 \end{bmatrix}
-$$
 ```
 
 
 5. Computes the projection matrix $M$ for the current image.
 
 ```math
-$$
 M = K \space [R \mid t]
-$$
 ```
 
 
 6. For each visible wall, extracts the wall geometry and projects it onto the image plane using the projection matrix $M$.
 
 ```math
-   $$
    \begin{bmatrix} u_h \\ v_h \\ w_h \end{bmatrix} 
    = M \, X_w 
-   $$
 ```
 
    The 2D pixel coordinates are obtained by normalizing the homogeneous coordinates.
 
 ```math
-   $$
    u = \frac{u_h}{w_h}, \quad v = \frac{v_h}{w_h}
-   $$
 ```
 
 <strong>Figure 5</strong> shows an example of critical walls projected onto the oblique image plane. These  2D polygons will be used in the facade texture extraction.
@@ -236,9 +221,9 @@ $$
 
 ### 2.3. Facade texture extraction
 
-The module <strong>facade_extraction.py</strong> includes the functions to extract, reproject and visualize the facade txtures corresponding to the critical walls. This process is done by iterating over the 2D polygons resulting from the critical wall projection onto the image plane. For each polygon:
+The module <strong>facade_extraction.py</strong> includes the functions to extract, reproject and visualize the facade textures corresponding to the critical walls. This process is done by iterating over the 2D polygons resulting from the previous step. For each polygon:
 
-1. Reorder the polygon coordinates to make sure that the reprojection is done cosnistently.
+1. Reorder the polygon coordinates to make sure that the reprojection is done consistently.
 
 2. Compute the <strong>width</strong> and the <strong>height</strong> of the output reprojected facade.
 
@@ -255,7 +240,7 @@ output_rectangle = np.array([
 
 4.  Apply the reprojection by establishing point correspondances between the 2D polygon and the output rectangle.
 
-Assuming that the extracted facade image height corresponds to the height of the facade in the real world, we will be able to determine the height of the underpasss ceiling by establishing a proportion (pixel - meters). However, we must consider that vertical distances are distorted to a lesser or bigger extent. The ideal situation is when the camera plane is parallel to the facade. <strong>Figure 6 </strong> shows an example of an extracted facade texture.
+Assuming that the extracted facade image height corresponds to the height of the facade in the real world, we will be able to determine the height of the underpasss ceiling by establishing a relation pixel - meters. However, we must consider that vertical distances are distorted to a lesser or bigger extent, depending on the camera angle. The ideal situation is when the camera plane is parallel to the facade. <strong>Figure 6 </strong> shows an example of an extracted facade texture.
 
 <p align="center">
   <img src="md_images/extracted_facade.jpg" width="200">
@@ -265,13 +250,11 @@ Assuming that the extracted facade image height corresponds to the height of the
   <strong>Figure 6.</strong> Example of an extracted facade texture
 </p>
 
-
-<div style="border-left:5px solid #4a90e2; padding:10px;">
-    <strong>Suggestion:</strong> Introduce a vertical correction factor when estimating the height.
-</div>
+> [!NOTE]
+> Introducing a vertical correction factor to mitigate distortion could be a future research direction.
 
 ### 2.4. Height estimation methods
-The module height_estimation.py contains all functions for detecting underpasses by applying different methods, visualizing, updating the GeoJSON file and writing the output data. The height estimation methods are applied to the extracted facade textures.
+The module <Strong>height_estimation.py</Strong> contains all functions to estimate underpass heights from extracted facade images, visualizing, and writing the output data.
 
 #### Connected components method
 This naive method consists of applying image segmentation through detecting connected components in the facade image. The goal is to detect which component corresponds to the underpass opening by applying some filtering criteria.
@@ -282,26 +265,24 @@ This naive method consists of applying image segmentation through detecting conn
 
 3. Apply filtering criteria to detect the underpass opening. The selected component must:
 
-   a) Be higher than a threshold (= 2 m) 
+   a) be higher than a threshold (= 2 m);
 
-   b) Be close to the ground (< 100 px away from the bottom of the image) 
+   b) be close to the ground (< 100 px away from the bottom of the image); 
    
-   c) Be separated from the top (> 50 px away from the top of the image) 
+   c) be separated from the top (> 50 px away from the top of the image);
 
-   d) Have a parallelogram shape. This is measured by computing the solidity of the component, which is the area of its bounding box which is actually covered by the component. It is defined as:
+   d) have a parallelogram shape. This is measured by computing the solidity of the component, which is the area of its bounding box which is actually covered by the component. It is defined as:
 
    ```math
    solidity = \frac{component \space area}{component \space height \times component \space width}
    ```
-   e) Be centered in the image, since the image of the facade is constructed based on the underpass 2D geometry.
+   e) be centered in the image, since the image of the facade is constructed based on the underpass 2D geometry.
 
 4. Takes the top pixel y-coordinate (<strong>pixel row</strong>) of the selected component, assuming that this corresponds to the underpass ceiling.
 
 5. Estimates the underpass height with the following formula:
 
   $$ underpass \space height = facade \space height \times \frac{1 - pixel \space row \space}{image \space height} $$
-
-<strong>Figure 7</strong> shows the applied method and the resulting estimated height.
 
   <table align="center">
     <tr>
@@ -325,7 +306,7 @@ This naive method consists of applying image segmentation through detecting conn
 
 
 #### Depth map model method
-This method uses a deep learning model that classifies the pixels of the image by depth. Then, it assumes that the underpass corresponds to the deepest cluster of pixels. The model was applied from the commit `e5a2732d3ea2cddc081d7bfd708fc0bf09f812f1` (January 22nd, 2025).
+This method uses a deep learning model that assigns depth values to each pixel in the image. Then, it assumes that the underpass corresponds to the deepest cluster of pixels. The model was applied from the commit `e5a2732d3ea2cddc081d7bfd708fc0bf09f812f1` (January 22nd, 2025).
 
 1. Apply Depth-Anything-V2 model on the image.
 
@@ -360,23 +341,19 @@ This method uses a deep learning model that classifies the pixels of the image b
     </tr>
     </table>
 <p align="center">
-  <strong>Figure 8.</strong> application of the depth map method. 
-</p>
 
 #### U-Net model method
-This method consists of applying a convolutional neural network that is trained to detect the underpass opening. The model was trained using images from facades extracted from oblique images. The limitations of the training data availability and hardware capabilities resulted in a still inaccurate model. However, it can be potentially improved in future research. Further details on how to train the model and about the input data are given in Apendix A.
+This method consists of applying a convolutional neural network that is trained to detect the underpass opening. The model was trained using images from facades extracted from oblique images. The limitations of the training data availability and hardware capabilities resulted in a still inaccurate model. However, it can be potentially improved in future research. Details on how to train the model are given in Apendix B.
 
 1. Apply the U-Net model on the image, which returns a binary mask with the predicted underpass region.
 
-2. Apply connected components segmentation to the underpass mask and select the component that is closer to the ground. This helps getting rid of outliers.
+2. Apply connected components segmentation to the underpass mask and select the component that is closer to the ground. This helps getting rid of outlier regions.
 
 3. Take the top pixel y-coordinate (<strong>pixel row</strong>) of the selected component, assuming that this corresponds to the underpass ceiling.
 
 4. Estimate the underpass height with the following formula:
 
   $$ underpass \space height = facade \space height \times \frac{1 - pixel \space row \space}{image \space height} $$
-
-<strong>Figure 9</strong> shows the applied method and the resulting estimated height.
 
   <table align="center">
     <tr>
@@ -398,18 +375,18 @@ This method consists of applying a convolutional neural network that is trained 
 
 ### 2.5. Output data
 
-Every time that an underpass height is estimated, the value is stored in an observations list for the underpass. Then, the estimates height is recalculated as the average of all observations.
+Every time that an underpass height is estimated, this value is stored in a list of observations. Then, the final estimated height is recalculated as the average of all observed values.
 
-Once all tiles have been iterated, the estimated heights will be the last computed values stored in the underpass GeoDataFrame. The code then writes the underpass polygons with the estimated heights to a GeoJSON file.
+Once all tiles have been iterated, the estimated heights will be definitive. The code then writes the underpass polygons with the estimated heights to a GeoJSON file.
 
 
 ## 3. Assessment of results
 
-In this section, we present the results of an experiment run in an area of Rotterdam. Each method is assessed by comparing its output to ground truth data.
+In this section, we present the results of an experiment ran in an area of Rotterdam. Each method is assessed by comparing its output to ground truth data.
 
 
 ###  Ground truth data
-Our reference data is derived from the city model of 3D Rotterdam - https://www.3drotterdam.nl/. This dataset includes accurate modelling of underpasses, enabling height extraction. For comparison, we project the underpass ceiling polygon into 2D and include the measured height as one of its attributes.
+Our reference data is derived from the city model of 3D Rotterdam - https://www.3drotterdam.nl/. This dataset includes accurate modelling of building underpasses, including accurate height values. For comparison, we project the underpass ceiling polygon into 2D and include the measured height as one of its attributes.
 
 
 ### Design experiment:
@@ -425,7 +402,7 @@ The 3D building tiles were selected using the bounding box defined above and obt
 The code was executed on Kaggle, a platform which provides access to powerful hardware resources. To accelerate image processing, an NVIDIA Tesla P100 GPU was used. 
 
 ### Discussion of results
-The original set of input underpasses consisted of 97 features. However, 22 of these lacked an estimated height (NULL values) across all methods. This is because the underpass walls did not meet the visibility criteria during the perspective projection phase (see Section 2.1, point 5). Therefore, these 22 features were excluded from the assessment. 
+The original set of input underpasses consisted of 97 features. However, 22 of these lacked an estimated height (NULL values) across all methods. This is because the underpass walls did not meet the visibility criteria during the perspective projection phase (see Section 2.1, point 5), or the oblique images containing those walls were not available. Therefore, these 22 features were excluded from the assessment. 
 
 <div align="center">
    <p align="center">
@@ -488,7 +465,7 @@ The depth map method returned a null value in 6.67 % of the estimations. This is
     </table>
 
 <p align="center">
-  <strong>Figure 11.</strong> From left to right: <Strong>(1)</Strong> unclear depth information; <Strong>(2) </Strong> wrong facade texture (no underpass present); <Strong>(3)</Strong> presence of objects in front of the underpass (only visible on the right side, under the white window) 
+  <strong>Figure 11.</strong> From left to right: <Strong>(1)</Strong> unclear depth information; <Strong>(2) </Strong> incorrect facade texture (no underpass present); <Strong>(3)</Strong> presence of objects in front of the underpass (only visible on the right side, under the white window) 
 </p>
 
 The U-Net method returned a null value in 1.33% of the estimations. Compared to the other methods, it is more robust in producing non-null results. However, it may return a null value when facades are heavily occluded. This behavior is also due to the model being trained to detect cases where no underpass is present. <Strong>Figure 12</Strong> shows a facade image where the U-Net method failed to make a prediction.
@@ -509,10 +486,10 @@ The CC method again shows the poorest performance, since it only relies on conne
 
 The depth map method is the second-worst performing strategy (±2.39 m). Like the CC method, this approach lacks semantic segmentation, making it susceptible to identifying other elements as the underpass. Errors increase dramatically when incorrect facade textures are extracted. Additionally, it is sensitive to image complexity, since k-means clustering may detect a deeper cluster than the actual underpass (e.g., the sky or rooms visible through windows). However, incorporating depth information in addition to plain geometry does improve the accuracy of predictions to some extent, as compared to the CC method.
 
-The U-Net method shows the best performance (±1.99 m), yet highly inaccurate. Since it is based a semantic segmentation model, it is less sensitive to occlusion. The model was also trained to detect cases where no underpass is present, enabling a better performance when incorrect facade textures are extracted. However, the model was trained defficiently (see Appendix B) and is subject to improvements. Therefore it may still produce height estimates that deviate several meters from the true values. Such errors occur less frequently compared to the other approaches.
+The U-Net method shows the best performance (±1.99 m), yet highly inaccurate. Since it is based in a semantic segmentation model, it is less sensitive to occlusion. The model was also trained to detect cases where no underpass is present, enabling a better performance when incorrect facade textures are extracted. However, the model was trained defficiently (see Appendix B) and is subject to improvements. Therefore it may still produce height estimates that deviate several meters from the true values. Such errors occur less frequently compared to the other approaches.
 
 #### Absolute error distribution
-While mean error metrics (i.e. MAE and RMSE) provide a general indication of method performance, analyzing the distribution of absolute errors reveals interesting patterns such as the frequency and magnitude of deviations. From <Strong>Figure 13</Strong>, it can be observed that the CC approach presents a relatively flat distribution, suggesting that errors are spread more uniformly across a wide range of values. This indicates inconsistent performance, with no strong concentration around low error values.
+While mean error metrics (i.e. MAE and RMSE) provide a general indication of method performance, analyzing the distribution of absolute errors reveals interesting patterns such as the frequency and magnitude of deviations. In <Strong>Figure 13</Strong>, it can be observed that the CC approach presents a relatively flat distribution, suggesting that errors are spread more uniformly across a wide range of values. This indicates inconsistent performance, with no strong concentration around low error values.
 
 A similar pattern is observed for the depth-based approach, although its distribution shows a slightly higher concentration of lower errors. This indicates a slight improvement in accuracy. However, this method also produces the largest observed error - exceeding ±10.6 m - highlighting its sensitivity to image conditions.
 
@@ -527,7 +504,7 @@ In contrast, the U-Net approach shows a more favorable error distribution. Its p
   <strong>Figure 13.</strong> Absolute error distribution of the height estimation methods (bin size = 0.2 m)
 </p>
 
-Table 3 presents an evaluation of performance under different error tolerances. Overall, none of the approaches achieves high accuracy under strict tolerance thresholds. We can observe that the U-Net approach outperforms the other methods across all tolerance levels, but its performance remains limited. For instance, under a strict tolerance of ±0.05 m, it correctly estimates only 1.33% of the features. This increases to 4.00% under a ±0.10 m tolerance, 8.00% under ±0.20 m, and 20.00% under ±0.40 m. On the contrary, the CC and depth map approaches perform worse overall. Even under more relaxed thresholds, their performance does not improve substantially. This reinforces the conclusion that these approaches lack robustness for precise height estimation.
+<Strong>Table 3</Strong> presents an evaluation of performance under different error tolerances. Overall, none of the approaches achieves high accuracy under strict tolerance thresholds. We can observe that the U-Net approach outperforms the other methods across all tolerance levels, but its performance remains limited. For instance, under a strict tolerance of ±0.05 m, it correctly estimates only 1.33% of the features. This increases to 4.00% under a ±0.10 m tolerance, 8.00% under ±0.20 m, and 20.00% under ±0.40 m. On the contrary, the CC and depth map approaches perform worse overall. Even under more relaxed thresholds, their performance does not improve substantially. This reinforces the conclusion that these approaches lack robustness for precise height estimation.
 
 <div align="center">
    <p align="center">
@@ -548,13 +525,13 @@ From the analysis in Section 3,  it can be concluded that none of the evaluated 
 #### Data preprocessing 
 Some estimation errors originate from the geometry of the underpasses themselves. For example, certain underpasses are merged with underground surfaces (e.g., parking areas), which can lead to multiple underpasses being represented as a single feature, returning only one height value. Moreover, critical walls corresponding to these underground areas may be incorrectly identified, resulting in extraction of incorrect facade textures. Therefore, it is recommended to input clean, independent underpass geometries.
 
-Currently, two criteria are used to filter images in the visibility table: the angle between the facade and camera plane, and the direction of the facade normal. However, there are occassions where other buildings are occluding the projected facades in the image. Therefore, incorporating an occlusion filtering criteria could be helpful to avoid incorrect facade texture extraction. This could be done by projecting a line of sight from the camera center to the critical wall and checking for intersection with other walls (extracted from the 3D model).
+Currently, two criteria are used to filter images in the visibility table: the angle between the facade and camera plane, and the direction of the facade normal. However, there are occassions where other buildings are occluding the projected facades on the image. Therefore, incorporating an occlusion filtering criteria could be helpful to avoid incorrect facade texture extraction. This could be done by projecting a line of sight from the camera center to the critical wall and checking for intersection with other walls (extracted from the 3D model).
 
 #### Perspective projection
 Accurate camera parameters are crucial for correct perspective projection. Furthermore, orientation consistency is a must when multiple cameras are used. Using high-quality datasets  is recommended to obtain reliable results.
 
 #### Height estimation methods
-The U-Net method currently shows the most promsising results, even though its accuracy remains low. This is partly due to the limited training set (approximately 250 images) and modest training parameters due to hardware constraints. A larger training dataset (around 1000 images) and more powerful hardware would enable the model to achieve much higher accuracies. Apendix B offers a description of this method as well as indications for better future training.
+The U-Net method currently shows the most promsising results, even though its accuracy remains low. This is partly due to the limited training set (approximately 250 images) and modest training parameters due to hardware constraints. A larger training dataset (around 1000 images) and more powerful hardware would enable the model to achieve much higher accuracies. Appendix B offers a description of this method as well as indications for better future training.
 
 #### Output data
 Currently, each observation is stored in a list, and the estimated height is computed as the average of all the observations. This apprach is sensitive to outliers, affecting the final estimation. Preliminary tests indicate that removing outliers via trimming before averaging heights returns more accurate predictions. Further exploration of statistical aggregation methods is recommended to improve robustness.
@@ -691,7 +668,7 @@ d) The number of epochs is set to 120.
 2. Increase the number of training images to 1000. If possible, increase the size of the training set even more by modifying some of the images (i. e. apply flips, changes in contrast, changes in brightness...)
 3. Keep 30% of the training images for negative training (no underpass present, and no mask)
 4. Ensure consistent masking. Avoid creating a mask if the underpass is too occluded or barely visible.
-5. Upgrade the image resize to 384x384. Improved resolution will result in better learning. 
+5. Upgrade the image resize to 384x384. Improved resolution will result in better performance.
 6. Increase epochs to 150-300, implementing early stop.
 
 
