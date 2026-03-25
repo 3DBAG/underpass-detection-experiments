@@ -341,7 +341,7 @@ This method uses a deep learning model that assigns depth values to each pixel i
 <p align="center">
 
 <p align="center">
-  <strong>Figure 9.</strong> application of the depth map model method. 
+  <strong>Figure 8.</strong> application of the depth map model method. 
 </p>
 
 #### U-Net model method
