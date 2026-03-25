@@ -58,8 +58,9 @@ WHERE NOT ST_IsEmpty(raw_diff);
 DROP TABLE IF EXISTS underpasses.non_sliver_geometries;
 
 CREATE TABLE underpasses.non_sliver_geometries AS (
-    SELECT DISTINCT identificatie 
-    FROM underpasses.bag_minus_bgt 
+    SELECT DISTINCT
+        identificatie
+    FROM underpasses.bag_minus_bgt
     WHERE NOT ST_IsEmpty(ST_Buffer(ST_Buffer(geom, -0.2), 0.2))
 );
 
@@ -72,7 +73,7 @@ DROP TABLE IF EXISTS underpasses.snapped_differences;
 
 CREATE TABLE underpasses.snapped_differences AS
 WITH joined AS (
-    SELECT 
+    SELECT
         bbj.identificatie,
         bbj.bag_geometrie,
         bbj.bgt_geometrie
@@ -106,7 +107,7 @@ WHERE NOT ST_IsEmpty(raw_geom);
 
 
 -- =====================================
--- Step 5: Final Filtering though Double Buffering per Geometry
+-- Step 5: Final Filtering through Double Buffering per Geometry
 -- =====================================
 
 DROP TABLE IF EXISTS underpasses.geometries;
@@ -115,38 +116,22 @@ CREATE TABLE underpasses.geometries AS
 WITH exploded AS (
     -- Split multipolygons into individual polygons
     SELECT
+        ROW_NUMBER() OVER () AS underpass_id,
         identificatie,
         (ST_Dump(geom)).geom AS single_poly
     FROM underpasses.snapped_differences
-),
-exploded_with_id AS (
-    SELECT
-        ROW_NUMBER() OVER () AS poly_id,  -- Unique ID for each polygon
-        identificatie,
-        single_poly
-    FROM exploded
-),
-filtered AS (
-    -- Remove polygons that disappear after buffering
-    SELECT
-        poly_id,
-        identificatie
-    FROM exploded_with_id
-    WHERE NOT ST_IsEmpty(ST_Buffer(ST_Buffer(single_poly, -0.2), 0.2))
 )
--- Merge surviving polygons back into a multipolygon per identificatie
 SELECT
-    e.identificatie,
-    ST_Multi(ST_Collect(e.single_poly)) AS geom
-FROM filtered f 
-JOIN exploded_with_id e ON f.poly_id = e.poly_id
-GROUP BY e.identificatie;
-
+    underpass_id,
+    identificatie,
+    ST_CollectionExtract(single_poly, 3) AS geom
+FROM exploded
+WHERE NOT ST_IsEmpty(ST_Buffer(ST_Buffer(single_poly, -0.2), 0.2));
 
 -- Also create index on identificatie for joins
 CREATE INDEX IF NOT EXISTS idx_underpasses_geometries_identificatie
     ON underpasses.geometries (identificatie);
 
 -- Create spatial index on underpasses.geometries if it doesn't exist
-CREATE INDEX IF NOT EXISTS idx_underpasses_geometries_geom 
+CREATE INDEX IF NOT EXISTS idx_underpasses_geometries_geom
     ON underpasses.geometries USING GIST (geom);

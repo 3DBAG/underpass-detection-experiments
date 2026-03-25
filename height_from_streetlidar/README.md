@@ -1,6 +1,6 @@
 # Underpass Height From Street LiDAR
 
-This directory contains a Python workflow for estimating an underpass height from a cropped LAS/LAZ point cloud and a matching polygon stored in a GeoPackage.
+This directory contains a Python workflow for estimating underpass height from cropped LAS/LAZ point clouds and matching polygons stored in GeoPackages.
 
 > The cropped point cloud was generated using roofer:
 > ```
@@ -8,23 +8,28 @@ This directory contains a Python workflow for estimating an underpass height fro
 > ```
 > The GPKG file contains the underpass polygon of interest from the 2D detection pipeline. The pointcloud is one of the files Amsterdam gave to us. To save space, these two files are not included in this repository, but the relvant roofer output is included.
 
-The script loops over a list of BAG cases, reads each LAS/LAZ file and its matching GeoPackage polygon, finds two Z peaks, rasterizes the corresponding point subsets onto the XY plane at `0.5 m` resolution, and overlays those rasters with the polygon footprint.
+The script loops over a list of BAG cases, reads each LAS/LAZ file and its matching GeoPackage polygon, detects Z-peak candidates from a smoothed histogram, rasterizes each candidate to the XY plane at `0.5 m` resolution, and keeps only candidates whose raw histogram count is at least `5%` of the second-highest candidate raw count.
 
-It also writes the derived attributes back into the GeoPackage feature table:
+For each remaining candidate, the script computes:
 
-- `underpass_dh`: difference between the two detected peak heights
-- `underpass_top_area`: occupied raster area for the upper peak cluster
-- `underpass_bottom_area`: occupied raster area for the lower peak cluster
+- the raw occupied raster
+- an exclusive raster with lower peaks masked out
+- pairwise vertical-wall cells between adjacent peaks
+- a union raster of exclusive cells and related wall cells
+
+The final two underpass peaks are chosen as the two peaks with the largest contiguous area in that union raster. Each peak uses a fixed `1.0 m` vertical band centered on the selected histogram bin.
 
 ## What The Script Produces
 
-- A histogram of Z values with the raw histogram, the smoothed histogram, the two selected peak lines, fixed `0.5 m` selection bands, and a double-headed height-difference annotation
-- One XY raster subplot for the lower peak and one for the upper peak, each overlaid with the polygon outline
+- A histogram of Z values with raw bars, a smoothed curve, one marker and fixed `1.0 m` band per displayed peak, and a double-headed height-difference annotation for the two selected underpass peaks
+- One XY raster row showing all displayed peak bands
+- One XY raster row showing the union of exclusive cells and pairwise wall cells for each displayed peak
+- Optional diagnostic rows for:
+  - exclusive cells with lower peaks masked out
+  - related wall cells between adjacent peaks
 - One PNG per BAG id, named `<bag_id>_peak_grids_overlay.png`
-- Updated attributes in each input GeoPackage:
-  - `underpass_dh`
-  - `underpass_top_area`
-  - `underpass_bottom_area`
+- A CSV summary written to `underpass_heights.csv`
+- A Rerun visualization sent to the viewer by default
 
 ## Example Cases
 
@@ -103,7 +108,7 @@ nix develop -c python3 plot_z_histogram.py
 Use Python 3. Then install the required packages:
 
 ```bash
-python3 -m pip install laspy matplotlib numpy shapely
+python3 -m pip install laspy matplotlib numpy rerun-sdk shapely
 ```
 
 Run the script:
@@ -114,6 +119,7 @@ python3 plot_z_histogram.py
 
 ## Files
 
-- [`plot_z_histogram.py`](/Users/ravi/git/underpass-detection-experiments/height_from_streetlidar/plot_z_histogram.py): main analysis and plotting script
-- [`flake.nix`](/Users/ravi/git/underpass-detection-experiments/height_from_streetlidar/flake.nix): Nix development shell with Python dependencies
-- [`images/`](/Users/ravi/git/underpass-detection-experiments/height_from_streetlidar/images): example point-cloud screenshots and BAG-specific script outputs
+- `plot_z_histogram.py`: main analysis and plotting script
+- `flake.nix`: Nix development shell with Python dependencies
+- `underpass_heights.csv`: CSV summary written by the script
+- `images/`: example point-cloud screenshots and BAG-specific script outputs
