@@ -287,7 +287,9 @@ This naive method consists of applying image segmentation through detecting conn
    <p> c) Be separated from the top (> 50 px away from the top of the image) </p>
    <p> d) Have a parallelogram shape. This is measured by computing the solidity of the component, which is the area of its bounding box which is actually covered by the component. It is defined as:
 
-   $$ solidity = \frac{component \space area}{component \space height \times component \space width} $$
+  ```math
+  solidity = \frac{component \space area}{component \space height \times component \space width}
+  ```
 
    </p>
    <p> e) Be centered in the image, since the image of the facade is constructed based on the underpass 2D geometry.</p>
@@ -735,6 +737,3 @@ Bsides the `image_id`, <Strong>image_footprints.geojson</Strong> must contain a 
 ### underpass_polygons
 This directory must contain the underpass polygons in 2D and (optionally) the underpass exterior edges, both in GeoJSON format. The IDs of the features are not relevat, since the code will assign an ID to each geometry when executing. However, geometries in <Strong>underpasses.geojson</Strong> must be of type _Polygon_, and of type _LineString_ in <Strong>underpass_edges.geojson</Strong>.
 
-
-=======
->>>>>>> 88ec4d0d19239d72280abecaa70949697ede7dfc
