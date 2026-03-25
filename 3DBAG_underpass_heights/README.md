@@ -539,7 +539,7 @@ Currently, each observation is stored in a list, and the estimated height is com
 
 ## APPENDIX A - Running the code
 
-There is an example data set that can be used to run the code. The link is provided in this repository.
+There is an example data set that can be used to run the code in the data folder. Oblique images can be accessed via this link: https://drive.google.com/drive/folders/15hFSsC8td4sBRpUln8s9ZnvHcWap2Pdk?usp=sharing
 
 The following structure is necessary to run the code:
 
