@@ -400,7 +400,7 @@ This method consists of applying a convolutional neural network that is trained 
 
 Every time that an underpass height is estimated, the value is stored in an observations list for the underpass. Then, the estimates height is recalculated as the average of all observations.
 
-One all tiles have been iterated, the estimated heights will be the last computed values stored in the underpass GeoDataFrame. The code then writes the underpass polygons with the estimated heights to a GeoJSON file.
+Once all tiles have been iterated, the estimated heights will be the last computed values stored in the underpass GeoDataFrame. The code then writes the underpass polygons with the estimated heights to a GeoJSON file.
 
 
 ## 3. Assessment of results
