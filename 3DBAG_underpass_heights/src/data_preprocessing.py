@@ -8,7 +8,7 @@ from shapely.geometry import Polygon
 import pyvista as pv
 
 
-def load_input_data(camera_parameters_path, image_footprints_path, underpasses_path, underpass_edges_path):
+def load_input_data(camera_parameters_path, image_footprints_path, underpasses_path, underpass_edges_path, min_length):
     """
     Load input data from specified paths and preprocess them into GeoDataFrames.
 
@@ -17,7 +17,7 @@ def load_input_data(camera_parameters_path, image_footprints_path, underpasses_p
         image_footprints_path (str): Path to the image footprints file.
         underpasses_path (str): Path to the underpass polygons file.
         underpass_edges_path (str): Path to the underpass edges file (optional, can be None).
-        min_length (float): Minimum length of edges to be considered as critical (default is 2).
+        min_length (float): Minimum length of edges to be considered as critical.
 
     Returns:
         tuple: A tuple containing the following GeoDataFrames:
@@ -28,7 +28,7 @@ def load_input_data(camera_parameters_path, image_footprints_path, underpasses_p
 
     """
     # Load camera parameters
-    df_camera_parameters = pd.read_csv(camera_parameters_path, sep='\s+', dtype={'image_id': str})
+    df_camera_parameters = pd.read_csv(camera_parameters_path, sep=' ', dtype={'image_id': str})
 
     # Load image footprints. Add camera center per footprint
     gdf_image_footprints = gpd.read_file(image_footprints_path)
@@ -56,7 +56,7 @@ def load_input_data(camera_parameters_path, image_footprints_path, underpasses_p
         
         # Extract exterior boundaries of underpass polygons (ignore holes)
         gdf_underpass_exteriors = gdf_underpass_polygons.copy()
-        gdf_underpass_exteriors['geometry'] = gdf_underpass_exteriors['geometry'].apply(lambda geom: geom.exterior)
+        gdf_underpass_exteriors['geometry'] = gdf_underpass_exteriors['geometry'].apply(lambda geom: geom.exterior if geom.geom_type == "Polygon" else None)
         
         # Relate edges to underpass polygons by spatial join with exterior only. Add underpass_id to edge table
         gdf_underpass_edges = gpd.sjoin(gdf_underpass_edges, gdf_underpass_exteriors, how='inner', predicate='intersects')
@@ -81,15 +81,17 @@ def load_input_data(camera_parameters_path, image_footprints_path, underpasses_p
                     coords = list(linestring.coords)
                     for i in range(len(coords) - 1):
                         edge_geom = shapely.geometry.LineString([coords[i], coords[i+1]])
-                    #Append edge record 
-                    edge_records.append({'edge_id': edge_id, 'geometry': edge_geom, 'underpass_id': underpass_id, 'building_id': building_id})
+                        #Append edge record only if the edge is longer than the minimum length threshold
+                        if edge_geom.length >= min_length:
+                            edge_records.append({'edge_id': edge_id, 'geometry': edge_geom, 'underpass_id': underpass_id, 'building_id': building_id})
 
         gdf_underpass_edges = gpd.GeoDataFrame(edge_records, crs=gdf_underpass_edges.crs)
         gdf_underpass_edges['edge_id'] = gdf_underpass_edges.index + 1
 
         gdf_underpass_edges = gdf_underpass_edges[['edge_id', 'geometry', 'underpass_id', 'building_id']]
 
-    except:
+    except Exception as e:
+        print("Error in underpass edges processing: ", e)
         gdf_underpass_edges = None
 
     return df_camera_parameters, gdf_image_footprints, gdf_underpass_polygons, gdf_underpass_edges
@@ -186,7 +188,7 @@ def visualize_critical_edges(gdf_underpass_intersected, gdf_critical_edges):
         linewidth=1
     )
 
-    # ax.set_title("Critical Underpass Edges")
+    ax.set_title("Critical Underpass Edges")
     ax.axis("off")
     ax.set_aspect("equal")
     plt.show()
@@ -259,7 +261,7 @@ def find_critical_walls(gdf_critical_edges, gdf_underpass_edges, gdf_building_3d
     wall_records = []
     wall_id = 1
     for edge_id, group in gdf_walls_intersected.groupby('edge_id'):
-        # Find the maximum and minimum height of the wall polygons which belong to a edge
+        # Find the maximum and minimum height of the wall polygons which belong to an edge
         max_z = -float('inf')
         min_z = float('inf')
         for geom in group['geometry']:
@@ -318,7 +320,7 @@ def find_critical_walls(gdf_critical_edges, gdf_underpass_edges, gdf_building_3d
             if j in walls_to_remove:
                 continue
             geom_j = gdf_critical_walls.iloc[j]['geometry']
-            # Check if walls overlap or intersect
+            # Check if walls overlap
             if  geom_i.within(geom_j) or geom_j.within(geom_i):
                 area_j = geom_j.area
                 # Keep the larger one, mark the smaller for removal

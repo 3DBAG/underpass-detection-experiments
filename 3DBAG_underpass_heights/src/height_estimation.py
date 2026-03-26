@@ -100,16 +100,10 @@ def apply_cc_method(facade_image, facade_height, min_height, ground_dist, top_di
     gray = cv2.cvtColor(facade_image, cv2.COLOR_BGR2GRAY)
     gray = cv2.GaussianBlur(gray, (3,3), 0)
     edges = cv2.Canny(gray, 30, 100)
-    # plt.imshow(edges)
-    # plt.title("Computed edges")
-    # plt.show()
 
     # Apply morphology to close edges and create more complete contours
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
     edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
-    # plt.imshow(edges)
-    # plt.title("Computed edges (closed)")
-    # plt.show()
 
     # Detect connected components
     blur = cv2.GaussianBlur(edges, (3,3), 0)
@@ -176,6 +170,10 @@ def apply_cc_method(facade_image, facade_height, min_height, ground_dist, top_di
 
     pixel_row = stats[best_label, cv2.CC_STAT_TOP]
     underpass_height = facade_height * (1 - pixel_row / facade_image_height)
+
+    # Filter out unrealistic height estimates
+    if underpass_height >= (facade_height - 0.2) or underpass_height < 2:
+        return None, None   
     
     return pixel_row, underpass_height
 
@@ -196,34 +194,33 @@ def apply_depth_method(facade_image, facade_height, depth_map_model, k):
     
     """
 
-    facade_image_height, facade_image_width, _ = facade_image.shape
+    original_height, original_width, _ = facade_image.shape
+    facade_image_height, facade_image_width = original_height, original_width
 
-    limit_width = 2000
-    limit_height = 2000
+    limit= 1024
+    scale = 1.0
 
-    if facade_image_height > limit_height or facade_image_width > limit_width:
-        return None, None
-    
-    depth_map = depth_map_model.infer_image(facade_image.copy())
+    # Resize image if larger than limit to avoid memory issues with depth estimation model
+    if original_height > limit or original_width > limit:
+        scale = min(limit / facade_image_height, limit / facade_image_width)
+        new_size = (int(facade_image_width * scale), int(facade_image_height * scale))
+        facade_image = cv2.resize(facade_image, new_size)
+        facade_image_height, facade_image_width = facade_image.shape[:2]
+
+    # Perform depth estimation
+    with torch.no_grad():
+        depth_map = depth_map_model.infer_image(facade_image.copy())
 
     # plt.imshow(depth_map)
     # plt.title("Predicted Depth Map")
     # plt.show()
 
-    # Normalize depth to 0–255
-    depth_norm = cv2.normalize(depth_map, None, 0, 255, cv2.NORM_MINMAX)
-    # Convert to uint8
-    depth_uint8 = depth_norm.astype(np.uint8)
-
-    # plt.imshow(depth_uint8, cmap='gray')
-    # plt.title("Normalized Depth Map")
-    # plt.show()
-            
-    # Use depth clusters
+    # Apply depth clusters
     depth_map_height, depth_map_width = depth_map.shape
-    depth_reshaped = depth_map.reshape(-1, 1)
-    # Convert to float32 for OpenCV
-    depth_reshaped = np.float32(depth_reshaped)
+
+    # Downsample for clustering
+    small_depth = cv2.resize(depth_map, (256, 256))
+    depth_reshaped = small_depth.reshape(-1, 1).astype(np.float32)
 
     # Apply k-means clustering
     criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 0.2)
@@ -235,18 +232,19 @@ def apply_depth_method(facade_image, facade_height, depth_map_model, k):
         10,
         cv2.KMEANS_RANDOM_CENTERS
     )
+
     # Reshape labels back to image
-    segmented = labels.reshape(depth_map_height, depth_map_width)
+    segmented = labels.reshape(256, 256)
 
     # plt.imshow(segmented)
     # plt.title("Depth Clusters")
     # plt.show()
 
-    # Deepest cluster = cluster with largest center value
+    # Deepest cluster = cluster with smallest center value
     deepest_cluster_idx = np.argmin(centers)
-    # print("Deepest cluster index:", deepest_cluster_idx)
-    # Create mask of deepest cluster
     deepest_mask = (segmented == deepest_cluster_idx).astype(np.uint8) * 255
+    #Resize mask back to original image size
+    deepest_mask = cv2.resize(deepest_mask, (facade_image_width, facade_image_height))
 
     # plt.imshow(deepest_mask, cmap='gray')
     # plt.title("Deepest Region")
@@ -264,11 +262,19 @@ def apply_depth_method(facade_image, facade_height, depth_map_model, k):
 
     # Get coordinates of non-zero pixels
     ys, xs = np.nonzero(ground_region_mask)
-    top_y = np.min(ys)
-    pixel_row = top_y
-    underpass_height = facade_height * (1 - pixel_row / facade_image_height)
+    if len(ys) == 0:
+        return None, None
+
+    # Pixel row in original image coordinates
+    pixel_row_resized = np.min(ys)
+    pixel_row_original = int(pixel_row_resized / scale)
+
+    underpass_height = facade_height * (1 - pixel_row_original / original_height)
+    # Filter out unrealistic height estimates
+    if underpass_height >= (facade_height - 0.2) or underpass_height < 2:
+        return None, None
     
-    return pixel_row, underpass_height
+    return pixel_row_original, underpass_height
 
 
 def apply_unet_method(facade_image, facade_height, unet_model, device):
@@ -312,21 +318,22 @@ def apply_unet_method(facade_image, facade_height, unet_model, device):
     # Convert mask to uint8 image
     mask = (pred_mask.squeeze().numpy() * 255).astype(np.uint8)
 
-    plt.imshow(mask, cmap='gray')                 
-    plt.title("Predicted Mask")
-    plt.show()
+    # plt.imshow(mask, cmap='gray')                 
+    # plt.title("Predicted Mask")
+    # plt.show()
 
     # Find lowest connected component in the mask
     num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(mask)
     if num_labels <= 1:
         return None, None
+    
     bottoms = stats[:, cv2.CC_STAT_TOP] + stats[:, cv2.CC_STAT_HEIGHT]
     target_component_idx = np.argmax(bottoms[1:]) + 1
     component_mask = (labels == target_component_idx).astype(np.uint8) * 255
 
-    plt.imshow(component_mask, cmap='gray')                 
-    plt.title("Selected Component Mask")
-    plt.show()
+    # plt.imshow(component_mask, cmap='gray')                 
+    # plt.title("Selected Component Mask")
+    # plt.show()
 
     ys, xs = np.nonzero(component_mask)
     top_y = np.min(ys)
@@ -337,7 +344,7 @@ def apply_unet_method(facade_image, facade_height, unet_model, device):
 
     underpass_height = facade_height * (1 - pixel_row_original / original_height)
 
-    if underpass_height < 2.2:  
+    if underpass_height >= (facade_height - 0.2) or underpass_height < 2:
         return None, None
 
     return pixel_row_original, underpass_height
@@ -378,6 +385,14 @@ def record_observation(gdf_underpass_polygons, gdf_critical_walls, wall_id, unde
     underpass_id = gdf_critical_walls[gdf_critical_walls['wall_id'] == wall_id]['underpass_id'].iloc[0] 
     idx = gdf_underpass_polygons[gdf_underpass_polygons['underpass_id'] == underpass_id].index[0]
     gdf_underpass_polygons.at[idx, 'observed_heights'].append(underpass_height)
+
+
+def trimmed_mean(values, trim_ratio=0.15):
+    values = sorted(values)
+    n = len(values)
+    k = int(n * trim_ratio)
+    trimmed = values[k:n-k] if n > 2*k else values
+    return sum(trimmed) / len(trimmed)
 
 
 def write_geojson(gdf_underpass_polygons, output_path):

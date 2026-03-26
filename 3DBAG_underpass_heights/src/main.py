@@ -3,6 +3,7 @@ import time
 import cv2
 from statistics import mean
 from tqdm import tqdm
+import gc
 
 import data_preprocessing
 import perspective_projection
@@ -51,7 +52,7 @@ elif height_estimation_method == "unet_method":
 # 2. LOAD INPUT DATA IN GEOPANDAS DATAFRAMES
 # ------------------------------------------
 df_camera_parameters, gdf_image_footprints, gdf_underpass_polygons, gdf_underpass_edges = data_preprocessing.load_input_data(camera_parameters_path, image_footprints_path, 
-                                                                                                                            underpasses_path,underpass_edges_path)
+                                                                                                                            underpasses_path,underpass_edges_path, min_length=2)
 
 
 # 3. ITERATE OVER EACH 3D BAG TILE (GEOJSON)
@@ -91,13 +92,14 @@ for filename in tqdm(os.listdir(tiles_directory), desc="Processed tiles", unit="
     # -----------------------------------------------------------------------
     for _, row in tqdm(gdf_image_visibility.iterrows(), total=len(gdf_image_visibility), desc=f"Processing images for tile {filename}", unit="image", leave=False):
 
+        wall_ids = row['visible_walls']
+        if len(wall_ids) == 0:
+            continue
+    
         image_id = row['image_id']
         oblique_image_path = os.path.join(images_directory, f"{image_id}")                                                      
         oblique_image = cv2.imread(oblique_image_path)  
-        wall_ids = row['visible_walls']
 
-        if len(wall_ids) == 0:
-            continue
         if oblique_image is None:
             continue                                  
         
@@ -113,6 +115,10 @@ for filename in tqdm(os.listdir(tiles_directory), desc="Processed tiles", unit="
         # 8. EXTRACT FACADE TEXTURE FROM EVERY PROJECTED WALL
         # ---------------------------------------------------
         for wall_id, rect_2d in zip(wall_ids, rectangles_2d):
+
+            # Skip if projection was invalid
+            if rect_2d is None:
+                continue
             
             facade_image = facade_extraction.extract_facade(rect_2d, oblique_image)
 
@@ -129,15 +135,26 @@ for filename in tqdm(os.listdir(tiles_directory), desc="Processed tiles", unit="
             facade_height = gdf_critical_walls[gdf_critical_walls['wall_id'] == wall_id]['wall_height'].iloc[0]
 
             # Apply selected height estimation method
-            if height_estimation_method == "cc_method":
-                pixel_row, underpass_height = height_estimation.apply_cc_method(facade_image, facade_height, min_height=2, ground_dist=100, top_dist=50, min_solidity=0.5)
+            try:
+                if height_estimation_method == "cc_method":
+                    pixel_row, underpass_height = height_estimation.apply_cc_method(facade_image, facade_height, min_height=2, ground_dist=100, top_dist=50, min_solidity=0.5)
             
-            elif height_estimation_method == "depth_method":
-                pixel_row, underpass_height = height_estimation.apply_depth_method(facade_image, facade_height, depth_map_model, k=3)
+                elif height_estimation_method == "depth_method":
+                    pixel_row, underpass_height = height_estimation.apply_depth_method(facade_image, facade_height, depth_map_model, k=3)
 
-            elif height_estimation_method == "unet_method":
-                pixel_row, underpass_height = height_estimation.apply_unet_method(facade_image, facade_height, unet_model, unet_device)
+                elif height_estimation_method == "unet_method":
+                    pixel_row, underpass_height = height_estimation.apply_unet_method(facade_image, facade_height, unet_model, unet_device)
                 
+            except RuntimeError as e:
+                if "out of memory" in str(e):
+                    print(f"Out of Memory on wall_id {wall_id}, skipping this image.")
+                    torch.cuda.empty_cache()
+                    gc.collect()
+                    continue
+                else:
+                    raise e  
+                
+
             if underpass_height is not None:
 
                 # Visualize estimated underpass height image
@@ -150,6 +167,11 @@ for filename in tqdm(os.listdir(tiles_directory), desc="Processed tiles", unit="
 
                 # Skip to next wall if height estimation failed
                 continue
+            
+            # Release memory    
+            del facade_image
+            torch.cuda.empty_cache()
+            gc.collect()
 
 
     # 10. ESTIMATE HEIGHT OF UNDERPASSES FROM OBSERVATIONS
