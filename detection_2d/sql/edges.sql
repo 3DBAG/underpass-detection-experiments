@@ -1,26 +1,14 @@
 DROP TABLE IF EXISTS underpasses.edges;
 
 CREATE TABLE underpasses.edges AS
-WITH
--- Unnest adjacent building IDs to get individual rows for each adjacent building
-adjacent_buildings AS (
+with adjacent_geometries AS (
     SELECT
         ba.identificatie,
-        UNNEST(ba.adjacent_ids) AS adjacent_id
-    FROM building_types.bag_adjacency_3 ba
-    WHERE ba.adjacent_ids IS NOT NULL
-        AND array_length(ba.adjacent_ids, 1) > 0
-),
-
--- Get the geometries of the adjacent buildings from BAG
-adjacent_geometries AS (
-    SELECT
-        ab.identificatie,
-        ab.adjacent_id,
+        ba.adjacent_identificatie,
         bag.geometrie AS adjacent_geom
-    FROM adjacent_buildings ab
+    FROM building_types.bag_adjacency_4 ba
     JOIN lvbag.pandactueelbestaand bag
-        ON bag.identificatie = ab.adjacent_id
+        ON bag.identificatie = ba.adjacent_identificatie
     WHERE NOT ST_IsEmpty(bag.geometrie)
 ),
 

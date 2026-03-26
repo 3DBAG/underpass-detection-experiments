@@ -24,7 +24,7 @@ This initial BAG-BGT operation yields **1,972,190** potential underpass polygons
 <figcaption>Example of sliver polygons resulting from the BAG-BGT difference</figcaption>
 </figure>
 
-This is how the results are also filtered with an erosion/dilation operation (double buffering) with a threshold of **0.2 meters**. This step removes thin sliver polygons while preserving substantial underpass areas. This operation reduces the underpass count from ~2 million to **304,897** geometries.
+The results are also filtered with an erosion/dilation operation (double buffering) with a threshold of **0.2 meters**. This step removes thin sliver polygons while preserving substantial underpass areas. This operation reduces the underpass count from ~2 million to **304,897** geometries.
 
 ⚠️ **Note:** This filtering primarily addresses cases where BGT and BAG polygons are nearly identical, with differences consisting mainly of sliver polygons. When substantial geometric differences exist between the datasets (e.g., an underpass or other architectural detail), some sliver polygons may also remain within the overall geometry and require further processing in subsequent steps. 
 
@@ -138,4 +138,16 @@ Finally, when compared with the "outer ceiling surfaces" from 3D rotterdam, the 
     <figcaption>NL.IMBAG.Pand.0599100000635797: Red our detected underpass, green from 3DRotterdam</figcaption>
   </figure>
 
-## Part 2: Edge Classification and expansion
+## Part 2: Edge Extraction
+
+This step analyzes the underpass boundaries to classify edges based on their spatial relationship to BGT (topographic) data and adjacent buildings. The query creates three distinct edge types:
+
+- Shared Edges: Lines where underpass boundaries intersect with adjacent building geometries. These represent walls or boundaries that are shared between the underpass and neighboring structures.
+
+- Interior Edges: Lines where the underpass boundary intersects with the BGT polygon boundaries of the building to which they belong. These represent underpass edges whose walls belong to the building they are assigned to.
+
+- Exterior Edges: Lines representing the portions of underpass boundaries that do not intersect with BGT polygons and are not shared with adjacent buildings. These represent the exterior-facing edges of the underpass.
+
+
+In all the calculations we use a 0.03m snapping tolerance to handle minor geometric misalignments between datasets.
+
