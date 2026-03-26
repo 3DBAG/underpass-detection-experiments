@@ -6,9 +6,11 @@ import numpy as np
 import shapely
 from shapely.geometry import Polygon
 import pyvista as pv
+import os
 
 
-def load_input_data(camera_parameters_path, image_footprints_path, underpasses_path, underpass_edges_path, min_length):
+
+def load_input_data(camera_parameters_path, image_footprints_path, underpasses_path, underpass_edges_path, ground_truth_path, min_length):
     """
     Load input data from specified paths and preprocess them into GeoDataFrames.
 
@@ -94,7 +96,20 @@ def load_input_data(camera_parameters_path, image_footprints_path, underpasses_p
         print("Error in underpass edges processing: ", e)
         gdf_underpass_edges = None
 
-    return df_camera_parameters, gdf_image_footprints, gdf_underpass_polygons, gdf_underpass_edges
+    # Load ground truth data if provided (optional, for evaluation)
+    if os.path.exists(ground_truth_path):
+        gdf_ground_truth = gpd.read_file(ground_truth_path)
+        gdf_ground_truth = gdf_ground_truth.set_crs("EPSG:7415", allow_override=True)
+        gdf_ground_truth = gdf_ground_truth[['surface_id', 'geometry', 'upass_h']]
+
+        gdf_ground_truth = gdf_ground_truth.sjoin(gdf_underpass_polygons, how='inner', predicate='intersects')
+        gdf_ground_truth = gdf_ground_truth[['underpass_id', 'geometry', 'upass_h']].rename(columns={'geometry': 'ground_truth_geometry', 'upass_h': 'ground_truth_height'})
+
+    else:
+        gdf_ground_truth = None
+
+
+    return df_camera_parameters, gdf_image_footprints, gdf_underpass_polygons, gdf_underpass_edges, gdf_ground_truth
 
 
 def load_tile_data(tile_path):

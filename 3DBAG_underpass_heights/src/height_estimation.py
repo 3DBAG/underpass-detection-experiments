@@ -367,6 +367,94 @@ def display_image(facade_image, pixel_row):
     plt.show()
 
 
+def save_image_ground_truth(facade_image,facade_height, pixel_row, gdf_ground_truth, underpass_id, save_path):
+    
+    """Display the facade image with a line indicating the estimated underpass height and ground truth height if available.
+    Args:
+    - facade_image: The input image of the building facade (CV2 image).
+    - pixel_row: The pixel row in the facade image corresponding to the estimated underpass height.
+    - gdf_ground_truth: GeoDataFrame containing ground truth heights for underpasses, used for visualization.
+
+    Returns:
+    - img_vis: The facade image with lines indicating the estimated underpass height and ground truth if available
+
+    """
+
+    try:
+        ground_truth_height = gdf_ground_truth[gdf_ground_truth['underpass_id'] == underpass_id]['ground_truth_height'].iloc[0]
+
+    except IndexError:
+        ground_truth_height = None
+    
+    img_vis = facade_image.copy()
+    facade_image_height, facade_image_width, _ = img_vis.shape
+
+    if pixel_row is None:
+
+        if ground_truth_height is not None:
+            ground_truth_pixel_row = int(facade_image_height * (1 - ground_truth_height / facade_height))
+            cv2.line(img_vis, (0, ground_truth_pixel_row), (facade_image_width, ground_truth_pixel_row), (0, 255, 0), 3)
+            cv2.putText(
+                img_vis,
+                f"GT: {ground_truth_height:.2f} m",
+                (10, ground_truth_pixel_row - 10),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (0, 255, 0),
+                2,
+                cv2.LINE_AA
+            )
+
+            img_vis = cv2.cvtColor(img_vis, cv2.COLOR_BGR2RGB)
+
+            plt.imshow(img_vis)
+            plt.title(f"Underpass {underpass_id} \n No underpass could be detected \n GT (green) = {ground_truth_height:.2f} m")
+            plt.tight_layout()
+            plt.savefig(save_path)
+            # plt.show()
+
+        return img_vis
+
+    cv2.line(img_vis, (0, pixel_row), (facade_image_width, pixel_row), (0, 0, 255), 3)
+    cv2.putText(
+        img_vis,
+        f"Est: {facade_height * (1 - pixel_row / facade_image_height):.2f} m",
+        (10, pixel_row - 10),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.6,
+        (0, 0, 255),
+        2,
+        cv2.LINE_AA
+    )
+
+    if ground_truth_height is not None:
+        ground_truth_pixel_row = int(facade_image_height * (1 - ground_truth_height / facade_height))
+        cv2.line(img_vis, (0, ground_truth_pixel_row), (facade_image_width, ground_truth_pixel_row), (0, 255, 0), 3)
+        cv2.putText(
+            img_vis,
+            f"GT: {ground_truth_height:.2f} m",
+            (10, ground_truth_pixel_row - 10),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (0, 255, 0),
+            2,
+            cv2.LINE_AA
+        )
+
+    img_vis = cv2.cvtColor(img_vis, cv2.COLOR_BGR2RGB)
+
+    estimated_height = facade_height * (1 - pixel_row / facade_image_height)
+    error = estimated_height - ground_truth_height if ground_truth_height is not None else None
+
+    plt.imshow(img_vis)
+    plt.title(f"Underpass {underpass_id} \n Estimated (red) = {estimated_height:.2f} m \n GT (green) = {ground_truth_height:.2f} m \n Error = {error:.2f} m" if ground_truth_height is not None else f"Underpass {underpass_id} \n Estimated underpass height: {estimated_height:.2f} m \n No ground truth available")
+    plt.tight_layout()
+    plt.savefig(save_path)
+    # plt.show()
+
+    return img_vis
+
+
 def record_observation(gdf_underpass_polygons, gdf_critical_walls, wall_id, underpass_height):
 
     """

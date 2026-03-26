@@ -85,6 +85,8 @@ def project_walls_on_image(image_id, wall_ids, df_camera_parameters, gdf_critica
             rect_2d.append([int(vertex_2d[0][0]), int(vertex_2d[1][0])])
 
         if len(rect_2d) != 4:
+            # Append None for invalid projections
+            rectangles_2d.append(None)
             continue
 
         # Keep one flat array per projected wall: shape (num_vertices, 2)

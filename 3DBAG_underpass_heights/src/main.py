@@ -25,8 +25,10 @@ run_start = time.perf_counter()
 height_estimation_method = "unet_method" # "cc_method", "depth_method", "unet_method"
 
 # Define input directories and files
-tiles_directory = os.path.join(PROJECT_ROOT, 'data/3dbag_tiles')
-images_directory = os.path.join(PROJECT_ROOT, 'data/oblique_images')
+tiles_directory = r"D:\Q6\internship\assessment\data\3dbag_tiles"
+# os.path.join(PROJECT_ROOT, 'data/3dbag_tiles')
+images_directory = r"D:\Q6\internship\assessment\data\oblique_images"
+# os.path.join(PROJECT_ROOT, 'data/oblique_images')
 underpasses_directory = os.path.join(PROJECT_ROOT, 'data/underpass_polygons')
 depth_model_directory = os.path.join(PROJECT_ROOT, 'src/Depth-Anything-V2')
 unet_model_directory = os.path.join(PROJECT_ROOT, 'src/u-net_model')
@@ -34,8 +36,11 @@ unet_model_directory = os.path.join(PROJECT_ROOT, 'src/u-net_model')
 camera_parameters_path = os.path.join(images_directory, 'camera_parameters.txt')
 image_footprints_path = os.path.join(images_directory, 'image_footprints.geojson')
 underpasses_path = os.path.join(underpasses_directory, 'underpasses.geojson')
-# Inpute None if underpass edges are not provided, otherwise provide path to underpass edges geojson
+# Input None if underpass edges are not provided, otherwise provide path to underpass edges geojson
 underpass_edges_path = os.path.join(underpasses_directory, 'underpass_edges.geojson')
+
+# Use ground truth data if provided (optional, for evaluation)
+ground_truth_path = os.path.join(PROJECT_ROOT, 'data/ground_truth/underpasses_rotterdam3d.geojson')
 
 # Load model if needed
 if height_estimation_method == "depth_method":
@@ -46,17 +51,28 @@ elif height_estimation_method == "unet_method":
 # Define output file according to selected method
 if height_estimation_method == "cc_method":
     output_path = os.path.join(PROJECT_ROOT, 'output/underpass_heights_ccmethod.geojson')
+    # Define output for groud truth visualization
+    output_ground_truth_path = os.path.join(PROJECT_ROOT, 'output/visualizations_cc')
+    os.makedirs(output_ground_truth_path, exist_ok=True)
+                                   
 elif height_estimation_method == "depth_method":
     output_path = os.path.join(PROJECT_ROOT, 'output/underpass_heights_depthmethod.geojson')
+    # Define output for groud truth visualization
+    output_ground_truth_path = os.path.join(PROJECT_ROOT, 'output/visualizations_depth')
+    os.makedirs(output_ground_truth_path, exist_ok=True)
+
 elif height_estimation_method == "unet_method":
     output_path = os.path.join(PROJECT_ROOT, 'output/underpass_heights_unetmethod.geojson')
+    # Define output for groud truth visualization
+    output_ground_truth_path = os.path.join(PROJECT_ROOT, 'output/visualizations_unet')
+    os.makedirs(output_ground_truth_path, exist_ok=True)
 
 
 # 2. LOAD INPUT DATA IN GEOPANDAS DATAFRAMES
 # ------------------------------------------
-df_camera_parameters, gdf_image_footprints, gdf_underpass_polygons, gdf_underpass_edges = data_preprocessing.load_input_data(camera_parameters_path, image_footprints_path, 
-                                                                                                                            underpasses_path,underpass_edges_path, min_length=2)
-
+df_camera_parameters, gdf_image_footprints, gdf_underpass_polygons, gdf_underpass_edges, gdf_ground_truth = data_preprocessing.load_input_data(camera_parameters_path, image_footprints_path, 
+                                                                                                                            underpasses_path,underpass_edges_path, ground_truth_path,
+                                                                                                                              min_length=2)
 
 # 3. ITERATE OVER EACH 3D BAG TILE (GEOJSON)
 # ------------------------------------------
@@ -160,14 +176,26 @@ for filename in tqdm(os.listdir(tiles_directory), desc="Processed tiles", unit="
 
             if underpass_height is not None:
 
+                # Record observation in underpass GeoDataFrame
+                height_estimation.record_observation(gdf_underpass_polygons, gdf_critical_walls, wall_id, underpass_height)
+
                 # Visualize estimated underpass height image
                 # height_estimation.display_image(facade_image, pixel_row)
 
-                # Record observation in underpass GeoDataFrame
-                height_estimation.record_observation(gdf_underpass_polygons, gdf_critical_walls, wall_id, underpass_height)
+                # Write estimated height with ground truth if available
+                if gdf_ground_truth is not None:
+                    underpass_id = gdf_critical_walls[gdf_critical_walls['wall_id'] == wall_id]['underpass_id'].iloc[0]
+                    filename = f"{underpass_id}_{wall_id}_{image_id}.jpg"
+                    save_path = os.path.join(output_ground_truth_path , filename)
+                    ground_truth_image = height_estimation.save_image_ground_truth(facade_image, facade_height, pixel_row, gdf_ground_truth, underpass_id, save_path)                  
                 
             else:
-
+                if gdf_ground_truth is not None:
+                    underpass_id = gdf_critical_walls[gdf_critical_walls['wall_id'] == wall_id]['underpass_id'].iloc[0]
+                    filename = f"{underpass_id}_{wall_id}_{image_id}.jpg"
+                    save_path = os.path.join(output_ground_truth_path , filename)
+                    ground_truth_image = height_estimation.save_image_ground_truth(facade_image, facade_height, pixel_row, gdf_ground_truth, underpass_id, save_path) 
+                
                 # Skip to next wall if height estimation failed
                 continue
             
