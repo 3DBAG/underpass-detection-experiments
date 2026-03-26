@@ -506,18 +506,18 @@ In contrast, the U-Net approach shows a more favorable error distribution. Its p
   <strong>Figure 13.</strong> Absolute error distribution of the height estimation methods (bin size = 0.2 m)
 </p>
 
-<Strong>Table 3</Strong> presents an evaluation of performance under different error tolerances. Overall, none of the approaches achieves high accuracy under strict tolerance thresholds. We can observe that the U-Net approach outperforms the other methods across all tolerance levels, but its performance remains limited. For instance, under a strict tolerance of ±0.05 m, it correctly estimates only 1.33% of the features. This increases to 4.00% under a ±0.10 m tolerance, 8.00% under ±0.20 m, and 20.00% under ±0.40 m. On the contrary, the CC and depth map approaches perform worse overall. Even under more relaxed thresholds, their performance does not improve substantially. This reinforces the conclusion that these approaches lack robustness for precise height estimation.
+<Strong>Table 3</Strong> presents an evaluation of performance under different error tolerances. Overall, none of the approaches achieves high accuracy under strict tolerance thresholds. We can observe that the U-Net approach outperforms the other methods across all tolerance levels, but its performance remains limited. For instance, under a strict tolerance of ±0.10 m, it correctly estimates only 4.00% of the features. This increases to 8.00% under a ±0.20 m tolerance, 20.00% under ±0.40 m, and 26.66% under ±0.80 m. On the contrary, the CC and depth map approaches perform worse overall. This reinforces the conclusion that these approaches lack robustness for precise height estimation.
 
 <div align="center">
    <p align="center">
      <strong>Table 3:</strong> Performance of the height estimation methods for different tolerance thresholds.
    </p>
 
-| Method |  High (±0.05)    | Acceptable (±0.10) | Defficient (±0.20)  | Very Deficient (±0.40) |
+| Method |  High (±0.10)    | Acceptable (±0.20) | Defficient (±0.40)  | Very Deficient (±0.80) |
 |:------:|:----------------:|:------------------:|:-------------------:|:----------------------:|
-| CC     | 1.33 %           |1.33 %              | 4.00 %              | 9.33 %                 |                      
-| Depth  | 0.00 %           |1.33 %              | 2.66 %              | 9.33 %                 |                      
-| U-Net  | 1.33 %           |4.00 %              | 8.00 %              | 20.00 %                |                      
+| CC     | 1.33 %           |4.00 %              | 9.33 %              | 13.33 %                  |                      
+| Depth  | 1.33 %           |2.66 %               | 9.33 %              | 17.33 %                 |                      
+| U-Net  | 4.00 %           |8.00 %              | 20.00 %              | 26.66 %                |                      
 
 </div>
 
