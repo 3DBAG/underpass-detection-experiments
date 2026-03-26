@@ -30,7 +30,7 @@ GROUP BY identificatie, bag_geometrie;
 
 
 -- =====================================
--- Step 2: Initial BAG-BGT Difference Calculation
+-- Step 2: Initial BAG-BGT Difference Calculation, filtered through Double Buffering per Geometry
 -- =====================================
 
 DROP TABLE IF EXISTS underpasses.bag_minus_bgt;
@@ -48,25 +48,12 @@ SELECT
         ST_CollectionExtract(raw_diff, 3)
     ) AS geom
 FROM diff
-WHERE NOT ST_IsEmpty(raw_diff);
+WHERE NOT ST_IsEmpty(raw_diff) 
+AND NOT ST_IsEmpty(ST_Buffer(ST_Buffer(raw_diff, -0.2), 0.2));
 
 
 -- =====================================
--- Step 3: Filtering through Double Buffering per Geometry
--- =====================================
-
-DROP TABLE IF EXISTS underpasses.non_sliver_geometries;
-
-CREATE TABLE underpasses.non_sliver_geometries AS (
-    SELECT DISTINCT
-        identificatie
-    FROM underpasses.bag_minus_bgt
-    WHERE NOT ST_IsEmpty(ST_Buffer(ST_Buffer(geom, -0.2), 0.2))
-);
-
-
--- =====================================
--- Step 4: Double Snapping
+-- Step 3: Double Snapping
 -- =====================================
 
 DROP TABLE IF EXISTS underpasses.snapped_differences;
@@ -78,7 +65,7 @@ WITH joined AS (
         bbj.bag_geometrie,
         bbj.bgt_geometrie
     FROM underpasses.bag_bgt_join bbj
-    JOIN underpasses.non_sliver_geometries nsg
+    JOIN underpasses.bag_minus_bgt nsg
         ON bbj.identificatie = nsg.identificatie
 ),
 snapped AS (
@@ -107,7 +94,7 @@ WHERE NOT ST_IsEmpty(raw_geom);
 
 
 -- =====================================
--- Step 5: Final Filtering through Double Buffering per Geometry
+-- Step 4: Final Filtering through Double Buffering per Geometry
 -- =====================================
 
 DROP TABLE IF EXISTS underpasses.geometries;
@@ -116,17 +103,25 @@ CREATE TABLE underpasses.geometries AS
 WITH exploded AS (
     -- Split multipolygons into individual polygons
     SELECT
-        ROW_NUMBER() OVER () AS underpass_id,
         identificatie,
         (ST_Dump(geom)).geom AS single_poly
     FROM underpasses.snapped_differences
+),
+filtered AS (
+    SELECT
+        identificatie,
+        single_poly
+    FROM exploded
+    WHERE NOT ST_IsEmpty(ST_Buffer(ST_Buffer(single_poly, -0.2), 0.2))
 )
 SELECT
-    underpass_id,
+    ROW_NUMBER() OVER () AS underpass_id,
     identificatie,
     ST_CollectionExtract(single_poly, 3) AS geom
-FROM exploded
-WHERE NOT ST_IsEmpty(ST_Buffer(ST_Buffer(single_poly, -0.2), 0.2));
+FROM filtered;
+
+-- Add primary key constraint on underpass_id
+ALTER TABLE underpasses.geometries ADD CONSTRAINT pk_underpasses_geometries PRIMARY KEY (underpass_id);
 
 -- Also create index on identificatie for joins
 CREATE INDEX IF NOT EXISTS idx_underpasses_geometries_identificatie
