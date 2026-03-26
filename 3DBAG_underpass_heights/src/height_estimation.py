@@ -8,32 +8,26 @@ from torchvision import transforms
 from PIL import Image
 
 
-# Configure root directory
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
-
-# Append Depth-Anything-V2 directory and load modules
-sys.path.append(os.path.join(PROJECT_ROOT, "src", "Depth-Anything-V2"))
-from depth_anything_v2.dpt import DepthAnythingV2
-
-# Append U-Net model directory and load modules
-sys.path.append(os.path.join(PROJECT_ROOT, "src", "u-net_model"))
-from underpass_dataset import UnderpassDataset
-from unet import UNet
-
-
 # Function to load the Depth-Anything-V2 model
-def load_depth_map_model():
+def load_depth_map_model(depth_model_directory):
 
     """
     Load the Depth-Anything-V2 model for depth estimation.
     This code uses commit e5a2732d3ea2cddc081d7bfd708fc0bf09f812f1 (January 22nd, 2025).
     Link to repository: https://github.com/DepthAnything/Depth-Anything-V2
+
+    Args:
+        depth_model_directory: The directory where the Depth-Anything-V2 model checkpoint and code are stored.
     
     Returns:
         Depth-Anything-V2 model.
 
     """
+    # Append Depth-Anything-V2 directory and load modules
+    if depth_model_directory not in sys.path:
+        sys.path.append(depth_model_directory)
+
+    from depth_anything_v2.dpt import DepthAnythingV2
 
     # Configure Depth-Anything-V2 model
     device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
@@ -44,13 +38,7 @@ def load_depth_map_model():
         'vitg': {'encoder': 'vitg', 'features': 384, 'out_channels': [1536, 1536, 1536, 1536]}
     }
     encoder = 'vitb' # or 'vits', 'vitb', 'vitg'
-    checkpoint_path = os.path.join(
-        PROJECT_ROOT,
-        "src",
-        "Depth-Anything-V2",
-        "checkpoints",
-        f"depth_anything_v2_{encoder}.pth"
-    )
+    checkpoint_path = os.path.join(depth_model_directory, "checkpoints/depth_anything_v2_vitb.pth")
     model = DepthAnythingV2(**model_configs[encoder])
     model.load_state_dict(torch.load(checkpoint_path, map_location="cpu", weights_only=True))
     model = model.to(device).eval()
@@ -59,17 +47,26 @@ def load_depth_map_model():
 
 
 # Function to load the U-Net model
-def load_unet_model():
+def load_unet_model(unet_model_directory):
 
     """
     Load the U-Net model for underpass segmentation.
+
+    Args:
+        unet_model_directory: The directory where the U-Net model checkpoint is stored.
+
     Returns:
         device: The device on which the model is loaded (CPU or GPU).
         model: The loaded U-Net model.
 
     """
+    if unet_model_directory not in sys.path:
+        sys.path.append(unet_model_directory)
 
-    model_path = os.path.join(PROJECT_ROOT, "src", "u-net_model", "model.pth")
+    from underpass_dataset import UnderpassDataset
+    from unet import UNet
+
+    model_path = os.path.join(unet_model_directory, "model.pth")
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = UNet(in_channels=3, num_classes=1).to(device)
     model.load_state_dict(torch.load(model_path, map_location=torch.device(device)))

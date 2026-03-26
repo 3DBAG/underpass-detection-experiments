@@ -23,22 +23,24 @@ run_start = time.perf_counter()
 # Select height estimation method
 height_estimation_method = "unet_method" # "cc_method", "depth_method", "unet_method"
 
-# Load model if needed
-if height_estimation_method == "depth_method":
-    depth_map_model = height_estimation.load_depth_map_model()
-elif height_estimation_method == "unet_method":
-    unet_device, unet_model = height_estimation.load_unet_model()
-
 # Define input directories and files
 tiles_directory = os.path.join(PROJECT_ROOT, 'data/3dbag_tiles')
 images_directory = os.path.join(PROJECT_ROOT, 'data/oblique_images')
 underpasses_directory = os.path.join(PROJECT_ROOT, 'data/underpass_polygons')
+depth_model_directory = os.path.join(PROJECT_ROOT, 'src/Depth-Anything-V2')
+unet_model_directory = os.path.join(PROJECT_ROOT, 'src/u-net_model')
 
 camera_parameters_path = os.path.join(images_directory, 'camera_parameters.txt')
 image_footprints_path = os.path.join(images_directory, 'image_footprints.geojson')
 underpasses_path = os.path.join(underpasses_directory, 'underpasses.geojson')
 # Inpute None if underpass edges are not provided, otherwise provide path to underpass edges geojson
 underpass_edges_path = os.path.join(underpasses_directory, 'underpass_edges.geojson')
+
+# Load model if needed
+if height_estimation_method == "depth_method":
+    depth_map_model = height_estimation.load_depth_map_model(depth_model_directory)
+elif height_estimation_method == "unet_method":
+    unet_device, unet_model = height_estimation.load_unet_model(unet_model_directory)
 
 # Define output file according to selected method
 if height_estimation_method == "cc_method":

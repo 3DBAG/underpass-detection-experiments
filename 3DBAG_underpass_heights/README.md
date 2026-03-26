@@ -576,6 +576,8 @@ STEP 3. Adjust input file names if necessary
 tiles_directory = "path_to_folder"
 images_directory = "path_to_folder"
 underpasses_directory = "path_to_folder"
+depth_model_directory = "path_to_folder"
+unet_model_directory = "path_to_folder"
 
 camera_parameters_path = os.path.join(images_directory, 'camera_parameters.txt')
 image_footprints_path = os.path.join(images_directory, 'image_footprints.geojson')
