@@ -28,7 +28,7 @@ def load_input_data(camera_parameters_path, image_footprints_path, underpasses_p
 
     """
     # Load camera parameters
-    df_camera_parameters = pd.read_csv(camera_parameters_path, sep=' ', dtype={'image_id': str})
+    df_camera_parameters = pd.read_csv(camera_parameters_path, sep='\t', dtype={'image_id': str})
 
     # Load image footprints. Add camera center per footprint
     gdf_image_footprints = gpd.read_file(image_footprints_path)
