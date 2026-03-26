@@ -1,47 +1,44 @@
-
 -- =====================================
 -- CLASSIFICATION QUERY
 -- =====================================
-
--- Classification driven by geometries and edge analysis
 DROP TABLE IF EXISTS underpasses.classes;
 
 CREATE TABLE underpasses.classes AS
-WITH edge_counts AS (
+WITH detailed_normals AS (
     SELECT
         underpass_id,
-        COUNT(*) FILTER (WHERE edge_type = 'exterior') AS exterior_edge_count
+        COS(
+            ST_Azimuth(ST_StartPoint(geom), ST_EndPoint(geom)) + (PI() / 2)
+        ) AS normal_x,
+        SIN(
+            ST_Azimuth(ST_StartPoint(geom), ST_EndPoint(geom)) + (PI() / 2)
+        ) AS normal_y
     FROM underpasses.edges
+    WHERE edge_type = 'exterior'
+        AND ST_GeometryType(geom) = 'ST_LineString'
+),
+normal_stats AS (
+    SELECT
+        underpass_id,
+        COUNT(*) AS exterior_edge_count,
+        SQRT(
+            POWER(STDDEV(normal_x), 2) + POWER(STDDEV(normal_y), 2)
+        ) AS normal_variability
+    FROM detailed_normals
     GROUP BY underpass_id
 )
 SELECT
     g.*,
     CASE
-        WHEN EXISTS (
-            SELECT 1
-            FROM underpasses.test_roads r
-            WHERE r.geom && g.geom                -- helps use the GiST index on roads
-                AND ST_Intersects(g.geom, r.geom)   -- exact check
-                AND r.class IN ('primary', 'secondary', 'tertiary', 'residential', 'motorway', 'service')
-            LIMIT 1
-        ) THEN 'car_accessible' 
-        WHEN EXISTS (
-            SELECT 1
-            FROM underpasses.test_roads r
-            WHERE r.geom && g.geom                -- helps use the GiST index on roads
-                AND ST_Intersects(g.geom, r.geom)   -- exact check
-                AND r.class IN ('steps', 'cycleway','pedestrian', 'path', 'bridleway', 'footway', 'trunk', 'track')
-            LIMIT 1
-        ) THEN 'pedestrian_accessible' 
-        ELSE 'other' 
-    END AS accessibility,
-    
-    CASE 
-        WHEN ec.exterior_edge_count = 1 THEN 'arcade'
-        WHEN ec.exterior_edge_count > 1 THEN 'pass-through'
+        WHEN ns.exterior_edge_count = 1 
+            THEN 'arcade'
+        WHEN ns.exterior_edge_count > 1 
+            AND ns.normal_variability >= 0.7 
+            THEN 'pass-through'
+        WHEN ns.exterior_edge_count > 1 
+            AND ns.normal_variability < 0.7 
+            THEN 'arcade but weird'
         ELSE 'undefined'
     END AS underpass_type
-    
 FROM underpasses.geometries g
-LEFT JOIN edge_counts ec ON g.underpass_id = ec.underpass_id;
-
+    LEFT JOIN normal_stats ns ON g.underpass_id = ns.underpass_id;
