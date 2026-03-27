@@ -524,7 +524,7 @@ In contrast, the U-Net approach shows a more favorable error distribution. Its p
 
 </div>
 
-### Discussion of the assessment method
+#### Discussion of the assessment method
 After plotting images with estimated and ground truth heights, some inconsistences in the ground truth data became apparent. In many cases, the ground truth height is higher than the actual underpass visible in the images. Moreover, some underpasses in the input data do not have onr-to-one correspondances in the ground truth dataset. <Strong>Figure 14</Strong> shows a collection of examples of such cases, making evaluation impossible. The full collection of images can be found in `output/visualizations_GT_unet`. The choice to generate images just for the U-Net method is due to its higher performance over the others.
 
   <table align="center">
