@@ -54,11 +54,11 @@ edge_intersection_with_adjacent AS (
                 st_linemerge(ST_Intersection(
                     e.exterior_edges,
                     CASE 
-                        WHEN ST_GeometryType(ST_Snap(ag.adjacent_geom, e.exterior_edges, 0.03)) = 'ST_MultiPolygon' 
+                        WHEN ST_GeometryType(ST_Snap(ag.adjacent_geom, e.exterior_edges, 0.1)) = 'ST_MultiPolygon' 
                         THEN ST_Union(ARRAY(
-                            SELECT ST_ExteriorRing((ST_Dump(ST_Snap(ag.adjacent_geom, e.exterior_edges, 0.03))).geom)
+                            SELECT ST_ExteriorRing((ST_Dump(ST_Snap(ag.adjacent_geom, e.exterior_edges, 0.1))).geom)
                         ))
-                        ELSE ST_ExteriorRing(ST_Snap(ag.adjacent_geom, e.exterior_edges, 0.03))
+                        ELSE ST_ExteriorRing(ST_Snap(ag.adjacent_geom, e.exterior_edges, 0.1))
                     END
         )
         ) AS intersection_geom
