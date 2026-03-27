@@ -423,7 +423,7 @@ The original set of input underpasses consisted of 97 features. However, 15 of t
 </div>
 
 > [!NOTE]
-> The <Strong>Null Features</Strong> field presented in Table 2 corresponds to instances where a height estimation method was unable to make a prediction, and excludes the 22 features mentioned above. Note that the reasons for these null values differ.
+> The <Strong>Null Features</Strong> field presented in Table 2 corresponds to instances where a height estimation method was unable to make a prediction, and excludes the 15 features mentioned above. Note that the reasons for these null values differ.
 
 #### Run time
 
@@ -621,7 +621,7 @@ Currently, each observation is stored in a list, and the estimated height is com
 
 ## APPENDIX A - Running the code
 
-There is an example data set that can be used to run the code in the data folder. Oblique images can be accessed via this link: https://drive.google.com/drive/folders/15hFSsC8td4sBRpUln8s9ZnvHcWap2Pdk?usp=sharing. These must be downoaded and added to the <Strong>oblique_images</Strong> folder.
+There is an example data set that can be used to run the code in the data folder. Some input files are already avilable in the repository and some others must be downloaded and added to the data folders. All the specifications are included in `data/test_data.txt`.
 
 The following structure is necessary to run the code:
 
