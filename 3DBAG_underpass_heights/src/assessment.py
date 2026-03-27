@@ -11,9 +11,65 @@ PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
 output_directory = os.path.join(PROJECT_ROOT, 'output')
 ground_truth_directory = os.path.join(PROJECT_ROOT, 'data', 'ground_truth')
 
+
+def plot_histogram_with_kde_ax(ax, data, title, bins, show_ylabel=False):
+    # Clean data
+    data_clean = data[np.isfinite(data)]
+    if len(data_clean) == 0:
+        ax.set_title(f"{title}\n(No data)")
+        return
+
+    # Histogram
+    counts, bin_edges, _ = ax.hist(
+        data_clean,
+        bins=bins,
+        edgecolor='black',
+        alpha=0.6
+    )
+
+    # KDE
+    kde = gaussian_kde(data_clean)
+    x_vals = np.linspace(min(data_clean), max(data_clean), 1000)
+    bin_width = bin_edges[1] - bin_edges[0]
+    ax.plot(
+        x_vals,
+        kde(x_vals) * len(data_clean) * bin_width,
+        color='orange',
+        label="KDE (density estimate)"
+    )
+
+    # Mean line
+    mean_val = np.mean(data_clean)
+    ax.axvline(
+        mean_val,
+        linestyle='--',
+        color='red',
+        label=rf"Mean ($\bar{{x}}$ = {mean_val:.2f} m)"
+    )
+
+    # Titles and labels
+    ax.set_title(title)
+    ax.set_xlabel("Absolute error (m)")
+
+    if show_ylabel:
+        ax.set_ylabel("Feature Count")
+
+    # Axis formatting
+    ax.set_yticks(np.arange(0, 18, 2))
+    ax.set_xticks(np.arange(0, 12, 1))
+    ax.set_ylim(0, 15)
+    ax.set_xlim(0, 11)
+
+    ax.set_axisbelow(True)
+    ax.grid(True, linestyle='--', linewidth=0.5, alpha=0.4)
+
+    ax.legend()
+
+
 def deduplicate_comparison(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
 	"""Keep one row per underpass/surface pair after one-to-many spatial joins."""
 	return gdf.drop_duplicates(subset=['underpass_id', 'surface_id']).copy()
+
 
 # Load ground truth data
 gdf_ground_truth = gpd.read_file(os.path.join(ground_truth_directory, 'underpasses_rotterdam3d_revised.geojson'))
@@ -128,80 +184,15 @@ print(f"Relative Error (RE) for Depth method: {relative_error_depth:.2f}%")
 print(f"Relative Error (RE) for UNet method: {relative_error_unet:.2f}%")
 
 # Print histograms
-import numpy as np
-import matplotlib.pyplot as plt
-from scipy.stats import gaussian_kde
-
-def plot_histogram_with_kde_ax(ax, data, title, bins, show_ylabel=False):
-    # Clean data
-    data_clean = data[np.isfinite(data)]
-    if len(data_clean) == 0:
-        ax.set_title(f"{title}\n(No data)")
-        return
-
-    # Histogram
-    counts, bin_edges, _ = ax.hist(
-        data_clean,
-        bins=bins,
-        edgecolor='black',
-        alpha=0.6
-    )
-
-    # KDE
-    kde = gaussian_kde(data_clean)
-    x_vals = np.linspace(min(data_clean), max(data_clean), 1000)
-    bin_width = bin_edges[1] - bin_edges[0]
-    ax.plot(
-        x_vals,
-        kde(x_vals) * len(data_clean) * bin_width,
-        color='orange',
-        label="KDE (density estimate)"
-    )
-
-    # Mean line
-    mean_val = np.mean(data_clean)
-    ax.axvline(
-        mean_val,
-        linestyle='--',
-        color='red',
-        label=rf"Mean ($\bar{{x}}$ = {mean_val:.2f} m)"
-    )
-
-    # Titles and labels
-    ax.set_title(title)
-    ax.set_xlabel("Absolute error (m)")
-
-    if show_ylabel:
-        ax.set_ylabel("Feature Count")
-
-    # Axis formatting
-    ax.set_yticks(np.arange(0, 18, 2))
-    ax.set_xticks(np.arange(0, 12, 1))
-    ax.set_ylim(0, 15)
-    ax.set_xlim(0, 11)
-
-    ax.set_axisbelow(True)
-    ax.grid(True, linestyle='--', linewidth=0.5, alpha=0.4)
-
-    ax.legend()
-
-
-# Bins
-# bins = [0, 0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6, 6.5, 7, 7.5, 8, 8.5, 9, 9.5, 10, 10.5, 11, 11.5, 12]
 bins = [0, 0.2, 0.4, 0.6, 0.8, 1, 1.2, 1.4, 1.6, 1.8, 2, 2.2, 2.4, 2.6, 2.8, 3, 3.2, 3.4, 3.6, 3.8, 4, 4.2, 4.4, 4.6, 4.8, 5
         , 5.2, 5.4, 5.6, 5.8, 6, 6.2, 6.4, 6.6, 6.8, 7, 7.2, 7.4, 7.6, 7.8, 8, 8.2, 8.4, 8.6, 8.8, 9, 9.2, 9.4, 9.6, 9.8, 10, 10.2, 10.4, 10.6, 10.8, 11]
 
-# Create subplots
 fig, axes = plt.subplots(1, 3, figsize=(18, 5), sharey=True)
 
-# Plot each method
 plot_histogram_with_kde_ax(axes[0], gdf_comparison_cc['error'], "CC method", bins, show_ylabel=True)
 plot_histogram_with_kde_ax(axes[1], gdf_comparison_depth['error'], "Depth method", bins)
 plot_histogram_with_kde_ax(axes[2], gdf_comparison_unet['error'], "UNet method", bins)
 
-# Suptitle
 fig.suptitle("Absolute error histograms", fontsize=16)
-
-# Layout adjustment
 plt.tight_layout()
 plt.show()

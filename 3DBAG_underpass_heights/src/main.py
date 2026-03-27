@@ -25,10 +25,8 @@ run_start = time.perf_counter()
 height_estimation_method = "unet_method" # "cc_method", "depth_method", "unet_method"
 
 # Define input directories and files
-tiles_directory = r"D:\Q6\internship\assessment\data\3dbag_tiles"
-# os.path.join(PROJECT_ROOT, 'data/3dbag_tiles')
-images_directory = r"D:\Q6\internship\assessment\data\oblique_images"
-# os.path.join(PROJECT_ROOT, 'data/oblique_images')
+tiles_directory = os.path.join(PROJECT_ROOT, 'data/3dbag_tiles')
+images_directory = os.path.join(PROJECT_ROOT, 'data/oblique_images')
 underpasses_directory = os.path.join(PROJECT_ROOT, 'data/underpass_polygons')
 depth_model_directory = os.path.join(PROJECT_ROOT, 'src/Depth-Anything-V2')
 unet_model_directory = os.path.join(PROJECT_ROOT, 'src/u-net_model')
