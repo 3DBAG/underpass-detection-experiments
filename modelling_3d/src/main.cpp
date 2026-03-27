@@ -220,12 +220,14 @@ static FeatureCarveResult carve_underpasses_for_feature(
         result.result_meshgl = surface_mesh_to_meshgl(result_sm, false);
         auto t_conversion_end_local = Clock::now();
         ds_conversion_ms += t_conversion_end_local - t_conversion_start_local;
+#ifdef ENABLE_GEOGRAM
     } else if (method == BooleanMethod::Geogram) {
         Surface_mesh result_sm = geogram_boolean_difference(house_sm, underpass_meshes, &timing);
         auto t_conversion_start_local = Clock::now();
         result.result_meshgl = surface_mesh_to_meshgl(result_sm, false);
         auto t_conversion_end_local = Clock::now();
         ds_conversion_ms += t_conversion_end_local - t_conversion_start_local;
+#endif
     } else {
         Surface_mesh result_sm = corefine_boolean_difference(house_sm, underpass_meshes, &timing);
         auto t_conversion_start_local = Clock::now();
@@ -725,7 +727,11 @@ int main(int argc, char* argv[]) {
                   << " <ogr_source> <model_input> <model_output> <height_attribute> [id_attribute] [method]" << std::endl;
         std::cerr << "  model formats: .fcb (FlatCityBuf) or .jsonl (CityJSONSeq)" << std::endl;
         std::cerr << "  id_attribute default: identificatie" << std::endl;
-        std::cerr << "  method: pmp (default), manifold, nef, geogram" << std::endl;
+        std::cerr << "  method: pmp (default), manifold, nef"
+#ifdef ENABLE_GEOGRAM
+                  << ", geogram"
+#endif
+                  << std::endl;
         std::cerr << "  use '-' as input to read FCB from stdin" << std::endl;
         std::cerr << "  use '-' as output to write FCB to stdout" << std::endl;
         std::cerr << "  CityJSONSeq stdin/stdout piping is not supported yet" << std::endl;
@@ -747,10 +753,16 @@ int main(int argc, char* argv[]) {
         method = BooleanMethod::CgalNef;
     } else if (method_str == "pmp") {
         method = BooleanMethod::CgalPMP;
+#ifdef ENABLE_GEOGRAM
     } else if (method_str == "geogram") {
         method = BooleanMethod::Geogram;
+#endif
     } else if (method_str != "manifold") {
-        std::cerr << "Unknown method: " << method_str << " (use manifold, nef, pmp, or geogram)" << std::endl;
+        std::cerr << "Unknown method: " << method_str << " (use manifold, nef, pmp"
+#ifdef ENABLE_GEOGRAM
+                  << ", geogram"
+#endif
+                  << ")" << std::endl;
         return 1;
     }
 

@@ -8,29 +8,28 @@ This directory contains a Python workflow for estimating underpass height from c
 > ```
 > The GPKG file contains the underpass polygon of interest from the 2D detection pipeline. The pointcloud is one of the files Amsterdam gave to us. To save space, these two files are not included in this repository, but the relvant roofer output is included.
 
-The script loops over a list of BAG cases, reads each LAS/LAZ file and its matching GeoPackage polygon, detects Z-peak candidates from a smoothed histogram, rasterizes each candidate to the XY plane at `0.5 m` resolution, and ranks peaks by the largest contiguous occupied raster area.
+The script loops over a list of BAG cases, reads each LAS/LAZ file and its matching GeoPackage polygon, detects Z-peak candidates from a smoothed histogram, rasterizes each candidate to the XY plane at `0.5 m` resolution, and keeps only candidates whose raw histogram count is at least `5%` of the second-highest candidate raw count.
 
-The two selected underpass peaks are then used for the height estimate and GeoPackage attributes. A third peak is also rendered as a diagnostic panel in the output figure. Each selected peak uses a fixed `0.5 m` vertical band centered on the peak.
+For each remaining candidate, the script computes:
 
-It also writes the derived attributes back into the GeoPackage feature table:
+- the raw occupied raster
+- an exclusive raster with lower peaks masked out
+- pairwise vertical-wall cells between adjacent peaks
+- a union raster of exclusive cells and related wall cells
 
-- `underpass_dh`: difference between the two detected peak heights
-- `underpass_top_area`: occupied raster area for the upper peak cluster
-- `underpass_bottom_area`: occupied raster area for the lower peak cluster
+The final two underpass peaks are chosen as the two peaks with the largest contiguous area in that union raster. Each peak uses a fixed `1.0 m` vertical band centered on the selected histogram bin.
 
 ## What The Script Produces
 
-- A histogram of Z values with raw bars, a smoothed curve, three peak markers, fixed `0.5 m` peak bands, and a double-headed height-difference annotation for the two selected underpass peaks
-- Three XY raster subplots:
-  - selected lower peak
-  - selected upper peak
-  - third diagnostic peak
+- A histogram of Z values with raw bars, a smoothed curve, one marker and fixed `1.0 m` band per displayed peak, and a double-headed height-difference annotation for the two selected underpass peaks
+- One XY raster row showing all displayed peak bands
+- One XY raster row showing the union of exclusive cells and pairwise wall cells for each displayed peak
+- Optional diagnostic rows for:
+  - exclusive cells with lower peaks masked out
+  - related wall cells between adjacent peaks
 - One PNG per BAG id, named `<bag_id>_peak_grids_overlay.png`
 - A CSV summary written to `underpass_heights.csv`
-- Updated attributes in each input GeoPackage:
-  - `underpass_dh`
-  - `underpass_top_area`
-  - `underpass_bottom_area`
+- A Rerun visualization sent to the viewer by default
 
 ## Example Cases
 
@@ -109,7 +108,7 @@ nix develop -c python3 plot_z_histogram.py
 Use Python 3. Then install the required packages:
 
 ```bash
-python3 -m pip install laspy matplotlib numpy shapely
+python3 -m pip install laspy matplotlib numpy rerun-sdk shapely
 ```
 
 Run the script:

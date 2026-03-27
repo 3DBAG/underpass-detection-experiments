@@ -5,8 +5,7 @@ import numpy as np
 import rerun as rr
 import sqlite3
 from pathlib import Path
-from matplotlib.colors import LinearSegmentedColormap, ListedColormap
-from matplotlib.patches import Patch
+from matplotlib.colors import LinearSegmentedColormap
 from shapely import wkb
 
 
@@ -45,22 +44,27 @@ HISTOGRAM_BINS = 100
 # XY raster cell size in meters for the per-peak occupancy grids.
 GRID_CELLSIZE = 0.5
 
-# If the lowest-Z peak has less than this fraction of the dominant peak's
-# contiguous raster area, it is treated as insignificant and not forced in as
-# one of the two main underpass peaks.
-LOWEST_PEAK_MIN_RELATIVE_AREA = 0.1
-
 # Width of the Z band, centered on each selected peak, used to subset LAS
 # points for the raster outputs and reported peak windows.
-PEAK_BAND_WIDTH_METERS = 0.5
+PEAK_BAND_WIDTH_METERS = 1
 
-# Number of peak layers to display in the diagnostic output. The first two are
-# the selected underpass peaks; any additional peaks are diagnostic only.
-DISPLAY_PEAK_COUNT = 4
+# Candidate peaks with raw counts below this fraction of the second-highest
+# candidate raw count are not shown in the diagnostic plots and are not
+# considered for the final two-peak selection.
+DISPLAY_PEAK_MIN_RELATIVE_RAW_COUNT = 0.05
 
 # When enabled, the selected peak is snapped from the smoothed local maximum to
 # the highest raw histogram bin inside that smoothed peak cluster.
-SNAP_PEAK_TO_RAW_BIN_WITHIN_CLUSTER = False
+SNAP_PEAK_TO_RAW_BIN_WITHIN_CLUSTER = True
+
+# A cell is treated as a vertical wall when points occupy nearly every
+# histogram bin between the two selected underpass peaks.
+VERTICAL_WALL_MIN_BIN_FRACTION = 0.85
+VERTICAL_WALL_MAX_EMPTY_RUN_BINS = 1
+
+# Optional diagnostic rows in the matplotlib output.
+SHOW_EXCLUSIVE_ROW = False
+SHOW_RELATED_WALL_ROW = False
 
 # Output filenames, Rerun mode, and visualization colors.
 OUTPUT_CSV_PATH = "underpass_heights.csv"
@@ -73,6 +77,16 @@ PEAK_RGB_COLORS = {
     3: (44, 160, 44),
     4: (214, 39, 40),
 }
+PEAK_CMAP_NAMES = [
+    "Blues",
+    "Oranges",
+    "Greens",
+    "Reds",
+    "Purples",
+    "Greys",
+    "YlGnBu",
+    "YlOrBr",
+]
 
 
 def find_top_histogram_peaks(values, bins=100, smoothing_window=7, min_separation_bins=10):
@@ -115,7 +129,6 @@ def find_top_histogram_peaks(values, bins=100, smoothing_window=7, min_separatio
         bin_edges,
         bin_centers,
         smoothed_counts,
-        ranked_candidates.tolist(),
         separated_candidates,
     )
 
@@ -131,11 +144,6 @@ def peak_cluster_index_bounds(smoothed_counts, peak_idx):
         right_idx += 1
 
     return left_idx, right_idx
-
-
-def peak_cluster_from_index(bin_edges, smoothed_counts, peak_idx):
-    left_idx, right_idx = peak_cluster_index_bounds(smoothed_counts, peak_idx)
-    return bin_edges[left_idx], bin_edges[right_idx + 1]
 
 
 def refine_peak_index_within_cluster(counts, smoothed_counts, peak_idx):
@@ -231,23 +239,6 @@ def load_polygon_geometries(path):
     return [gpkg_blob_to_geometry(row[0]) for row in rows]
 
 
-def update_gpkg_attributes(path, attributes):
-    table_name = feature_table_name(path)
-
-    with connect_gpkg(path) as con:
-        existing_columns = {
-            row[1] for row in con.execute(f'pragma table_info("{table_name}")').fetchall()
-        }
-
-        for column_name in attributes:
-            if column_name not in existing_columns:
-                con.execute(f'alter table "{table_name}" add column "{column_name}" REAL')
-
-        assignments = ", ".join(f'"{column_name}" = ?' for column_name in attributes)
-        con.execute(f'update "{table_name}" set {assignments}', tuple(attributes.values()))
-        con.commit()
-
-
 def iter_rings(geometry):
     if geometry.geom_type == "Polygon":
         yield np.asarray(geometry.exterior.coords, dtype=float)
@@ -278,27 +269,72 @@ def build_grid(x, y, x_edges, y_edges):
     return grid.T
 
 
-def build_min_z_grid(x, y, z, x_edges, y_edges):
+def build_vertical_wall_mask(
+    x,
+    y,
+    z,
+    x_edges,
+    y_edges,
+    bin_edges,
+    lower_peak_idx,
+    upper_peak_idx,
+    min_bin_fraction,
+    max_empty_run_bins,
+):
     rows = len(y_edges) - 1
     cols = len(x_edges) - 1
-    min_grid = np.full((rows, cols), np.nan, dtype=float)
+    wall_mask = np.zeros((rows, cols), dtype=bool)
+
+    if rows == 0 or cols == 0:
+        return wall_mask
+
+    start_idx = min(lower_peak_idx, upper_peak_idx)
+    stop_idx = max(lower_peak_idx, upper_peak_idx)
+    if stop_idx <= start_idx:
+        return wall_mask
 
     x_idx = np.searchsorted(x_edges, x, side="right") - 1
     y_idx = np.searchsorted(y_edges, y, side="right") - 1
+    z_idx = np.searchsorted(bin_edges, z, side="right") - 1
+
+    bin_count = len(bin_edges) - 1
     valid = (
         (x_idx >= 0)
         & (x_idx < cols)
         & (y_idx >= 0)
         & (y_idx < rows)
+        & (z_idx >= start_idx)
+        & (z_idx <= stop_idx)
+        & (z_idx < bin_count)
     )
     if not np.any(valid):
-        return min_grid
+        return wall_mask
 
-    flat_indices = y_idx[valid] * cols + x_idx[valid]
-    flat_min = np.full(rows * cols, np.inf, dtype=float)
-    np.minimum.at(flat_min, flat_indices, z[valid])
-    flat_min[np.isinf(flat_min)] = np.nan
-    return flat_min.reshape(rows, cols)
+    interval_bin_count = stop_idx - start_idx + 1
+    occupied_bins = np.zeros((rows * cols, interval_bin_count), dtype=bool)
+    flat_cell_idx = y_idx[valid] * cols + x_idx[valid]
+    interval_z_idx = z_idx[valid] - start_idx
+    occupied_bins[flat_cell_idx, interval_z_idx] = True
+
+    occupied_fraction = occupied_bins.mean(axis=1)
+    endpoint_hits = occupied_bins[:, 0] & occupied_bins[:, -1]
+
+    empty_bins = ~occupied_bins
+    padded_empty_bins = np.pad(empty_bins.astype(np.int16), ((0, 0), (1, 1)), constant_values=0)
+    transitions = np.diff(padded_empty_bins, axis=1)
+    run_starts = transitions == 1
+    run_stops = transitions == -1
+    run_lengths = np.where(run_stops)[1] - np.where(run_starts)[1]
+    max_empty_run = np.zeros(rows * cols, dtype=int)
+    if len(run_lengths) > 0:
+        np.maximum.at(max_empty_run, np.where(run_starts)[0], run_lengths)
+
+    wall_mask.flat[:] = (
+        endpoint_hits
+        & (occupied_fraction >= min_bin_fraction)
+        & (max_empty_run <= max_empty_run_bins)
+    )
+    return wall_mask
 
 
 def band_mask(values, value_min, value_max):
@@ -343,33 +379,16 @@ def largest_contiguous_component_area(grid, cellsize):
     return largest_component_cells * (cellsize ** 2)
 
 
-def select_underpass_peak_indices(candidate_layers, bin_centers):
+def select_underpass_peak_indices(candidate_layers, area_key="largest_component_area"):
     if not candidate_layers:
         return []
 
     area_ranked_layers = sorted(
         candidate_layers,
-        key=lambda layer: (layer["largest_component_area"], layer["area"]),
+        key=lambda layer: (layer[area_key], layer["area"]),
         reverse=True,
     )
-    dominant_layer = area_ranked_layers[0]
-    lowest_layer = min(candidate_layers, key=lambda layer: layer["peak_center"])
-    lowest_peak_ratio = (
-        lowest_layer["largest_component_area"] / dominant_layer["largest_component_area"]
-        if dominant_layer["largest_component_area"] > 0
-        else 0.0
-    )
-
-    if len(candidate_layers) == 1:
-        selected_layers = [lowest_layer]
-    elif lowest_peak_ratio >= LOWEST_PEAK_MIN_RELATIVE_AREA:
-        selected_layers = [lowest_layer]
-        for layer in area_ranked_layers:
-            if layer["peak_idx"] != lowest_layer["peak_idx"]:
-                selected_layers.append(layer)
-                break
-    else:
-        selected_layers = area_ranked_layers[:2]
+    selected_layers = area_ranked_layers[:2]
 
     selected_layers.sort(key=lambda layer: layer["peak_center"])
     return [layer["peak_idx"] for layer in selected_layers]
@@ -381,6 +400,23 @@ def make_truncated_cmap(name, start=0.25, end=1.0):
     cmap = LinearSegmentedColormap.from_list(f"{name}_truncated", colors)
     cmap.set_bad((0, 0, 0, 0))
     return cmap
+
+
+def peak_plot_color(peak_number):
+    if peak_number <= 10:
+        return f"C{(peak_number - 1) % 10}"
+    return plt.get_cmap("tab20")((peak_number - 1) % 20)
+
+
+def peak_rgb_color(peak_number):
+    if peak_number in PEAK_RGB_COLORS:
+        return PEAK_RGB_COLORS[peak_number]
+    rgba = plt.get_cmap("tab20")((peak_number - 1) % 20)
+    return tuple(int(round(channel * 255)) for channel in rgba[:3])
+
+
+def peak_fill_cmap(peak_number):
+    return make_truncated_cmap(PEAK_CMAP_NAMES[(peak_number - 1) % len(PEAK_CMAP_NAMES)], start=0.28)
 
 
 def plot_geometry_outline(ax, geometries):
@@ -439,11 +475,6 @@ def write_rerun_visualization(
         rr.Points3D(points, radii=0.02, colors=[RERUN_BASE_POINT_COLOR]),
     )
 
-    center_x = ((min_x + max_x) / 2) - origin_x
-    center_y = ((min_y + max_y) / 2) - origin_y
-    half_size_x = (max_x - min_x) / 2
-    half_size_y = (max_y - min_y) / 2
-
     for peak_number, layer in enumerate(peak_layers, start=1):
         if np.isclose(layer["z_max"], np.max(z)):
             mask = (z >= layer["z_min"]) & (z <= layer["z_max"])
@@ -456,7 +487,7 @@ def write_rerun_visualization(
             rr.Points3D(
                 peak_points,
                 radii=0.03,
-                colors=[PEAK_RGB_COLORS[peak_number]],
+                colors=[peak_rgb_color(peak_number)],
             ),
         )
 
@@ -483,7 +514,6 @@ def process_case(las_path, gpkg_path):
         bin_edges,
         bin_centers,
         smoothed_counts,
-        ranked_candidate_indices,
         candidate_peak_indices,
     ) = find_top_histogram_peaks(
         z,
@@ -530,23 +560,22 @@ def process_case(las_path, gpkg_path):
             "raw_count": counts[refined_peak_idx],
         }
 
-    candidate_layer_by_idx = {
+    candidate_layers_by_idx = {
         peak_idx: build_peak_layer(peak_idx)
-        for peak_idx in ranked_candidate_indices
+        for peak_idx in candidate_peak_indices
     }
     separated_candidate_layers = [
-        candidate_layer_by_idx[peak_idx]
+        candidate_layers_by_idx[peak_idx]
         for peak_idx in candidate_peak_indices
     ]
-    peak_indices = select_underpass_peak_indices(separated_candidate_layers, bin_centers)
-    selected_peak_layers = [candidate_layer_by_idx[peak_idx] for peak_idx in peak_indices]
+    candidate_layers_by_height = sorted(separated_candidate_layers, key=lambda layer: layer["peak_center"])
 
     print(f"Number of points: {len(z)}")
     print(f"Z range: [{np.min(z):.2f}, {np.max(z):.2f}]")
     print(f"Z mean: {np.mean(z):.2f}, std: {np.std(z):.2f}")
     print("Candidate peaks ranked by largest contiguous XY area:")
     ranked_candidate_layers = sorted(
-        (candidate_layer_by_idx[peak_idx] for peak_idx in ranked_candidate_indices),
+        separated_candidate_layers,
         key=lambda layer: (layer["largest_component_area"], layer["area"], layer["smoothed_count"]),
         reverse=True,
     )
@@ -558,64 +587,102 @@ def process_case(las_path, gpkg_path):
             f"smoothed count {layer['smoothed_count']:.1f}, raw count {layer['raw_count']}"
         )
 
-    display_peak_indices = list(peak_indices)
-    area_ranked_candidate_indices = [layer["peak_idx"] for layer in ranked_candidate_layers]
-    between_peak_candidates = [
-        peak_idx
-        for peak_idx in area_ranked_candidate_indices
-        if peak_idx not in display_peak_indices
-        and bin_centers[peak_indices[0]] < bin_centers[peak_idx] < bin_centers[peak_indices[-1]]
+    candidate_raw_counts = sorted((layer["raw_count"] for layer in separated_candidate_layers), reverse=True)
+    if len(candidate_raw_counts) >= 2:
+        display_raw_count_threshold = (
+            DISPLAY_PEAK_MIN_RELATIVE_RAW_COUNT * candidate_raw_counts[1]
+        )
+    elif candidate_raw_counts:
+        display_raw_count_threshold = DISPLAY_PEAK_MIN_RELATIVE_RAW_COUNT * candidate_raw_counts[0]
+    else:
+        display_raw_count_threshold = 0.0
+    display_peak_layers = [
+        layer
+        for layer in candidate_layers_by_height
+        if layer["raw_count"] >= display_raw_count_threshold
     ]
-    for peak_idx in between_peak_candidates:
-        if len(display_peak_indices) >= DISPLAY_PEAK_COUNT:
-            break
-        display_peak_indices.append(peak_idx)
+    if not display_peak_layers and candidate_layers_by_height:
+        display_peak_layers = [candidate_layers_by_height[0]]
+    print(
+        f"Displaying {len(display_peak_layers)} candidate peaks with raw count >= "
+        f"{display_raw_count_threshold:.1f} "
+        f"(5% of second-highest candidate raw count)."
+    )
 
-    for peak_idx in area_ranked_candidate_indices:
-        if len(display_peak_indices) >= DISPLAY_PEAK_COUNT:
-            break
-        if peak_idx not in display_peak_indices:
-            display_peak_indices.append(peak_idx)
-    display_peak_layers = [candidate_layer_by_idx[peak_idx] for peak_idx in display_peak_indices]
-    floor_excluded_mask = ~band_mask(
-        z,
-        selected_peak_layers[0]["z_min"],
-        selected_peak_layers[0]["z_max"],
-    )
-    min_z_excluding_floor_grid = build_min_z_grid(
-        x[floor_excluded_mask],
-        y[floor_excluded_mask],
-        z[floor_excluded_mask],
-        x_edges,
-        y_edges,
-    )
-    higher_peak_cell_mask = np.zeros_like(min_z_excluding_floor_grid, dtype=bool)
-    for layer in display_peak_layers[1:]:
-        higher_peak_cell_mask |= layer["grid"] > 0
-    peak_origin_grid = np.full(min_z_excluding_floor_grid.shape, np.nan, dtype=float)
+    occupied_by_lower_non_floor_peaks = np.zeros_like(display_peak_layers[0]["grid"], dtype=bool)
     for display_peak_idx, layer in sorted(
-        enumerate(display_peak_layers[1:], start=2),
+        enumerate(display_peak_layers, start=1),
         key=lambda item: item[1]["peak_center"],
     ):
-        layer_cell_mask = (layer["grid"] > 0) & np.isnan(peak_origin_grid)
-        peak_origin_grid[layer_cell_mask] = display_peak_idx
-    min_z_excluding_floor_grid = np.where(
-        higher_peak_cell_mask,
-        min_z_excluding_floor_grid,
-        np.nan,
-    )
-    min_z_excluding_floor_values = min_z_excluding_floor_grid[~np.isnan(min_z_excluding_floor_grid)]
-    if len(min_z_excluding_floor_values) > 0:
-        min_z_hist_counts, min_z_hist_edges = np.histogram(
-            min_z_excluding_floor_values,
-            bins=HISTOGRAM_BINS,
+        if display_peak_idx == 1:
+            exclusive_grid = layer["grid"]
+        else:
+            exclusive_grid = np.where(occupied_by_lower_non_floor_peaks, 0, layer["grid"])
+        layer["exclusive_grid"] = exclusive_grid
+        layer["exclusive_area"] = np.count_nonzero(exclusive_grid) * (GRID_CELLSIZE ** 2)
+        layer["exclusive_largest_component_area"] = largest_contiguous_component_area(
+            exclusive_grid,
+            GRID_CELLSIZE,
         )
-        min_z_hist_centers = (min_z_hist_edges[:-1] + min_z_hist_edges[1:]) / 2
-        min_z_hist_widths = np.diff(min_z_hist_edges)
-    else:
-        min_z_hist_counts = np.array([0.0], dtype=float)
-        min_z_hist_centers = np.array([0.0], dtype=float)
-        min_z_hist_widths = np.array([1.0], dtype=float)
+        if display_peak_idx != 1:
+            occupied_by_lower_non_floor_peaks |= layer["grid"] > 0
+    pairwise_wall_masks = []
+    for upper_peak_idx in range(1, len(display_peak_layers)):
+        lower_layer = display_peak_layers[upper_peak_idx - 1]
+        upper_layer = display_peak_layers[upper_peak_idx]
+        pairwise_wall_masks.append(
+            build_vertical_wall_mask(
+                x,
+                y,
+                z,
+                x_edges,
+                y_edges,
+                bin_edges,
+                lower_layer["refined_peak_idx"],
+                upper_layer["refined_peak_idx"],
+                min_bin_fraction=VERTICAL_WALL_MIN_BIN_FRACTION,
+                max_empty_run_bins=VERTICAL_WALL_MAX_EMPTY_RUN_BINS,
+            )
+        )
+    for display_peak_idx, layer in enumerate(display_peak_layers, start=1):
+        related_wall_mask = np.zeros_like(layer["grid"], dtype=bool)
+        if display_peak_idx > 1:
+            related_wall_mask |= pairwise_wall_masks[display_peak_idx - 2]
+        if display_peak_idx < len(display_peak_layers):
+            related_wall_mask |= pairwise_wall_masks[display_peak_idx - 1]
+        layer["related_wall_grid"] = related_wall_mask.astype(float)
+        layer["related_wall_area"] = np.count_nonzero(related_wall_mask) * (GRID_CELLSIZE ** 2)
+    for layer in display_peak_layers:
+        exclusive_or_wall_grid = np.where(
+            (layer["exclusive_grid"] > 0) | (layer["related_wall_grid"] > 0),
+            np.maximum(layer["exclusive_grid"], layer["related_wall_grid"]),
+            0,
+        )
+        layer["exclusive_or_wall_grid"] = exclusive_or_wall_grid
+        layer["exclusive_or_wall_area"] = np.count_nonzero(exclusive_or_wall_grid) * (GRID_CELLSIZE ** 2)
+        layer["exclusive_or_wall_largest_component_area"] = largest_contiguous_component_area(
+            exclusive_or_wall_grid,
+            GRID_CELLSIZE,
+        )
+
+        corrected_grid = np.where(
+            (layer["exclusive_grid"] > 0) & (layer["related_wall_grid"] == 0),
+            layer["exclusive_grid"],
+            0,
+        )
+        layer["corrected_largest_component_area"] = largest_contiguous_component_area(
+            corrected_grid,
+            GRID_CELLSIZE,
+        )
+
+    peak_indices = select_underpass_peak_indices(
+        display_peak_layers,
+        area_key="exclusive_or_wall_largest_component_area",
+    )
+    selected_peak_layers = [
+        layer for layer in display_peak_layers
+        if layer["peak_idx"] in peak_indices
+    ]
 
     for i, layer in enumerate(display_peak_layers, start=1):
         print(
@@ -623,7 +690,8 @@ def process_case(las_path, gpkg_path):
             f"Z range [{layer['z_min']:.2f}, {layer['z_max']:.2f}), "
             f"points {layer['point_count']}, "
             f"area {layer['area']:.2f} m^2, "
-            f"largest contiguous area {layer['largest_component_area']:.2f} m^2"
+            f"largest contiguous area {layer['largest_component_area']:.2f} m^2, "
+            f"corrected contiguous area {layer['corrected_largest_component_area']:.2f} m^2"
         )
 
     underpass_attributes = {
@@ -637,13 +705,6 @@ def process_case(las_path, gpkg_path):
         "underpass_z_max": selected_peak_layers[-1]["z_max"],
         "underpass_h": underpass_attributes["underpass_dh"],
     }
-    update_gpkg_attributes(gpkg_path, underpass_attributes)
-    print(
-        "Updated GPKG attributes: "
-        f"underpass_dh={underpass_attributes['underpass_dh']:.2f}, "
-        f"underpass_top_area={underpass_attributes['underpass_top_area']:.2f}, "
-        f"underpass_bottom_area={underpass_attributes['underpass_bottom_area']:.2f}"
-    )
 
     map_width = max_x - min_x
     map_height = max_y - min_y
@@ -652,21 +713,44 @@ def process_case(las_path, gpkg_path):
     ncols = len(display_peak_layers)
     width_ratios = [map_panel_width_ratio] * ncols
     figure_width = 5 * sum(width_ratios)
-    fig = plt.figure(figsize=(figure_width, 15))
-    bottom_map_stop = max(1, ncols - 2)
+    map_row_count = 2 + int(SHOW_EXCLUSIVE_ROW) + int(SHOW_RELATED_WALL_ROW)
+    total_rows = 1 + map_row_count
+    fig = plt.figure(figsize=(figure_width, 4.5 + 4.0 * total_rows))
     grid_spec = fig.add_gridspec(
-        3,
+        total_rows,
         ncols,
         width_ratios=width_ratios,
-        height_ratios=[1.0, 1.0, 1.0],
+        height_ratios=[0.72] + [1.0] * map_row_count,
         wspace=0.06,
-        hspace=0.32,
+        hspace=0.30,
     )
     ax_hist = fig.add_subplot(grid_spec[0, :])
-    peak_axes = [fig.add_subplot(grid_spec[1, idx]) for idx in range(ncols)]
-    ax_min_z = fig.add_subplot(grid_spec[2, :bottom_map_stop])
-    ax_peak_origin = fig.add_subplot(grid_spec[2, bottom_map_stop])
-    ax_min_z_hist = fig.add_subplot(grid_spec[2, bottom_map_stop + 1])
+    current_row = 1
+    peak_axes = [fig.add_subplot(grid_spec[current_row, idx]) for idx in range(ncols)]
+    current_row += 1
+    if SHOW_EXCLUSIVE_ROW:
+        exclusive_peak_axes = [fig.add_subplot(grid_spec[current_row, idx]) for idx in range(ncols)]
+        current_row += 1
+    else:
+        exclusive_peak_axes = []
+    if SHOW_RELATED_WALL_ROW:
+        wall_peak_axes = [fig.add_subplot(grid_spec[current_row, idx]) for idx in range(ncols)]
+        current_row += 1
+    else:
+        wall_peak_axes = []
+    combined_peak_axes = [fig.add_subplot(grid_spec[current_row, idx]) for idx in range(ncols)]
+
+    def style_peak_map_axis(ax_map, map_idx, show_xlabel):
+        if show_xlabel:
+            ax_map.set_xlabel("X")
+        else:
+            ax_map.set_xlabel("")
+            ax_map.tick_params(axis="x", which="both", bottom=False, labelbottom=False)
+        if map_idx == 1:
+            ax_map.set_ylabel("Y")
+        else:
+            ax_map.set_ylabel("")
+            ax_map.tick_params(axis="y", which="both", left=False, labelleft=False)
 
     ax_hist.hist(
         z,
@@ -682,19 +766,25 @@ def process_case(las_path, gpkg_path):
         linewidth=2,
         label="Smoothed histogram",
     )
-    peak_colors = {1: "C0", 2: "C1", 3: "C2", 4: "C3"}
+    ax_hist.axhline(
+        display_raw_count_threshold,
+        color="red",
+        linestyle=":",
+        linewidth=1.5,
+        alpha=0.85,
+    )
     for i, layer in enumerate(display_peak_layers, start=1):
         ax_hist.axvline(
             layer["peak_center"],
             linestyle="--",
             linewidth=1.5,
-            color=peak_colors.get(i, "C3"),
+            color=peak_plot_color(i),
         )
         ax_hist.axvspan(
             layer["z_min"],
             layer["z_max"],
             alpha=0.15,
-            color=peak_colors.get(i, "C3"),
+            color=peak_plot_color(i),
         )
     ax_hist.set_xlabel("Z (m)")
     ax_hist.set_ylabel("Count")
@@ -704,8 +794,8 @@ def process_case(las_path, gpkg_path):
 
     arrow_y = counts.max() * 0.92
     label_y = counts.max() * 0.97
-    left_peak = bin_centers[peak_indices[0]]
-    right_peak = bin_centers[peak_indices[-1]]
+    left_peak = selected_peak_layers[0]["peak_center"]
+    right_peak = selected_peak_layers[-1]["peak_center"]
     ax_hist.annotate(
         "",
         xy=(right_peak, arrow_y),
@@ -723,14 +813,6 @@ def process_case(las_path, gpkg_path):
     )
 
     extent = [x_edges[0], x_edges[-1], y_edges[0], y_edges[-1]]
-    color_maps = {
-        1: make_truncated_cmap("Blues", start=0.28),
-        2: make_truncated_cmap("Oranges", start=0.30),
-        3: make_truncated_cmap("Greens", start=0.30),
-        4: make_truncated_cmap("Reds", start=0.30),
-        "min_z": make_truncated_cmap("cividis", start=0.20),
-    }
-
     for map_idx, (ax_map, layer) in enumerate(zip(peak_axes, display_peak_layers), start=1):
         masked_grid = np.ma.masked_where(layer["grid"] == 0, layer["grid"])
         ax_map.set_facecolor("#f3f3f3")
@@ -738,21 +820,16 @@ def process_case(las_path, gpkg_path):
             masked_grid,
             origin="lower",
             extent=extent,
-            cmap=color_maps[map_idx],
+            cmap=peak_fill_cmap(map_idx),
             alpha=0.9,
             interpolation="nearest",
         )
         plot_geometry_outline(ax_map, geometries)
-        ax_map.set_xlabel("X")
-        if map_idx == 1:
-            ax_map.set_ylabel("Y")
-        else:
-            ax_map.set_ylabel("")
-            ax_map.tick_params(axis="y", which="both", left=False, labelleft=False)
+        style_peak_map_axis(ax_map, map_idx, show_xlabel=False)
         ax_map.set_title(
             f"Peak {map_idx}: {layer['peak_center']:.2f} m\n"
             f"Z range [{layer['z_min']:.2f}, {layer['z_max']:.2f})\n"
-            f"Covered area {layer['area']:.2f} m^2\n"
+            f"Total area {layer['area']:.2f} m^2\n"
             f"Largest contiguous area {layer['largest_component_area']:.2f} m^2",
             fontsize=11,
             pad=8,
@@ -760,91 +837,83 @@ def process_case(las_path, gpkg_path):
         ax_map.set_aspect("equal")
         ax_map.legend(loc="best")
 
-    masked_min_z_grid = np.ma.masked_invalid(min_z_excluding_floor_grid)
-    ax_min_z.set_facecolor("#f3f3f3")
-    min_z_image = ax_min_z.imshow(
-        masked_min_z_grid,
-        origin="lower",
-        extent=extent,
-        cmap=color_maps["min_z"],
-        alpha=0.95,
-        interpolation="nearest",
-    )
-    plot_geometry_outline(ax_min_z, geometries)
-    ax_min_z.set_xlabel("X")
-    ax_min_z.set_ylabel("Y")
-    if len(min_z_excluding_floor_values) > 0:
-        min_z_range_text = (
-            f"Cell min Z range "
-            f"[{np.min(min_z_excluding_floor_values):.2f}, {np.max(min_z_excluding_floor_values):.2f}]"
-        )
-    else:
-        min_z_range_text = "No cells after floor exclusion"
-    ax_min_z.set_title(
-        "Min elevation per cell\n"
-        f"Cells from Peaks 2-{len(display_peak_layers)}; excluding Peak 1 "
-        f"[{selected_peak_layers[0]['z_min']:.2f}, {selected_peak_layers[0]['z_max']:.2f})\n"
-        f"{min_z_range_text}",
-        fontsize=11,
-        pad=8,
-    )
-    ax_min_z.set_aspect("equal")
-    ax_min_z.legend(loc="best")
-    colorbar = fig.colorbar(min_z_image, ax=ax_min_z, fraction=0.046, pad=0.04)
-    colorbar.set_label("Min Z (m)")
+    if SHOW_EXCLUSIVE_ROW:
+        for map_idx, (ax_map, layer) in enumerate(zip(exclusive_peak_axes, display_peak_layers), start=1):
+            masked_grid = np.ma.masked_where(layer["exclusive_grid"] == 0, layer["exclusive_grid"])
+            ax_map.set_facecolor("#f3f3f3")
+            ax_map.imshow(
+                masked_grid,
+                origin="lower",
+                extent=extent,
+                cmap=peak_fill_cmap(map_idx),
+                alpha=0.9,
+                interpolation="nearest",
+            )
+            plot_geometry_outline(ax_map, geometries)
+            style_peak_map_axis(ax_map, map_idx, show_xlabel=False)
+            ax_map.set_title(
+                "Masking cells occupied by lower peaks except Peak 1\n"
+                f"Total area {layer['exclusive_area']:.2f} m^2\n"
+                f"Largest contiguous area {layer['exclusive_largest_component_area']:.2f} m^2",
+                fontsize=11,
+                pad=8,
+            )
+            ax_map.set_aspect("equal")
+            ax_map.legend(loc="best")
 
-    peak_origin_colors = [
-        peak_colors.get(display_peak_idx, "C3")
-        for display_peak_idx in range(2, len(display_peak_layers) + 1)
-    ]
-    masked_peak_origin_grid = np.ma.masked_invalid(peak_origin_grid)
-    ax_peak_origin.set_facecolor("#f3f3f3")
-    ax_peak_origin.imshow(
-        masked_peak_origin_grid,
-        origin="lower",
-        extent=extent,
-        cmap=ListedColormap(peak_origin_colors),
-        interpolation="nearest",
-        vmin=1.5,
-        vmax=len(display_peak_layers) + 0.5,
-    )
-    plot_geometry_outline(ax_peak_origin, geometries)
-    ax_peak_origin.set_xlabel("X")
-    ax_peak_origin.set_ylabel("")
-    ax_peak_origin.tick_params(axis="y", which="both", left=False, labelleft=False)
-    ax_peak_origin.set_title(
-        "Peak origin per cell\n"
-        f"Lowest occupying peak among Peaks 2-{len(display_peak_layers)}",
-        fontsize=11,
-        pad=8,
-    )
-    ax_peak_origin.set_aspect("equal")
-    peak_origin_legend = [
-        Patch(
-            facecolor=peak_colors.get(display_peak_idx, "C3"),
-            edgecolor="none",
-            label=f"Peak {display_peak_idx}",
-        )
-        for display_peak_idx in range(2, len(display_peak_layers) + 1)
-    ]
-    ax_peak_origin.legend(handles=peak_origin_legend, loc="best")
+    if SHOW_RELATED_WALL_ROW:
+        for map_idx, (ax_map, layer) in enumerate(zip(wall_peak_axes, display_peak_layers), start=1):
+            masked_grid = np.ma.masked_where(layer["related_wall_grid"] == 0, layer["related_wall_grid"])
+            if map_idx == 1:
+                wall_title_line = "Walls between Peak 1 and Peak 2"
+            elif map_idx == len(display_peak_layers):
+                wall_title_line = f"Walls between Peak {map_idx - 1} and Peak {map_idx}"
+            else:
+                wall_title_line = (
+                    f"Walls between Peaks {map_idx - 1}/{map_idx} and Peaks {map_idx}/{map_idx + 1}"
+                )
+            ax_map.set_facecolor("#f3f3f3")
+            ax_map.imshow(
+                masked_grid,
+                origin="lower",
+                extent=extent,
+                cmap=peak_fill_cmap(map_idx),
+                alpha=0.95,
+                interpolation="nearest",
+            )
+            plot_geometry_outline(ax_map, geometries)
+            style_peak_map_axis(ax_map, map_idx, show_xlabel=False)
+            ax_map.set_title(
+                f"{wall_title_line}\n"
+                f"Related wall area {layer['related_wall_area']:.2f} m^2",
+                fontsize=11,
+                pad=8,
+            )
+            ax_map.set_aspect("equal")
+            ax_map.legend(loc="best")
 
-    ax_min_z_hist.hist(
-        min_z_excluding_floor_values,
-        bins=HISTOGRAM_BINS,
-        color="lightgray",
-        edgecolor="#999999",
-        linewidth=0.25,
-    )
-    ax_min_z_hist.set_xlabel("Cell min Z (m)")
-    ax_min_z_hist.set_ylabel("Cell count")
-    ax_min_z_hist.set_title(
-        f"Histogram of cell min Z\ncells from Peaks 2-{len(display_peak_layers)}",
-        fontsize=11,
-        pad=8,
-    )
-    ax_min_z_hist.spines["top"].set_visible(False)
-    ax_min_z_hist.spines["right"].set_visible(False)
+    for map_idx, (ax_map, layer) in enumerate(zip(combined_peak_axes, display_peak_layers), start=1):
+        masked_grid = np.ma.masked_where(layer["exclusive_or_wall_grid"] == 0, layer["exclusive_or_wall_grid"])
+        ax_map.set_facecolor("#f3f3f3")
+        ax_map.imshow(
+            masked_grid,
+            origin="lower",
+            extent=extent,
+            cmap=peak_fill_cmap(map_idx),
+            alpha=0.95,
+            interpolation="nearest",
+        )
+        plot_geometry_outline(ax_map, geometries)
+        style_peak_map_axis(ax_map, map_idx, show_xlabel=True)
+        ax_map.set_title(
+            "Union of exclusive and pairwise wall cells\n"
+            f"Total area {layer['exclusive_or_wall_area']:.2f} m^2\n"
+            f"Largest contiguous area {layer['exclusive_or_wall_largest_component_area']:.2f} m^2",
+            fontsize=11,
+            pad=8,
+        )
+        ax_map.set_aspect("equal")
+        ax_map.legend(loc="best")
 
     fig.suptitle(bag_id, fontsize=15, y=0.985)
     fig.subplots_adjust(left=0.05, right=0.99, bottom=0.06, top=0.90)

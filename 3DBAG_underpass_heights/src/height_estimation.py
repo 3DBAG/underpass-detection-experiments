@@ -8,22 +8,26 @@ from torchvision import transforms
 from PIL import Image
 
 
-# Configure root directory
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
-
-# Append Depth-Anything-V2 directory and load modules
-sys.path.append(os.path.join(PROJECT_ROOT, "src", "Depth-Anything-V2"))
-from depth_anything_v2.dpt import DepthAnythingV2
-
-# Append U-Net model directory and load modules
-sys.path.append(os.path.join(PROJECT_ROOT, "src", "u-net_model"))
-from underpass_dataset import UnderpassDataset
-from unet import UNet
-
-
 # Function to load the Depth-Anything-V2 model
-def load_depth_map_model():
+def load_depth_map_model(depth_model_directory):
+
+    """
+    Load the Depth-Anything-V2 model for depth estimation.
+    This code uses commit e5a2732d3ea2cddc081d7bfd708fc0bf09f812f1 (January 22nd, 2025).
+    Link to repository: https://github.com/DepthAnything/Depth-Anything-V2
+
+    Args:
+        depth_model_directory: The directory where the Depth-Anything-V2 model checkpoint and code are stored.
+    
+    Returns:
+        Depth-Anything-V2 model.
+
+    """
+    # Append Depth-Anything-V2 directory and load modules
+    if depth_model_directory not in sys.path:
+        sys.path.append(depth_model_directory)
+
+    from depth_anything_v2.dpt import DepthAnythingV2
 
     # Configure Depth-Anything-V2 model
     device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
@@ -34,13 +38,7 @@ def load_depth_map_model():
         'vitg': {'encoder': 'vitg', 'features': 384, 'out_channels': [1536, 1536, 1536, 1536]}
     }
     encoder = 'vitb' # or 'vits', 'vitb', 'vitg'
-    checkpoint_path = os.path.join(
-        PROJECT_ROOT,
-        "src",
-        "Depth-Anything-V2",
-        "checkpoints",
-        f"depth_anything_v2_{encoder}.pth"
-    )
+    checkpoint_path = os.path.join(depth_model_directory, "checkpoints/depth_anything_v2_vitb.pth")
     model = DepthAnythingV2(**model_configs[encoder])
     model.load_state_dict(torch.load(checkpoint_path, map_location="cpu", weights_only=True))
     model = model.to(device).eval()
@@ -49,9 +47,26 @@ def load_depth_map_model():
 
 
 # Function to load the U-Net model
-def load_unet_model():
+def load_unet_model(unet_model_directory):
 
-    model_path = os.path.join(PROJECT_ROOT, "src", "u-net_model", "model.pth")
+    """
+    Load the U-Net model for underpass segmentation.
+
+    Args:
+        unet_model_directory: The directory where the U-Net model checkpoint is stored.
+
+    Returns:
+        device: The device on which the model is loaded (CPU or GPU).
+        model: The loaded U-Net model.
+
+    """
+    if unet_model_directory not in sys.path:
+        sys.path.append(unet_model_directory)
+
+    from underpass_dataset import UnderpassDataset
+    from unet import UNet
+
+    model_path = os.path.join(unet_model_directory, "model.pth")
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = UNet(in_channels=3, num_classes=1).to(device)
     model.load_state_dict(torch.load(model_path, map_location=torch.device(device)))
@@ -60,6 +75,21 @@ def load_unet_model():
 
 
 def apply_cc_method(facade_image, facade_height, min_height, ground_dist, top_dist, min_solidity):
+    
+    """
+    Apply connected components method to estimate underpass height from facade image.
+    Args:
+    - facade_image: The input image of the building facade (CV2 image).
+    - facade_height: The height of the building facade in meters.
+    - min_height: Minimum height of underpass in meters (e.g., 2.2m), for component filtering.
+    - ground_dist: Minimum distance from bottom of image to component in pixels, for component filtering.
+    - top_dist: Minimum distance from top of image to component in pixels, for component filtering.
+    - min_solidity: Minimum solidity of underpass component (e.g., 0.5).
+
+    Returns:
+    - pixel_row: The pixel row in the facade image corresponding to the estimated underpass height.
+    - underpass_height: The estimated underpass height in meters.
+    """
 
     facade_image_height, facade_image_width, _ = facade_image.shape
             
@@ -67,16 +97,10 @@ def apply_cc_method(facade_image, facade_height, min_height, ground_dist, top_di
     gray = cv2.cvtColor(facade_image, cv2.COLOR_BGR2GRAY)
     gray = cv2.GaussianBlur(gray, (3,3), 0)
     edges = cv2.Canny(gray, 30, 100)
-    # plt.imshow(edges)
-    # plt.title("Computed edges")
-    # plt.show()
 
     # Apply morphology to close edges and create more complete contours
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
     edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
-    # plt.imshow(edges)
-    # plt.title("Computed edges (closed)")
-    # plt.show()
 
     # Detect connected components
     blur = cv2.GaussianBlur(edges, (3,3), 0)
@@ -143,34 +167,57 @@ def apply_cc_method(facade_image, facade_height, min_height, ground_dist, top_di
 
     pixel_row = stats[best_label, cv2.CC_STAT_TOP]
     underpass_height = facade_height * (1 - pixel_row / facade_image_height)
+
+    # Filter out unrealistic height estimates
+    if underpass_height >= (facade_height - 0.2) or underpass_height < 2:
+        return None, None   
     
     return pixel_row, underpass_height
 
 
 def apply_depth_method(facade_image, facade_height, depth_map_model, k):
 
-    facade_image_height, facade_image_width, _ = facade_image.shape
+    """
+    Apply depth estimation method to estimate underpass height from facade image.
+    Args: 
+    - facade_image: The input image of the building facade (CV2 image).
+    - facade_height: The height of the building facade in meters.
+    - depth_map_model: The loaded Depth-Anything-V2 model.
+    - k: The number of clusters to use in k-means clustering of the depth map.
 
-    depth_map = depth_map_model.infer_image(facade_image.copy())
+    Returns:
+    - pixel_row: The pixel row in the facade image corresponding to the estimated underpass height.
+    - underpass_height: The estimated underpass height in meters.
+    
+    """
+
+    original_height, original_width, _ = facade_image.shape
+    facade_image_height, facade_image_width = original_height, original_width
+
+    limit= 1024
+    scale = 1.0
+
+    # Resize image if larger than limit to avoid memory issues with depth estimation model
+    if original_height > limit or original_width > limit:
+        scale = min(limit / facade_image_height, limit / facade_image_width)
+        new_size = (int(facade_image_width * scale), int(facade_image_height * scale))
+        facade_image = cv2.resize(facade_image, new_size)
+        facade_image_height, facade_image_width = facade_image.shape[:2]
+
+    # Perform depth estimation
+    with torch.no_grad():
+        depth_map = depth_map_model.infer_image(facade_image.copy())
 
     # plt.imshow(depth_map)
     # plt.title("Predicted Depth Map")
     # plt.show()
 
-    # Normalize depth to 0–255
-    depth_norm = cv2.normalize(depth_map, None, 0, 255, cv2.NORM_MINMAX)
-    # Convert to uint8
-    depth_uint8 = depth_norm.astype(np.uint8)
-
-    # plt.imshow(depth_uint8, cmap='gray')
-    # plt.title("Normalized Depth Map")
-    # plt.show()
-            
-    # Use depth clusters
+    # Apply depth clusters
     depth_map_height, depth_map_width = depth_map.shape
-    depth_reshaped = depth_map.reshape(-1, 1)
-    # Convert to float32 for OpenCV
-    depth_reshaped = np.float32(depth_reshaped)
+
+    # Downsample for clustering
+    small_depth = cv2.resize(depth_map, (256, 256))
+    depth_reshaped = small_depth.reshape(-1, 1).astype(np.float32)
 
     # Apply k-means clustering
     criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 0.2)
@@ -182,18 +229,19 @@ def apply_depth_method(facade_image, facade_height, depth_map_model, k):
         10,
         cv2.KMEANS_RANDOM_CENTERS
     )
+
     # Reshape labels back to image
-    segmented = labels.reshape(depth_map_height, depth_map_width)
+    segmented = labels.reshape(256, 256)
 
     # plt.imshow(segmented)
     # plt.title("Depth Clusters")
     # plt.show()
 
-    # Deepest cluster = cluster with largest center value
+    # Deepest cluster = cluster with smallest center value
     deepest_cluster_idx = np.argmin(centers)
-    # print("Deepest cluster index:", deepest_cluster_idx)
-    # Create mask of deepest cluster
     deepest_mask = (segmented == deepest_cluster_idx).astype(np.uint8) * 255
+    #Resize mask back to original image size
+    deepest_mask = cv2.resize(deepest_mask, (facade_image_width, facade_image_height))
 
     # plt.imshow(deepest_mask, cmap='gray')
     # plt.title("Deepest Region")
@@ -211,14 +259,37 @@ def apply_depth_method(facade_image, facade_height, depth_map_model, k):
 
     # Get coordinates of non-zero pixels
     ys, xs = np.nonzero(ground_region_mask)
-    top_y = np.min(ys)
-    pixel_row = top_y
-    underpass_height = facade_height * (1 - pixel_row / facade_image_height)
+    if len(ys) == 0:
+        return None, None
+
+    # Pixel row in original image coordinates
+    pixel_row_resized = np.min(ys)
+    pixel_row_original = int(pixel_row_resized / scale)
+
+    underpass_height = facade_height * (1 - pixel_row_original / original_height)
+    # Filter out unrealistic height estimates
+    if underpass_height >= (facade_height - 0.2) or underpass_height < 2:
+        return None, None
     
-    return pixel_row, underpass_height
+    return pixel_row_original, underpass_height
 
 
 def apply_unet_method(facade_image, facade_height, unet_model, device):
+
+    """
+    Apply U-Net segmentation method to estimate underpass height from facade image.
+    Args:   
+    - facade_image: The input image of the building facade (CV2 image).
+    - facade_height: The height of the building facade in meters.
+    - unet_model: The loaded U-Net model.
+    - device: The device on which the U-Net model is loaded (CPU or GPU).
+    
+    Returns:
+    - pixel_row: The pixel row in the facade image corresponding to the estimated underpass height.
+    - underpass_height: The estimated underpass height in meters.   
+    
+    """
+
     original_height, original_width, _ = facade_image.shape
 
     facade_image_rgb = cv2.cvtColor(facade_image, cv2.COLOR_BGR2RGB)
@@ -252,6 +323,7 @@ def apply_unet_method(facade_image, facade_height, unet_model, device):
     num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(mask)
     if num_labels <= 1:
         return None, None
+    
     bottoms = stats[:, cv2.CC_STAT_TOP] + stats[:, cv2.CC_STAT_HEIGHT]
     target_component_idx = np.argmax(bottoms[1:]) + 1
     component_mask = (labels == target_component_idx).astype(np.uint8) * 255
@@ -269,13 +341,19 @@ def apply_unet_method(facade_image, facade_height, unet_model, device):
 
     underpass_height = facade_height * (1 - pixel_row_original / original_height)
 
-    if underpass_height < 2.2:  
+    if underpass_height >= (facade_height - 0.2) or underpass_height < 2:
         return None, None
 
     return pixel_row_original, underpass_height
 
 
 def display_image(facade_image, pixel_row):
+
+    """Display the facade image with a line indicating the estimated underpass height.
+    Args:
+    - facade_image: The input image of the building facade (CV2 image).
+    - pixel_row: The pixel row in the facade image corresponding to the estimated underpass height.
+    """
      
     img_vis = facade_image.copy()
     cv2.line(
@@ -289,14 +367,130 @@ def display_image(facade_image, pixel_row):
     plt.show()
 
 
+def save_image_ground_truth(facade_image,facade_height, pixel_row, gdf_ground_truth, underpass_id, save_path):
+    
+    """Display the facade image with a line indicating the estimated underpass height and ground truth height if available.
+    Args:
+    - facade_image: The input image of the building facade (CV2 image).
+    - pixel_row: The pixel row in the facade image corresponding to the estimated underpass height.
+    - gdf_ground_truth: GeoDataFrame containing ground truth heights for underpasses, used for visualization.
+
+    Returns:
+    - img_vis: The facade image with lines indicating the estimated underpass height and ground truth if available
+
+    """
+
+    try:
+        ground_truth_height = gdf_ground_truth[gdf_ground_truth['underpass_id'] == underpass_id]['ground_truth_height'].iloc[0]
+
+    except IndexError:
+        ground_truth_height = None
+    
+    img_vis = facade_image.copy()
+    facade_image_height, facade_image_width, _ = img_vis.shape
+
+    if pixel_row is None:
+
+        if ground_truth_height is not None:
+            ground_truth_pixel_row = int(facade_image_height * (1 - ground_truth_height / facade_height))
+            cv2.line(img_vis, (0, ground_truth_pixel_row), (facade_image_width, ground_truth_pixel_row), (0, 255, 0), 3)
+            cv2.putText(
+                img_vis,
+                f"GT: {ground_truth_height:.2f} m",
+                (10, ground_truth_pixel_row - 10),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (0, 255, 0),
+                2,
+                cv2.LINE_AA
+            )
+
+            img_vis = cv2.cvtColor(img_vis, cv2.COLOR_BGR2RGB)
+
+            plt.imshow(img_vis)
+            plt.title(f"Underpass {underpass_id} \n No underpass could be detected \n GT (green) = {ground_truth_height:.2f} m")
+            plt.tight_layout()
+            plt.savefig(save_path)
+            # plt.show()
+
+        return img_vis
+
+    cv2.line(img_vis, (0, pixel_row), (facade_image_width, pixel_row), (0, 0, 255), 3)
+    cv2.putText(
+        img_vis,
+        f"Est: {facade_height * (1 - pixel_row / facade_image_height):.2f} m",
+        (10, pixel_row - 10),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.6,
+        (0, 0, 255),
+        2,
+        cv2.LINE_AA
+    )
+
+    if ground_truth_height is not None:
+        ground_truth_pixel_row = int(facade_image_height * (1 - ground_truth_height / facade_height))
+        cv2.line(img_vis, (0, ground_truth_pixel_row), (facade_image_width, ground_truth_pixel_row), (0, 255, 0), 3)
+        cv2.putText(
+            img_vis,
+            f"GT: {ground_truth_height:.2f} m",
+            (10, ground_truth_pixel_row - 10),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (0, 255, 0),
+            2,
+            cv2.LINE_AA
+        )
+
+    img_vis = cv2.cvtColor(img_vis, cv2.COLOR_BGR2RGB)
+
+    estimated_height = facade_height * (1 - pixel_row / facade_image_height)
+    error = estimated_height - ground_truth_height if ground_truth_height is not None else None
+
+    plt.imshow(img_vis)
+    plt.title(f"Underpass {underpass_id} \n Estimated (red) = {estimated_height:.2f} m \n GT (green) = {ground_truth_height:.2f} m \n Error = {error:.2f} m" if ground_truth_height is not None else f"Underpass {underpass_id} \n Estimated underpass height: {estimated_height:.2f} m \n No ground truth available")
+    plt.tight_layout()
+    plt.savefig(save_path)
+    # plt.show()
+
+    return img_vis
+
+
 def record_observation(gdf_underpass_polygons, gdf_critical_walls, wall_id, underpass_height):
+
+    """
+    Record the estimated underpass height in the GeoDataFrame of underpass polygons.
+    Args:
+    - gdf_underpass_polygons: GeoDataFrame containing underpass polygons.
+    - gdf_critical_walls: GeoDataFrame containing critical walls with their corresponding underpass IDs.
+    - wall_id: The ID of the critical wall for which the underpass height was estimated.
+    - underpass_height: The estimated underpass height in meters to be recorded.
+    
+    """
      
     underpass_id = gdf_critical_walls[gdf_critical_walls['wall_id'] == wall_id]['underpass_id'].iloc[0] 
     idx = gdf_underpass_polygons[gdf_underpass_polygons['underpass_id'] == underpass_id].index[0]
     gdf_underpass_polygons.at[idx, 'observed_heights'].append(underpass_height)
 
 
+def trimmed_mean(values, trim_ratio=0.15):
+    values = sorted(values)
+    n = len(values)
+    k = int(n * trim_ratio)
+    trimmed = values[k:n-k] if n > 2*k else values
+    return sum(trimmed) / len(trimmed)
+
+
 def write_geojson(gdf_underpass_polygons, output_path):
+
+    """
+    Write the GeoDataFrame of underpass polygons with recorded heights to a GeoJSON file.
+    Args:
+    - gdf_underpass_polygons: GeoDataFrame containing underpass polygons with recorded heights.
+    - output_path: The file path or directory where the GeoJSON file should be saved.
+    
+    This function allows passing either a full .geojson file path or a directory. If a directory is provided, the GeoJSON file will be saved with a default name in that directory.
+    """
+    
     # Allow passing either a directory or a full .geojson path.
     if output_path.lower().endswith('.geojson'):
         output_file = output_path

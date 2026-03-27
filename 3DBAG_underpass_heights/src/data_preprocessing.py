@@ -6,17 +6,36 @@ import numpy as np
 import shapely
 from shapely.geometry import Polygon
 import pyvista as pv
+import os
 
 
-def load_input_data(camera_parameters_path, image_footprints_path, underpasses_path):
-    
+
+def load_input_data(camera_parameters_path, image_footprints_path, underpasses_path, underpass_edges_path, ground_truth_path, min_length):
+    """
+    Load input data from specified paths and preprocess them into GeoDataFrames.
+
+    Args:
+        camera_parameters_path (str): Path to the camera parameters file.
+        image_footprints_path (str): Path to the image footprints file.
+        underpasses_path (str): Path to the underpass polygons file.
+        underpass_edges_path (str): Path to the underpass edges file (optional, can be None).
+        min_length (float): Minimum length of edges to be considered as critical.
+
+    Returns:
+        tuple: A tuple containing the following GeoDataFrames:
+            - df_camera_parameters (GeoDataFrame): GeoDataFrame containing camera parameters.
+            - gdf_image_footprints (GeoDataFrame): GeoDataFrame containing image footprints.
+            - gdf_underpass_polygons (GeoDataFrame): GeoDataFrame containing underpass polygons.
+            - gdf_underpass_edges (GeoDataFrame or None): GeoDataFrame containing underpass edges if provided, otherwise None.
+
+    """
     # Load camera parameters
-    df_camera_parameters = pd.read_csv(camera_parameters_path, sep='\s+', dtype={'img_id': str})
+    df_camera_parameters = pd.read_csv(camera_parameters_path, sep='\t', dtype={'image_id': str})
 
     # Load image footprints. Add camera center per footprint
     gdf_image_footprints = gpd.read_file(image_footprints_path)
     gdf_image_footprints = gdf_image_footprints.set_crs("EPSG:7415", allow_override=True)
-    gdf_image_footprints = gdf_image_footprints.merge(df_camera_parameters, left_on='image_id', right_on='img_id', how='left')
+    gdf_image_footprints = gdf_image_footprints.merge(df_camera_parameters, left_on='image_id', right_on='image_id', how='left')
     gdf_image_footprints = gdf_image_footprints[['image_id', 'geometry', 'X', 'Y', 'Z']].rename(columns={'X': 'camera_x', 'Y': 'camera_y', 'Z': 'camera_z'})
 
     # Load underpass polygons
@@ -25,24 +44,96 @@ def load_input_data(camera_parameters_path, image_footprints_path, underpasses_p
     gdf_underpass_polygons = gdf_underpass_polygons.explode(index_parts=False).reset_index(drop=True)
     gdf_underpass_polygons['underpass_id'] = gdf_underpass_polygons.index + 1
     gdf_underpass_polygons = gdf_underpass_polygons.rename(columns={'identificatie': 'building_id'})
-    gdf_underpass_polygons = gdf_underpass_polygons[['underpass_id', 'building_id', 'geometry']]
+    gdf_underpass_polygons = gdf_underpass_polygons[['underpass_id', 'geometry', 'building_id']]
     
     # Create a column for underpass height in the underpass GeoDataFrame, to be filled later
     gdf_underpass_polygons["observed_heights"] = [[] for _ in range(len(gdf_underpass_polygons))]
 
-    return df_camera_parameters, gdf_image_footprints, gdf_underpass_polygons
+    # Load underpass edges if available
+    try:
+        gdf_underpass_edges = gpd.read_file(underpass_edges_path)
+        gdf_underpass_edges = gdf_underpass_edges.set_crs("EPSG:7415", allow_override=True)
+        gdf_underpass_edges = gdf_underpass_edges.explode(index_parts=False).reset_index(drop=True)
+        gdf_underpass_edges['edge_id'] = gdf_underpass_edges.index + 1
+        
+        # Extract exterior boundaries of underpass polygons (ignore holes)
+        gdf_underpass_exteriors = gdf_underpass_polygons.copy()
+        gdf_underpass_exteriors['geometry'] = gdf_underpass_exteriors['geometry'].apply(lambda geom: geom.exterior if geom.geom_type == "Polygon" else None)
+        
+        # Relate edges to underpass polygons by spatial join with exterior only. Add underpass_id to edge table
+        gdf_underpass_edges = gpd.sjoin(gdf_underpass_edges, gdf_underpass_exteriors, how='inner', predicate='intersects')
+
+        # Split Linestring edges and assign underpass_id to each edge
+        # If they are shorter than a certain length, they will not be considered as critical edges later.
+        edge_records = []
+        for _, row in gdf_underpass_edges.iterrows():
+            edge_id = row['edge_id']
+            underpass_id = row['underpass_id']
+            building_id = row['building_id']
+            geom = row['geometry']
+            if geom.geom_type == 'LineString':
+                coords = list(geom.coords)
+                for i in range(len(coords) - 1):
+                    edge_geom = shapely.geometry.LineString([coords[i], coords[i+1]])
+                    #Append edge record only if the edge is longer than the minimum length threshold
+                    if edge_geom.length >= min_length:
+                        edge_records.append({'edge_id': edge_id, 'geometry': edge_geom, 'underpass_id': underpass_id, 'building_id': building_id})
+            elif geom.geom_type == 'MultiLineString':
+                for linestring in geom.geoms:
+                    coords = list(linestring.coords)
+                    for i in range(len(coords) - 1):
+                        edge_geom = shapely.geometry.LineString([coords[i], coords[i+1]])
+                        #Append edge record only if the edge is longer than the minimum length threshold
+                        if edge_geom.length >= min_length:
+                            edge_records.append({'edge_id': edge_id, 'geometry': edge_geom, 'underpass_id': underpass_id, 'building_id': building_id})
+
+        gdf_underpass_edges = gpd.GeoDataFrame(edge_records, crs=gdf_underpass_edges.crs)
+        gdf_underpass_edges['edge_id'] = gdf_underpass_edges.index + 1
+
+        gdf_underpass_edges = gdf_underpass_edges[['edge_id', 'geometry', 'underpass_id', 'building_id']]
+
+    except Exception as e:
+        print("Error in underpass edges processing: ", e)
+        gdf_underpass_edges = None
+
+    # Load ground truth data if provided (optional, for evaluation)
+    if os.path.exists(ground_truth_path):
+        gdf_ground_truth = gpd.read_file(ground_truth_path)
+        gdf_ground_truth = gdf_ground_truth.set_crs("EPSG:7415", allow_override=True)
+        gdf_ground_truth = gdf_ground_truth[['surface_id', 'geometry', 'upass_h']]
+
+        gdf_ground_truth = gdf_ground_truth.sjoin(gdf_underpass_polygons, how='inner', predicate='intersects')
+        gdf_ground_truth = gdf_ground_truth[['underpass_id', 'geometry', 'upass_h']].rename(columns={'geometry': 'ground_truth_geometry', 'upass_h': 'ground_truth_height'})
+
+    else:
+        gdf_ground_truth = None
+
+
+    return df_camera_parameters, gdf_image_footprints, gdf_underpass_polygons, gdf_underpass_edges, gdf_ground_truth
 
 
 def load_tile_data(tile_path):
 
-    # Read lod-0 geometries into geodata frame
-    gdf_building_footprints = gpd.read_file(tile_path, layer="pand")
+    """
+    Load building footprints and 3D geometries from a given 3D BAG tile (GeoJSON) and preprocess them into GeoDataFrames.
+
+    Args:
+        tile_path (str): Path to the 3D BAG tile GeoJSON file.
+
+    Returns:
+        tuple: A tuple containing the following GeoDataFrames:
+            - gdf_building_footprints (GeoDataFrame): GeoDataFrame containing building footprints with columns 'building_id' and 'geometry'.
+            - gdf_building_3d (GeoDataFrame): GeoDataFrame containing building 3D geometries with columns 'building_id' and 'geometry'.
+
+    """
+
+    # Read 2D geometries into geodata frame
+    gdf_building_footprints = gpd.read_file(tile_path, layer="lod22_2d")
     gdf_building_footprints['geometry'] = gdf_building_footprints.geometry.apply(lambda geom: transform(lambda x, y, z=None: (x, y), geom))
     gdf_building_footprints = gdf_building_footprints.rename(columns={'identificatie': 'building_id'})
     gdf_building_footprints = gdf_building_footprints[['building_id', 'geometry']]
 
-    # Read lod-22 geometries into geodata frame
-    # Read buildings in 3d
+    # Read 3D geometries into geodata frame
     gdf_building_3d = gpd.read_file(tile_path, layer="lod22_3d")
     gdf_building_3d = gdf_building_3d.rename(columns={'identificatie': 'building_id'})
     gdf_building_3d = gdf_building_3d[['building_id', 'geometry']]
@@ -50,18 +141,18 @@ def load_tile_data(tile_path):
     return gdf_building_footprints, gdf_building_3d
 
 
-def find_critical_segments(gdf_underpass_polygons, gdf_building_footprints, buf_tol, simpl_tol, min_length):
-    """Find critical segments of underpass polygons that intersect with building footprints.
+def find_critical_edges(gdf_underpass_polygons, gdf_building_footprints, buf_tol, simpl_tol, min_length):
+    """Find critical edges of underpass polygons that intersect with building footprints.
 
     Args:
         gdf_underpass_polygons (GeoDataFrame): GeoDataFrame containing underpass polygons with columns 'underpass_id', 'building_id', and 'geometry'.
         gdf_building_footprints (GeoDataFrame): GeoDataFrame containing building footprints with columns 'building_id' and 'geometry'.
         buf_tol (float): Buffer tolerance for the intersection of underpass polygons with building fottprints.
-        simpl_tol (float): Simplification tolerance for underpass polygons to reduce the number of points in the extracted segments.
-        min_length (float): Minimum length of segments to be considered as critical.
+        simpl_tol (float): Simplification tolerance for underpass polygons to reduce the number of points in the extracted edges.
+        min_length (float): Minimum length of edges to be considered as critical.
 
     Returns:
-        GeoDataFrame: A GeoDataFrame containing critical segments with columns 'segment_id', 'geometry', 'underpass_id', and 'building_id'.
+        GeoDataFrame: A GeoDataFrame containing critical edges with columns 'edge_id', 'geometry', 'underpass_id', and 'building_id'.
     """
 
     # Intersect buildings with underpass polygons
@@ -69,14 +160,14 @@ def find_critical_segments(gdf_underpass_polygons, gdf_building_footprints, buf_
     gdf_underpass_intersected = gpd.sjoin(gdf_underpass_polygons, gdf_building_footprints, how='inner', predicate='intersects')
     gdf_underpass_intersected = gdf_underpass_intersected[['underpass_id', 'building_id_left', 'geometry']].rename(columns={'building_id_left': 'building_id'})
 
-    # Extract segments from intersected underpass polygons
-    segment_records = []
-    segment_id = 1
+    # Extract edges from intersected underpass polygons
+    edge_records = []
+    edge_id = 1
     for _, row in gdf_underpass_intersected.iterrows():
         underpass_id = row['underpass_id']
         building_id = row['building_id']
 
-        # Simplify polygon to reduce the amount of points in the exracted segment
+        # Simplify polygon to reduce the amount of points in the exracted edges
         poly = row['geometry'].simplify(tolerance=simpl_tol, preserve_topology=True)
         coords = list(poly.exterior.coords)
 
@@ -84,24 +175,24 @@ def find_critical_segments(gdf_underpass_polygons, gdf_building_footprints, buf_
         building_boundary_buffered = building_geom.boundary.buffer(buf_tol)
 
         for i in range(len(coords) - 1):
-            candidate_segment = shapely.geometry.LineString([coords[i], coords[i+1]])
-            # Intersect segment with buidling ID, if True, label as critical segment
-            if candidate_segment.length < min_length:
+            candidate_edge = shapely.geometry.LineString([coords[i], coords[i+1]])
+            # Intersect edge with buidling ID, if True, label as critical edge
+            if candidate_edge.length < min_length:
                 continue
-            if candidate_segment.intersects(building_boundary_buffered):
-                segment_records.append({'segment_id': segment_id, 'geometry': candidate_segment, 'underpass_id': underpass_id, 'building_id': building_id})
-                segment_id += 1
+            if candidate_edge.intersects(building_boundary_buffered):
+                edge_records.append({'edge_id': edge_id, 'geometry': candidate_edge, 'underpass_id': underpass_id, 'building_id': building_id})
+                edge_id += 1
 
-    gdf_critical_segments = gpd.GeoDataFrame(segment_records, crs=gdf_underpass_polygons.crs)
+    gdf_critical_edges = gpd.GeoDataFrame(edge_records, crs=gdf_underpass_polygons.crs)
 
-    return gdf_underpass_intersected, gdf_critical_segments
+    return gdf_underpass_intersected, gdf_critical_edges
 
 
-def visualize_critical_segments(gdf_underpass_intersected, gdf_critical_segments):
+def visualize_critical_edges(gdf_underpass_intersected, gdf_critical_edges):
 
     fig, ax = plt.subplots(figsize=(10, 10))
 
-    gdf_critical_segments.plot(
+    gdf_critical_edges.plot(
         ax=ax,
         color="red",
         linewidth=3
@@ -112,14 +203,29 @@ def visualize_critical_segments(gdf_underpass_intersected, gdf_critical_segments
         linewidth=1
     )
 
-    # ax.set_title("Critical Underpass Segments")
+    ax.set_title("Critical Underpass Edges")
     ax.axis("off")
     ax.set_aspect("equal")
     plt.show()
 
 
-def find_critical_walls(gdf_critical_segments, gdf_building_3d, buf_tol, extend_length):
+def find_critical_walls(gdf_critical_edges, gdf_underpass_edges, gdf_building_3d, buf_tol, extend_length):
 
+    """
+    Find critical walls by extruding critical edges to 3D using the height of building 3D geometries. 
+    If underpass edges are provided, use them to find the critical walls instead of critical edges.
+
+    Args:
+        gdf_critical_edges (GeoDataFrame): GeoDataFrame containing critical edges.
+        gdf_underpass_edges (GeoDataFrame or None): GeoDataFrame containing underpass edges if provided, otherwise None.
+        gdf_building_3d (GeoDataFrame): GeoDataFrame containing building 3D geometries with columns 'building_id' and 'geometry'.
+        buf_tol (float): Buffer tolerance for the intersection of underpass edges with building 3D geometries.
+        extend_length (float): Length to extend the walls on both sides of the edge.
+    
+    Returns:
+        GeoDataFrame: A GeoDataFrame containing critical walls.
+
+    """
     # Extract 3d wall polygons from buildings
     wall_polygon_records = []
     wall_polygon_id = 1
@@ -136,19 +242,41 @@ def find_critical_walls(gdf_critical_segments, gdf_building_3d, buf_tol, extend_
 
     gdf_wall_polygons = gpd.GeoDataFrame(wall_polygon_records, crs=gdf_building_3d.crs)
     
-    # Intersect 3d wall polygons with critical segments (buffered)
-    gdf_critical_segments_buffered = gdf_critical_segments.copy()
-    gdf_critical_segments_buffered['geometry'] = gdf_critical_segments_buffered.geometry.buffer(buf_tol)
+    # Intersect 3d wall polygons with critical edges (buffered) or provided underpass edges
+    if gdf_underpass_edges is not None:
+        gdf_underpass_edges_buffered = gdf_underpass_edges.copy()
+        gdf_underpass_edges_buffered['geometry'] = gdf_underpass_edges_buffered.geometry.buffer(buf_tol)
 
-    gdf_critical_segments_buffered = gdf_critical_segments_buffered.to_crs(gdf_wall_polygons.crs)
-    gdf_walls_intersected = gpd.sjoin(gdf_wall_polygons, gdf_critical_segments_buffered, how='inner', predicate='intersects')
-    gdf_walls_intersected = gdf_walls_intersected[['wall_id', 'geometry', 'segment_id', 'building_id_left', 'underpass_id']].rename(columns={'building_id_left': 'building_id'})
+        gdf_underpass_edges_buffered = gdf_underpass_edges_buffered.to_crs(gdf_wall_polygons.crs)
+        gdf_walls_intersected = gpd.sjoin(gdf_wall_polygons, gdf_underpass_edges_buffered, how='inner', predicate='intersects')
+        # Make sure that the extracted 3D polygons belong to the same building as the underpass edge
+        gdf_walls_intersected = gdf_walls_intersected[
+            gdf_walls_intersected['building_id_left'] == gdf_walls_intersected['building_id_right']
+        ]
+        gdf_walls_intersected = gdf_walls_intersected[
+            ['wall_id', 'geometry', 'edge_id', 'building_id_right', 'underpass_id']
+        ].rename(columns={'building_id_right': 'building_id'})
+    
+    else:
+        gdf_critical_edges_buffered = gdf_critical_edges.copy()
+        gdf_critical_edges_buffered['geometry'] = gdf_critical_edges_buffered.geometry.buffer(buf_tol)
 
-    # Create walls using the height of wall polygons and the segments
+        gdf_critical_edges_buffered = gdf_critical_edges_buffered.to_crs(gdf_wall_polygons.crs)
+        gdf_walls_intersected = gpd.sjoin(gdf_wall_polygons, gdf_critical_edges_buffered, how='inner', predicate='intersects')
+
+        # Make sure that the extracted 3D polygons belong to the same building as the underpass edge
+        gdf_walls_intersected = gdf_walls_intersected[
+            gdf_walls_intersected['building_id_left'] == gdf_walls_intersected['building_id_right']
+        ]
+        gdf_walls_intersected = gdf_walls_intersected[
+            ['wall_id', 'geometry', 'edge_id', 'building_id_right', 'underpass_id']
+        ].rename(columns={'building_id_right': 'building_id'})
+
+    # Create walls using the height of wall polygons and the edges
     wall_records = []
     wall_id = 1
-    for segment_id, group in gdf_walls_intersected.groupby('segment_id'):
-        # Find the maximum and minimum height of the wall polygons which belong to a segment
+    for edge_id, group in gdf_walls_intersected.groupby('edge_id'):
+        # Find the maximum and minimum height of the wall polygons which belong to an edge
         max_z = -float('inf')
         min_z = float('inf')
         for geom in group['geometry']:
@@ -157,11 +285,14 @@ def find_critical_walls(gdf_critical_segments, gdf_building_3d, buf_tol, extend_
                     max_z = z
                 elif z < min_z:
                     min_z = z
-        # Find the geometry of the segment
-        segment_geom = gdf_critical_segments[gdf_critical_segments['segment_id'] == segment_id]['geometry'].iloc[0]
-        # bottom2d = list(segment_geom.coords)
-        p1 = np.array(segment_geom.coords[0])
-        p2 = np.array(segment_geom.coords[1])
+        # Find the geometry of the edge (depending on provided table)
+        if gdf_underpass_edges is not None:
+            edge_geom = gdf_underpass_edges[gdf_underpass_edges['edge_id'] == edge_id]['geometry'].iloc[0]
+        else:
+            edge_geom = gdf_critical_edges[gdf_critical_edges['edge_id'] == edge_id]['geometry'].iloc[0]
+        # bottom2d = list(edge_geom.coords)
+        p1 = np.array(edge_geom.coords[0])
+        p2 = np.array(edge_geom.coords[1])
         direction = p2 - p1
         length = np.linalg.norm(direction)
         if length == 0:
@@ -186,17 +317,52 @@ def find_critical_walls(gdf_critical_segments, gdf_building_3d, buf_tol, extend_
             'geometry': wall_geom,
             'wall_height': max_z - min_z,
             'underpass_id': underpass_id,
-            'segment_id': segment_id,
+            'edge_id': edge_id,
             'building_id': group['building_id'].iloc[0]
         })
         wall_id += 1
 
     gdf_critical_walls = gpd.GeoDataFrame(wall_records, crs=gdf_wall_polygons.crs)
 
+    # If there are two overlapping walls or they are too close, keep the largest wall
+    walls_to_remove = set()
+    for i in range(len(gdf_critical_walls)):
+        if i in walls_to_remove:
+            continue
+        geom_i = gdf_critical_walls.iloc[i]['geometry']
+        area_i = geom_i.area
+        for j in range(i + 1, len(gdf_critical_walls)):
+            if j in walls_to_remove:
+                continue
+            geom_j = gdf_critical_walls.iloc[j]['geometry']
+            # Check if walls overlap
+            if  geom_i.within(geom_j) or geom_j.within(geom_i):
+                area_j = geom_j.area
+                # Keep the larger one, mark the smaller for removal
+                if area_i > area_j:
+                    walls_to_remove.add(j)
+                else:
+                    walls_to_remove.add(i)
+                    break
+    
+    # Remove marked walls and reset indices
+    gdf_critical_walls = gdf_critical_walls.drop(list(walls_to_remove)).reset_index(drop=True)
+
     return gdf_critical_walls
 
 
 def visualize_critical_walls(gdf_critical_walls):
+
+    """
+    Visualize critical walls in 3D using PyVista.
+
+    Args:
+        gdf_critical_walls (GeoDataFrame): GeoDataFrame containing critical walls.
+
+    Returns:
+        None
+
+    """
 
     plotter = pv.Plotter()
     for geom in gdf_critical_walls.geometry:
@@ -211,7 +377,23 @@ def visualize_critical_walls(gdf_critical_walls):
 
 def infere_image_visibility(gdf_image_footprints, gdf_critical_walls, theta):
 
-   # Intersect image footprints with critical walls
+    """
+    Infer the visibility of critical walls in each image by intersecting image footprints with critical walls.
+    The function checks for the visibility of the walls based on two criteria:
+    1) The wall normal should face the camera (dot product test)
+    2) The angle between the wall normal and the camera plane normal should be less than a threshold theta (remove too oblique views)
+
+    Args:
+        gdf_image_footprints (GeoDataFrame): GeoDataFrame containing image footprints with camera parameters.
+        gdf_critical_walls (GeoDataFrame): GeoDataFrame containing critical walls with 3D geometries.
+        theta (float): Angle threshold in degrees to filter out oblique views.
+
+    Returns:
+        gdf_image_visibility (GeoDataFrame): A GeoDataFrame containing image IDs, visible walls, and camera parameters
+    
+    """
+
+    # Intersect image footprints with critical walls
     gdf_image_footprints = gdf_image_footprints.to_crs(gdf_critical_walls.crs)
     gdf_image_visibility = gpd.sjoin(gdf_image_footprints, gdf_critical_walls, how='inner', predicate='intersects')
 
@@ -228,11 +410,7 @@ def infere_image_visibility(gdf_image_footprints, gdf_critical_walls, theta):
 
     gdf_image_visibility = gdf_image_visibility[['image_id', 'wall_id', 'camera_x', 'camera_y', 'camera_z']].rename(columns={'wall_id': 'visible_walls'})
 
-    # Check for the visibility of the walls, remove if not visible. The two criterion are the following:
-    # 1) The wall normal should face the camera
-    # 2) The angle between the wall normal and the and the camera plane normal should be less than a threshold theta (remove too oblique views)
-    # SUGGESTION: explore other criteria such as facade occlusion by other objects
-
+    # Check for the visibility of the walls, remove if not visible. 
     for idx, row in gdf_image_visibility.iterrows():
 
         wall_ids = row['visible_walls']
@@ -246,23 +424,25 @@ def infere_image_visibility(gdf_image_footprints, gdf_critical_walls, theta):
             wall_geom_3d = gdf_critical_walls[gdf_critical_walls['wall_id'] == wall_id]['geometry'].iloc[0]
             coords = list(wall_geom_3d.exterior.coords)
 
-            x1, y1, z1 = coords[0]
-            x2, y2, z2 = coords[3]
-            horiz_v = np.array([x2 - x1, y2 - y1, z2 - z1])
-
-            x3, y3, z3 = coords[1]
-            vert_v =np.array([x3-x1, y3-y1, z3-z1])
+            p0 = np.array(coords[0])
+            p1 = np.array(coords[1])
+            p3 = np.array(coords[3])
+            # vertical edge (z direction)
+            v_vert = p1 - p0
+            # horizontal edge (xy direction)
+            v_horiz = p3 - p0
 
             # Compute and normalize wall normal
-            wall_normal = np.cross(horiz_v, vert_v)
+            wall_normal = np.cross(v_horiz, v_vert)
             wall_normal_norm = np.linalg.norm(wall_normal)
             if wall_normal_norm != 0:
                 wall_normal = wall_normal / wall_normal_norm
 
             # Calculate center of the wall
-            wall_center_x = (x1 + x2) / 2
-            wall_center_y = (y1 + y2) / 2
-            wall_center_z = (z1 + z2) / 2
+            centroid = wall_geom_3d.centroid
+            wall_center_x = centroid.x
+            wall_center_y = centroid.y
+            wall_center_z = np.mean([c[2] for c in coords])
 
             # Compute vector wall center - camera
             v = np.array([camera_x - wall_center_x, camera_y - wall_center_y, camera_z - wall_center_z], dtype=float)
@@ -274,10 +454,14 @@ def infere_image_visibility(gdf_image_footprints, gdf_critical_walls, theta):
             dot_product = np.dot(wall_normal, v)
             angle_rad = np.arccos(np.clip(abs(dot_product), -1.0, 1.0))
             angle_deg = np.degrees(angle_rad)
+
             if dot_product < 0 and angle_deg < theta:
                 filtered_walls.append(wall_id)
 
         gdf_image_visibility.at[idx, 'visible_walls'] = filtered_walls
+
+    # Keep only rows where visible_walls list is not empty
+    gdf_image_visibility = gdf_image_visibility[gdf_image_visibility['visible_walls'].apply(len) > 0]
 
     return gdf_image_visibility
     
