@@ -7,7 +7,7 @@ from psycopg.sql import Identifier
 
 from edge_offset.postgis import write_offset_polygons_from_db
 
-DEFAULT_EDGES_TABLE = Identifier("underpasses_edge_extension", "edges")
+DEFAULT_EDGES_TABLE = Identifier("underpasses", "edges")
 ENV_PATH = Path(".env")
 
 

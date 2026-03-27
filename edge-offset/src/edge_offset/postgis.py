@@ -19,7 +19,7 @@ from edge_offset.rings import classify_polygon_from_edge_sets
 @dataclass(frozen=True, slots=True)
 class EdgeRecord:
     identificatie: str
-    poly_id: int
+    underpass_id: int
     movable_edges: MultiLineString
     fixed_edges: MultiLineString
 
@@ -33,12 +33,12 @@ def load_edge_records_from_db(
         """
         SELECT
             identificatie::text,
-            poly_id,
+            underpass_id,
             ST_AsBinary(ST_CollectionExtract(exterior_edges, 2)) AS exterior_edges_wkb,
             ST_AsBinary(ST_CollectionExtract(shared_edges, 2)) AS shared_edges_wkb,
             ST_AsBinary(ST_CollectionExtract(interior_edges, 2)) AS interior_edges_wkb
         FROM {edges_table}
-        ORDER BY identificatie, poly_id
+        ORDER BY identificatie, underpass_id
         """
     ).format(edges_table=edges_table)
 
@@ -46,7 +46,7 @@ def load_edge_records_from_db(
     with connection.cursor() as cursor:
         cursor.execute(query)
         for row in cursor.fetchall():
-            identificatie, poly_id, movable_wkb, shared_wkb, interior_wkb = row
+            identificatie, underpass_id, movable_wkb, shared_wkb, interior_wkb = row
             movable_edges = _load_multiline_from_wkb(movable_wkb)
             fixed_edges = merge_multiline_geometries(
                 _load_geometry_from_wkb(shared_wkb),
@@ -55,7 +55,7 @@ def load_edge_records_from_db(
             records.append(
                 EdgeRecord(
                     identificatie=str(identificatie),
-                    poly_id=int(poly_id),
+                    underpass_id=int(underpass_id),
                     movable_edges=movable_edges,
                     fixed_edges=fixed_edges,
                 )
@@ -95,7 +95,7 @@ def offset_polygon_features_from_db(
                 geometry=polygon,
                 properties={
                     "identificatie": record.identificatie,
-                    "poly_id": record.poly_id,
+                    "underpass_id": record.underpass_id,
                     "offset_distance": distance,
                     "strategy": strategy,
                 },

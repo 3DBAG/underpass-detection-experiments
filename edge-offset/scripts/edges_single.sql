@@ -1,13 +1,13 @@
 /* Modified from detection_2d/sql/edges.sql so that we have single polygons with unique ids, instead of multipolygons per BAG pand*/
 
 
-DROP TABLE IF EXISTS underpasses_edge_extension.edges;
+DROP TABLE IF EXISTS underpasses.edges;
 
-CREATE TABLE underpasses_edge_extension.edges AS
+CREATE TABLE underpasses.edges AS
 WITH primary_edges AS (
     SELECT
         un.identificatie,
-        un.poly_id,
+        un.underpass_id,
         ST_Multi(
             ST_CollectionExtract(
                 ST_Intersection(
@@ -26,7 +26,7 @@ WITH primary_edges AS (
                 2
             )
         ) AS exterior_edges
-    FROM underpasses_edge_extension.geometries un
+    FROM underpasses.geometries un
     JOIN underpasses.bag_bgt_join bbj
         ON un.identificatie = bbj.identificatie
     WHERE NOT ST_IsEmpty(un.geom)
@@ -52,7 +52,7 @@ adjacent_geometries AS (
 edge_intersections AS (
     SELECT
         e.identificatie,
-        e.poly_id,
+        e.underpass_id,
         e.exterior_edges,
         e.interior_edges,
         ST_Multi(
@@ -72,7 +72,7 @@ edge_intersections AS (
 )
 SELECT
     identificatie,
-    poly_id,
+    underpass_id,
     interior_edges,
     -- Only union non-empty intersections
     ST_Union(intersection_geom) FILTER (WHERE NOT ST_IsEmpty(intersection_geom)) AS shared_edges,
@@ -91,4 +91,4 @@ SELECT
         ELSE exterior_edges
     END AS exterior_edges
 FROM edge_intersections
-GROUP BY identificatie, poly_id, exterior_edges, interior_edges;
+GROUP BY identificatie, underpass_id, exterior_edges, interior_edges;

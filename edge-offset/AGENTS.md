@@ -65,7 +65,7 @@ When changing offset behavior:
 When changing database integration:
 
 - keep PostGIS tests adapter-focused with fake connections/cursors
-- verify feature properties such as `identificatie`, `poly_id`, `offset_distance`, and `strategy`
+- verify feature properties such as `identificatie`, `underpass_id`, `offset_distance`, and `strategy`
 
 ## Commit & Pull Request Guidelines
 

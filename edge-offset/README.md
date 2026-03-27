@@ -75,7 +75,7 @@ from edge_offset.postgis import write_offset_polygons_from_db
 with connect(host="localhost", port=5557, dbname="baseregisters", user="bdukai") as connection:
     write_offset_polygons_from_db(
         connection,
-        edges_table=Identifier("underpasses_edge_extension", "edges"),
+        edges_table=Identifier("underpasses", "edges"),
         distance=0.25,
         output_path=Path("tests/output/offset_polygons_from_db.geojson"),
     )
@@ -85,7 +85,7 @@ with connect(host="localhost", port=5557, dbname="baseregisters", user="bdukai")
 
 - `exterior_edges` as movable linework
 - `shared_edges` and `interior_edges` as fixed linework
-- one output feature per `identificatie` / `poly_id` row
+- one output feature per `identificatie` / `underpass_id` row
 
 ## Local Export Script
 
@@ -108,7 +108,7 @@ Optional:
 
 - `EDGE_OFFSET_DB_PASSWORD`
 
-The script currently exports from `underpasses_edge_extension.edges`.
+The script currently exports from `underpasses.edges`.
 
 ## Offset Strategy
 

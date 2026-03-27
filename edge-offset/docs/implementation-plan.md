@@ -65,7 +65,7 @@ boolean patching approach per ring.
 3. Treat `exterior_edges` as movable linework.
 4. Merge `shared_edges` and `interior_edges` into the fixed linework input.
 5. Reuse the existing reconstruction, classification, and offset pipeline for each
-   `identificatie`/`poly_id` group.
+   `identificatie`/`underpass_id` group.
 6. Write all output polygons into one GeoJSON `FeatureCollection`.
 
 ## Testing Plan

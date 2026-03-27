@@ -4,9 +4,9 @@
 -- Step 5: Final Filtering though Double Buffering per Geometry
 -- =====================================
 
-DROP TABLE IF EXISTS underpasses_edge_extension.geometries;
+DROP TABLE IF EXISTS underpasses.geometries;
 
-CREATE TABLE underpasses_edge_extension.geometries AS
+CREATE TABLE underpasses.geometries AS
 WITH exploded AS (
     -- Split multipolygons into individual polygons
     SELECT identificatie, (ST_Dump(geom)).geom AS single_poly
@@ -17,16 +17,16 @@ WITH exploded AS (
        OR geom &&
           st_geomfromewkt('SRID=28992; POLYGON ((124593.33100000000558794 488890.39699999999720603, 125593.33100000000558794 488890.39699999999720603, 125593.33100000000558794 489890.39699999999720603, 124593.33100000000558794 489890.39699999999720603, 124593.33100000000558794 488890.39699999999720603))'))
    , exploded_with_id
-    AS (SELECT ROW_NUMBER() OVER () AS poly_id -- Unique ID for each polygon
+    AS (SELECT ROW_NUMBER() OVER () AS underpass_id -- Unique ID for each polygon
              , identificatie
              , single_poly
         FROM exploded)
    , filtered AS (
     -- Remove polygons that disappear after buffering
-    SELECT poly_id, identificatie
+    SELECT underpass_id, identificatie
     FROM exploded_with_id
     WHERE NOT ST_IsEmpty(ST_Buffer(ST_Buffer(single_poly, -0.2), 0.2)))
 -- Merge surviving polygons back into a multipolygon per identificatie
-SELECT e.identificatie, e.poly_id, e.single_poly AS geom
+SELECT e.identificatie, e.underpass_id, e.single_poly AS geom
 FROM filtered f
-         JOIN exploded_with_id e ON f.poly_id = e.poly_id;
+         JOIN exploded_with_id e ON f.underpass_id = e.underpass_id;
