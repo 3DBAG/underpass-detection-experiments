@@ -1,5 +1,5 @@
 geopandas==1.1.2
-gradio==6.9.0
+gradio==6.10.0
 gradio_imageslider==0.0.20
 h5py==3.16.0
 labelme==5.11.4
@@ -10,6 +10,7 @@ opencv_python==4.13.0.92
 pandas==3.0.1
 Pillow==12.1.1
 pyvista==0.47.1
+scipy==1.17.1
 Shapely==2.1.2
 torch==2.5.1+cu121
 torchvision==0.20.1+cu121

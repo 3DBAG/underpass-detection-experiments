@@ -381,14 +381,17 @@ Every time that an underpass height is estimated, this value is stored in a list
 
 Once all tiles have been iterated, the estimated heights will be definitive. The code then writes the underpass polygons with the estimated heights to a GeoJSON file.
 
+The output files can be found under the `output/` folder (`underpass_heights_ccmethod.geojson`, `underpass_heights_depthmethod.geojson`, `underpass_heights_unetmethod.geojson`).
+
 
 ## 3. Assessment of results
 
-In this section, we present the results of an experiment ran in an area of Rotterdam. Each method is assessed by comparing its output to ground truth data.
+In this section, we present the results of an experiment ran in an area of Rotterdam. Each method is assessed by comparing its output to ground truth data. At the end of this section, we discuss whether the ground truth data used is suitable for comparison, given some inconsistent results. The assessment results can be replicated by executing the script <Strong>assessment.py</Strong>. The output assessment files can be found under the `output/` folder (`assessment_ccmethod.geojson`, `assessment_depthmethod.geojson`, `assessment_unetmethod.geojson`)
 
 
 ###  Ground truth data
-Our reference data is derived from the city model of 3D Rotterdam - https://www.3drotterdam.nl/. This dataset includes accurate modelling of building underpasses, including accurate height values. For comparison, we project the underpass ceiling polygon into 2D and include the measured height as one of its attributes.
+Our reference data is derived from the city model of 3D Rotterdam - https://www.3drotterdam.nl/. This dataset includes accurate modelling of building underpasses, including accurate height values. For comparison, we project the underpass ceiling polygon into 2D and include the measured height as one of its attributes. The ground truth underpasses can be found in `data/ground_truth/underpasses_rotterdam3d.geojson`.
+
 
 
 ### Design experiment:
@@ -403,8 +406,8 @@ The 3D building tiles were selected using the bounding box defined above and obt
 
 The code was executed on Kaggle, a platform which provides access to powerful hardware resources. To accelerate image processing, an NVIDIA Tesla P100 GPU was used. 
 
-### Discussion of results
-The original set of input underpasses consisted of 97 features. However, 22 of these lacked an estimated height (NULL values) across all methods. This is because the underpass walls did not meet the visibility criteria during the perspective projection phase (see Section 2.1, point 5), or the oblique images containing those walls were not available. Therefore, these 22 features were excluded from the assessment. 
+### Results
+The original set of input underpasses consisted of 97 features. However, 15 of these lacked an estimated height (NULL values) across all methods. This is because the underpass walls did not meet the visibility criteria during the perspective projection phase (see Section 2.1, point 5), or the oblique images containing those walls were not available. Therefore, these were excluded from the assessment, having an actual sample of 82 features. We will base all calculated percentages on this figure.
 
 <div align="center">
    <p align="center">
@@ -413,9 +416,9 @@ The original set of input underpasses consisted of 97 features. However, 22 of t
 
 | Method        | Run Time (min)  | Null Features | MAE (m) | RMSE (m) |
 |:---------------:|:------------------:|:---------------:|:---------:|:----------:|
-| CC     |      27.25       |        6       |    2.93     |     3.66     |
-| Depth   |      24.90       |         5      |     2.39    |     3.17     |
-| U-Net   |      18.67       |        1      |    1.99     |      2.56    |
+| CC     |      27.25       |        14       |    2.93     |     3.66     |
+| Depth   |      24.90       |         14      |     2.39    |     3.17     |
+| U-Net   |      18.67       |        4      |    1.99     |      2.56    |
 
 </div>
 
@@ -427,7 +430,7 @@ The original set of input underpasses consisted of 97 features. However, 22 of t
 From <Strong>Table 2</Strong>, we can infer that <Strong>the fastest method was the U-Net method</Strong>, while the slowest was the CC method. However, one remark is necessary for a correct interpretation: the depth method produced many cases in which the application of the Depth-Anything model caused a runtime error. In these cases, we executed an exception and skipped to the next facade. As a result, the total number of processed facades in the CC method was higher than in the depth method, which contributed to a longer runtime. This evidences that <Strong>the depth method remains the most computationally expensive</Strong>.
 
 #### Null features
-The CC method returned a null value in 8 % of the estimations, the highest among the three methods. This is mainly due to its weakness, basing its pefromance on the quality of the detected edges. Contributing factors to failure include the presence of objects (e. g. trees, urban furniture), poor image quality (specially in terms of  brightness and contrast) and incorrect extraction of facade textures. All these may lead to a deficient segmentation, causing components to merge together, blend with the background, or form very small fragmented regions. As a result, none of the components pass the filtering criteria, and the method returns a null value. <Strong>Figure 10</Strong> shows a collection of facade images where the CC method failed to make a prediction.
+The CC method returned a null value in 17.07 % of the estimations, the highest together with the depth method. This is mainly due to its weakness, basing its pefromance on the quality of the detected edges. Contributing factors to failure include the presence of objects (e. g. trees, urban furniture), poor image quality (specially in terms of  brightness and contrast) and incorrect extraction of facade textures. All these may lead to a deficient segmentation, causing components to merge together, blend with the background, or form very small fragmented regions. As a result, none of the components pass the filtering criteria, and the method returns a null value. <Strong>Figure 10</Strong> shows a collection of facade images where the CC method failed to make a prediction.
 
   <table align="center">
     <tr>
@@ -450,7 +453,7 @@ The CC method returned a null value in 8 % of the estimations, the highest among
   <strong>Figure 10.</strong> From left to right: <Strong>(1)</Strong> presence of balconies in front of the facade (right side); <Strong>(2, 3) </Strong> wrong facade texture (no underpass present); <Strong>(4)</Strong> poor image quality avoids detecting the vertical edge on the left of the underpass, thus merging the underpass component with the background. 
 </p>
 
-The depth map method returned a null value in 6.67 % of the estimations. This is mainly due to runtime errors caused by complex images where depth information is unclear, or when city objects are present, which increases the computational cost of depth estimation. The method is also sensitive to incorrect extraction of facade textures. <Strong>Figure 11</Strong> shows a collection of facade images where the depth method failed to make a prediction.
+The depth map method returned a null value in 17.07 % of the estimations. This is mainly due to runtime errors caused by complex images where depth information is unclear, or when city objects are present, which increases the computational cost of depth estimation. The method is also sensitive to incorrect extraction of facade textures. <Strong>Figure 11</Strong> shows a collection of facade images where the depth method failed to make a prediction.
 
   <table align="center">
     <tr>
@@ -470,7 +473,7 @@ The depth map method returned a null value in 6.67 % of the estimations. This is
   <strong>Figure 11.</strong> From left to right: <Strong>(1)</Strong> unclear depth information; <Strong>(2) </Strong> incorrect facade texture (no underpass present); <Strong>(3)</Strong> presence of objects in front of the underpass (only visible on the right side, under the white window) 
 </p>
 
-The U-Net method returned a null value in 1.33% of the estimations. Compared to the other methods, it is more robust in producing non-null results. However, it may return a null value when facades are heavily occluded. This behavior is also due to the model being trained to detect cases where no underpass is present. <Strong>Figure 12</Strong> shows a facade image where the U-Net method failed to make a prediction.
+The U-Net method returned a null value in 4.88% of the estimations. Compared to the other methods, it is more robust in producing non-null results. However, it may return a null value when facades are heavily occluded. This behavior is also due to the model being trained to detect cases where no underpass is present. <Strong>Figure 12</Strong> shows a facade image where the U-Net method failed to make a prediction.
 
 <p align="center">
   <img src="md_images/unet_null_3311.jpg">
@@ -482,20 +485,20 @@ The U-Net method returned a null value in 1.33% of the estimations. Compared to 
 
 #### Mean Absolute Error (MAE) and Root Mean Squared Error (RMSE)
 
-All three methods present high errors, with the CC method showing the largest error (±2.93 m) and the U-Net method the smallest (±1.99 m). Moreover, the RMSE is higher than the MAE for all methods, which reflects the presence of large deviations in some predictions. Nevertheless, there are significant differences across the methods that are worth discussing.
+All three methods present a high MAE, with the CC method showing the largest error (±2.60 m) and the U-Net method the smallest (±1.80 m). Moreover, the RMSE is significantly higher than the MAE for all methods, which reflects the presence of large deviations in some predictions. Nevertheless, there are significant differences across the methods that are worth discussing.
 
 The CC method again shows the poorest performance, since it only relies on connected components image segmentation and geometric analysis. Lacking semantic understanding prevents it from reliably determining whether an underpass is actually present in the facade. As a result, the method may mistakenly identify other elements as the underpass, estimating incorrect height that can deviate by several meters. Moreover, the filtering criteria remain simplistic, only returning accurate results under very specific conditions: when the image quality is high, the facade is fully visible and unoccluded, the facade aligns perfectly within the image bounds, and the underpass remains in the center of the image.
 
-The depth map method is the second-worst performing strategy (±2.39 m). Like the CC method, this approach lacks semantic segmentation, making it susceptible to identifying other elements as the underpass. Errors increase dramatically when incorrect facade textures are extracted. Additionally, it is sensitive to image complexity, since k-means clustering may detect a deeper cluster than the actual underpass (e.g., the sky or rooms visible through windows). However, incorporating depth information in addition to plain geometry does improve the accuracy of predictions to some extent, as compared to the CC method.
+The depth map method is the second-worst performing strategy (±2.38 m). Like the CC method, this approach lacks semantic segmentation, making it susceptible to identifying other elements as the underpass. Errors increase dramatically when incorrect facade textures are extracted. Additionally, it is sensitive to image complexity, since k-means clustering may detect a deeper cluster than the actual underpass (e.g., the sky or rooms visible through windows). However, incorporating depth information in addition to plain geometry does improve the accuracy of predictions to some extent, as compared to the CC method.
 
-The U-Net method shows the best performance (±1.99 m), yet highly inaccurate. Since it is based in a semantic segmentation model, it is less sensitive to occlusion. The model was also trained to detect cases where no underpass is present, enabling a better performance when incorrect facade textures are extracted. However, the model was trained defficiently (see Appendix B) and is subject to improvements. Therefore it may still produce height estimates that deviate several meters from the true values. Such errors occur less frequently compared to the other approaches.
+The U-Net method shows the best performance (±1.80 m), yet highly inaccurate. Since it is based in a semantic segmentation model, it is less sensitive to occlusion. The model was also trained to detect cases where no underpass is present, enabling a better performance when incorrect facade textures are extracted. However, the model was trained defficiently (see Appendix B) and is subject to improvements. Therefore it may still produce height estimates that deviate several meters from the true values. Such errors occur less frequently compared to the other approaches.
 
 #### Absolute error distribution
-While mean error metrics (i.e. MAE and RMSE) provide a general indication of method performance, analyzing the distribution of absolute errors reveals interesting patterns such as the frequency and magnitude of deviations. In <Strong>Figure 13</Strong>, it can be observed that the CC approach presents a relatively flat distribution, suggesting that errors are spread more uniformly across a wide range of values. This indicates inconsistent performance, with no strong concentration around low error values.
+While mean error metrics (i.e. MAE and RMSE) provide a general indication of method performance, analyzing the distribution of absolute errors reveals interesting patterns such as the frequency and magnitude of deviations. In <Strong>Figure 13</Strong>, it can be observed that the CC approach presents a relatively flat distribution, suggesting that errors are spread more uniformly across a wide range of values. This indicates inconsistent performance, with no strong concentration around low error values. This method also produces the largest observed error - exceeding ±10.4 m - highlighting its sensitivity to image conditions.
 
-A similar pattern is observed for the depth-based approach, although its distribution shows a slightly higher concentration of lower errors. This indicates a slight improvement in accuracy. However, this method also produces the largest observed error - exceeding ±10.6 m - highlighting its sensitivity to image conditions.
+A similar pattern is observed for the depth-based approach, although its distribution shows a slightly higher concentration of lower errors. This indicates a slight improvement in accuracy.
 
-In contrast, the U-Net approach shows a more favorable error distribution. Its peak is below ±1 m, with the highest frequency of errors concentrated in the interval (±0.2 m, ±0.4 m). This indicates that, the U-Net approach produces more consistent predictions with fewer extreme deviations compared to the other approaches. However, accuracy is still a big concern.
+In contrast, the U-Net approach shows a more favorable error distribution. Its peak is below ±1 m, with the highest frequency of errors concentrated in the two first intervals (±0.2 m, ±0.4 m) and (±0.4 m, ±0.6 m). This indicates that, the U-Net approach produces more consistent predictions with fewer extreme deviations compared to the other approaches. However, accuracy is still a big concern.
 
 
 <p align="center">
@@ -506,7 +509,7 @@ In contrast, the U-Net approach shows a more favorable error distribution. Its p
   <strong>Figure 13.</strong> Absolute error distribution of the height estimation methods (bin size = 0.2 m)
 </p>
 
-<Strong>Table 3</Strong> presents an evaluation of performance under different error tolerances. Overall, none of the approaches achieves high accuracy under strict tolerance thresholds. We can observe that the U-Net approach outperforms the other methods across all tolerance levels, but its performance remains limited. For instance, under a strict tolerance of ±0.10 m, it correctly estimates only 4.00% of the features. This increases to 8.00% under a ±0.20 m tolerance, 20.00% under ±0.40 m, and 26.66% under ±0.80 m. On the contrary, the CC and depth map approaches perform worse overall. This reinforces the conclusion that these approaches lack robustness for precise height estimation.
+<Strong>Table 3</Strong> presents an evaluation of performance under different error tolerances. Overall, none of the approaches achieves high accuracy under strict tolerance thresholds, altough we observe a slightly better performance of the CC method. However, this trend is not consistent and we can observe that the U-Net approach outperforms the other methods across all of the following tolerance levels, but its performance remains limited. For instance, under a strict tolerance of ±0.10 m, it correctly estimates only 2.35 % of the features. This increases to 9.41 % under a ±0.20 m tolerance, 18.82 % under ±0.40 m, and 31.76 % under ±0.80 m. On the contrary, the CC and depth map approaches perform worse overall. This reinforces the conclusion that the U-Net approach presents the highest robustness for height estimation.
 
 <div align="center">
    <p align="center">
@@ -515,11 +518,88 @@ In contrast, the U-Net approach shows a more favorable error distribution. Its p
 
 | Method |  High (±0.10)    | Acceptable (±0.20) | Defficient (±0.40)  | Very Deficient (±0.80) |
 |:------:|:----------------:|:------------------:|:-------------------:|:----------------------:|
-| CC     | 1.33 %           |4.00 %              | 9.33 %              | 13.33 %                  |                      
-| Depth  | 1.33 %           |2.66 %               | 9.33 %              | 17.33 %                 |                      
-| U-Net  | 4.00 %           |8.00 %              | 20.00 %              | 26.66 %                |                      
+| CC     | 3.65 %           |4.88 %              | 12.20 %              | 18.82 %   |                      
+| Depth  | 2.35 %           |7.06 %               | 14.12 %              | 28.23 %  |                      
+| U-Net  | 2.35 %           |9.41 %              | 18.82 %              | 31.76 %  |                      
 
 </div>
+
+### Discussion of the assessment method
+After plotting images with estimated and ground truth heights, some inconsistences in the ground truth data became apparent. In many cases, the ground truth height is higher than the actual underpass visible in the images. Moreover, some underpasses in the input data do not have onr-to-one correspondances in the ground truth dataset. <Strong>Figure 14</Strong> shows a collection of examples of such cases, making evaluation impossible. The full collection of images can be found in `output/visualizations_GT_unet`. The choice to generate images just for the U-Net method is due to its higher performance over the others.
+
+  <table align="center">
+    <tr>
+    <td align="center">
+    <img src="md_images/ground_truth_1.jpg"><br>
+    </td>
+    <td align="center">
+    <img src="md_images/ground_truth_2.jpg" ><br>
+    </td>
+    <td align="center">
+    <img src="md_images/ground_truth_3.jpg" ><br>
+    </td>
+    </tr>
+    </table>
+<p align="center">
+
+<p align="center">
+  <strong>Figure 14.</strong> From left to right: <Strong>(1, 2)</Strong> over-dimensioning of ground-truth data; <Strong>(3) </Strong> no ground-truth correspondance found.
+</p>
+
+These findings lead to a closer inspection of the 3D Rotterdam dataset and a visual comparison with Google Earth 3D and Street View images, revealing that not all modelled underpasses reflect ground truth. In some cases, underpass heights are overestimated by several meters. In some other cases, they appear to have been assigned the height of the neighboring underpass.  
+
+To test whether these inconsistencies influenced our assessment, we conducted a visual inspection of our ground truth sample. The height values were visually compared against Street View imagery and Google Earth 3D. When large discrepancies were identified, the height values were adjusted to more realistic values. To detect large discrepancies, we used other elements present in the image which height is usually standardized or easier to estimate (e.g. doors, people...). For example, one underpass appeared to be approximately one storey high but it was recorded as 9 m in the original ground truth data. This case was updated to 3 m. The updated ground truth dataset is available at `data/ground_truth/underpasses_rotterdam3d_revised.geojson`.
+
+This quick experiment returned interesting insights when re-evaluating the methods. <Strong>Figure 15</Strong> shows the new absolute error histograms compared against the previous assessment. We can observe a clear shift, increasing counts in lower error beams, specially in the depth method and in the U-Net case. Moreover the MAE has decreased for all methods.
+
+<p align="center">
+  <img src="md_images/histograms_methods.jpg">
+</p>
+
+<p align="center">
+  <img src="md_images/histograms_methods_revised.jpg">
+</p>
+
+<p align="center">
+  <strong>Figure 15.</strong> From top to bottom <Strong>(1)</Strong> absolute error distributions of first assessment; <Strong>(2)</Strong> absolute error distribution after revising the ground truth data (bin size = 0.2 m)
+
+
+In the same trends, <Strong>Table 4</Strong> shows an increase on the performance of all height estimation methods under different tolerance thresholds.
+
+<div align="center">
+   <p align="center">
+     <strong>Table 4:</strong> Performance of the height estimation methods for different tolerance thresholds before and after ground truth data revision.
+   </p>
+
+| Method |  High (±0.10)    | Acceptable (±0.20) | Defficient (±0.40)  | Very Deficient (±0.80) |
+|:------:|:----------------:|:------------------:|:-------------------:|:----------------------:|
+| CC - before       | 3.65 %           |4.88 %              | 12.20 %         | 18.82 %   |                      
+| **CC - after**    | **4.88 %**     |**7.32 %**          | **13.41 %**     | **20.73 %**   |                       
+| Depth - before    | 2.35 %           |7.06 %          | 14.12 %         | 28.23 %  | 
+| **Depth - after** | **2.35 %**      |**13.41 %**         | **23.17 %**     | **34.15 %**  |                       
+| U-Net - before    | 2.35 %           |9.41 %              | 18.82 %              | 31.76 %  |                      
+| **U-Net -after**  | **4.88 %**       |**12.20 %**         | **21.95 %**          | **39.02 %**  |                      
+
+</div>
+
+
+Aside from the dubious ground truth data accuracy, another reason for increasing errors could be the input underpass polygons. These are not always properly split, and sometimes they are merged with underground surfaces. Therefore, establishing one-to-one correspondances with ground truth data is not feasible in some cases. <Strong>Figure 16</Srtrong> illustrates an example of this case.
+
+<p align="center">
+  <img src="md_images/wrong_correspondance.jpg" width=300>
+</p>
+
+<p align="center">
+  <strong>Figure 16.</strong> One input underpass polygon (in red) corresponds to multiple ground truth polygons (in blue). The red polygon is merged with undeground surfaces.
+</p>
+
+As a summary, the main points that should be considered to construct a good ground truth dataset are the following:
+
+1. Ensure a one-to-one correspondence between the input 2D polygons and the ground truth polygons.
+2. Ensure that underpass height values reflect real-world conditions.
+3. As the focus of this study is on height estimation, it is preferable to include only underpasses with a single height value. For underpasses with multiple height values, one section may be selected, or the geometry may be split into separate parts. This prevents inconsistencies between different viewpoints (i. e., images captured from different walls).
+
+
 
 ## 4. Conclusions and recommendations
 From the analysis in Section 3,  it can be concluded that none of the evaluated methods currently provides reliable underpass height estimations from oblique images. Moreover, the general process is subject to several improvements. In this section we outline recommendations to imrpove each stage of the method.
