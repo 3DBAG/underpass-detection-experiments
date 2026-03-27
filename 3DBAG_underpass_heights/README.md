@@ -525,7 +525,7 @@ In contrast, the U-Net approach shows a more favorable error distribution. Its p
 </div>
 
 #### Discussion of the assessment method
-After plotting images with estimated and ground truth heights, some inconsistences in the ground truth data became apparent. In many cases, the ground truth height is higher than the actual underpass visible in the images. Moreover, some underpasses in the input data do not have onr-to-one correspondances in the ground truth dataset. <Strong>Figure 14</Strong> shows a collection of examples of such cases, making evaluation impossible. The full collection of images can be found in `output/visualizations_GT_unet`. The choice to generate images just for the U-Net method is due to its higher performance over the others.
+After plotting images with estimated and ground truth heights, some inconsistences in the ground truth data became apparent. In many cases, the ground truth height is higher than the actual underpass visible in the images. Moreover, some underpasses in the input data do not have one-to-one correspondences in the ground truth dataset, making evaluation impossible. <Strong>Figure 14</Strong> shows a collection of examples of such cases. The full collection of images can be found in `output/visualizations_GT_unet`. The choice to generate images just for the U-Net method is due to its higher performance over the others.
 
   <table align="center">
     <tr>
@@ -546,7 +546,7 @@ After plotting images with estimated and ground truth heights, some inconsistenc
   <strong>Figure 14.</strong> From left to right: <Strong>(1, 2)</Strong> over-dimensioning of ground-truth data; <Strong>(3) </Strong> no ground-truth correspondance found.
 </p>
 
-These findings lead to a closer inspection of the 3D Rotterdam dataset and a visual comparison with Google Earth 3D and Street View images, revealing that not all modelled underpasses reflect ground truth. In some cases, underpass heights are overestimated by several meters. In some other cases, they appear to have been assigned the height of the neighboring underpass.  
+These findings led to a closer inspection of the 3D Rotterdam dataset and a visual comparison with Google Earth 3D and Street View images, revealing that not all modelled underpasses reflect ground truth. In some cases, underpass heights are overestimated by several meters. In some other cases, they appear to have been assigned the height of the neighboring underpass.  
 
 To test whether these inconsistencies influenced our assessment, we conducted a visual inspection of our ground truth sample. The height values were visually compared against Street View imagery and Google Earth 3D. When large discrepancies were identified, the height values were adjusted to more realistic values. To detect large discrepancies, we used other elements present in the image which height is usually standardized or easier to estimate (e.g. doors, people...). For example, one underpass appeared to be approximately one storey high but it was recorded as 9 m in the original ground truth data. This case was updated to 3 m. The updated ground truth dataset is available at `data/ground_truth/underpasses_rotterdam3d_revised.geojson`.
 
@@ -583,7 +583,7 @@ In the same trends, <Strong>Table 4</Strong> shows an increase on the performanc
 </div>
 
 
-Aside from the dubious ground truth data accuracy, another reason for increasing errors could be the input underpass polygons. These are not always properly split, and sometimes they are merged with underground surfaces. Therefore, establishing one-to-one correspondances with ground truth data is not feasible in some cases. <Strong>Figure 16</Srtrong> illustrates an example of this case.
+Aside from the dubious ground truth data accuracy, another reason for large errors could be the input underpass polygons. These are not always properly split, and sometimes they are merged with underground surfaces. Therefore, establishing one-to-one correspondences with ground truth data is not feasible in some cases. <Strong>Figure 16</Strong> illustrates an example of this case.
 
 <p align="center">
   <img src="md_images/wrong_correspondance.jpg" width=300>
