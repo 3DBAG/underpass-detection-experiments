@@ -386,7 +386,7 @@ The output files can be found under the `output/` folder (`underpass_heights_ccm
 
 ## 3. Assessment of results
 
-In this section, we present the results of an experiment ran in an area of Rotterdam. Each method is assessed by comparing its output to ground truth data. At the end of this section, we discuss whether the ground truth data used is suitable for comparison, given some inconsistent results. The assessment results can be replicated by executing the script <Strong>assessment.py</Strong>. The output assessment files can be found under the `output/` folder (`assessment_ccmethod.geojson`, `assessment_depthmethod.geojson`, `assessment_unetmethod.geojson`)
+In this section, we present the results of an experiment ran in an area of Rotterdam. Each method is assessed by comparing its output to ground truth data. At the end of this section, we discuss whether the ground truth data used is suitable for comparison, given some inconsistent results. The assessment of the results can be replicated by executing the script <Strong>assessment.py</Strong>. The output assessment files can be found under the `output/` folder (`assessment_ccmethod.geojson`, `assessment_depthmethod.geojson`, `assessment_unetmethod.geojson`)
 
 
 ###  Ground truth data
