@@ -564,7 +564,7 @@ This quick experiment returned interesting insights when re-evaluating the metho
   <strong>Figure 15.</strong> From top to bottom <Strong>(1)</Strong> absolute error distributions of first assessment; <Strong>(2)</Strong> absolute error distribution after revising the ground truth data (bin size = 0.2 m)
 
 
-In the same trends, <Strong>Table 4</Strong> shows an increase on the performance of all height estimation methods under different tolerance thresholds.
+In the same trends, <Strong>Table 4</Strong> shows an increase on the performance of all height estimation methods under different tolerance thresholds. The U-Net method increased correct estimatations from 2.35 % to 4.88 % for a tolerance of ±0.10 m, and from 31.76 % to 39.02 % for a tolerance of ±0.80.
 
 <div align="center">
    <p align="center">
