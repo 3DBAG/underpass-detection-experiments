@@ -66,6 +66,14 @@ VERTICAL_WALL_MAX_EMPTY_RUN_BINS = 1
 SHOW_EXCLUSIVE_ROW = False
 SHOW_RELATED_WALL_ROW = False
 
+# Figure margins in inches. These are converted to normalized subplot
+# fractions based on the current figure size so spacing stays stable when the
+# number of columns changes.
+FIGURE_MARGIN_LEFT_INCHES = 0.9
+FIGURE_MARGIN_RIGHT_INCHES = 0.15
+FIGURE_MARGIN_BOTTOM_INCHES = 0.5
+FIGURE_MARGIN_TOP_INCHES = 0.75
+
 # Output filenames, Rerun mode, and visualization colors.
 OUTPUT_CSV_PATH = "underpass_heights.csv"
 RERUN_OUTPUT_MODE = "viewer"  # "rrd" or "viewer"
@@ -715,7 +723,8 @@ def process_case(las_path, gpkg_path):
     figure_width = 5 * sum(width_ratios)
     map_row_count = 2 + int(SHOW_EXCLUSIVE_ROW) + int(SHOW_RELATED_WALL_ROW)
     total_rows = 1 + map_row_count
-    fig = plt.figure(figsize=(figure_width, 4.5 + 4.0 * total_rows))
+    figure_height = 4.5 + 4.0 * total_rows
+    fig = plt.figure(figsize=(figure_width, figure_height))
     grid_spec = fig.add_gridspec(
         total_rows,
         ncols,
@@ -916,7 +925,12 @@ def process_case(las_path, gpkg_path):
         ax_map.legend(loc="best")
 
     fig.suptitle(bag_id, fontsize=15, y=0.985)
-    fig.subplots_adjust(left=0.05, right=0.99, bottom=0.06, top=0.90)
+    fig.subplots_adjust(
+        left=FIGURE_MARGIN_LEFT_INCHES / figure_width,
+        right=1 - (FIGURE_MARGIN_RIGHT_INCHES / figure_width),
+        bottom=FIGURE_MARGIN_BOTTOM_INCHES / figure_height,
+        top=1 - (FIGURE_MARGIN_TOP_INCHES / figure_height),
+    )
     plt.savefig(output_path, dpi=200, transparent=False)
     print(f"Saved overlay figure to {output_path}")
     plt.close(fig)
