@@ -2,11 +2,7 @@
 
 This directory contains a Python workflow for estimating underpass height from cropped LAS/LAZ point clouds and matching polygons stored in GeoPackages.
 
-> The cropped point cloud was generated using roofer:
-> ```
-> roofer --ceil-point-density 100 --crop-only --crop-output  122200_486000.laz voormaligeStadstimmertuin.gpkg data/roofer-out
-> ```
-> The GPKG file contains the underpass polygon of interest from the 2D detection pipeline. The pointcloud is one of the files Amsterdam gave to us. To save space, these two files are not included in this repository, but the relvant roofer output is included.
+> The cropped point clouds were generated using the script in `../crop_las_by_polygons`:
 
 The script loops over a list of BAG cases, reads each LAS/LAZ file and its matching GeoPackage polygon, detects Z-peak candidates from a smoothed histogram, rasterizes each candidate to the XY plane at `0.5 m` resolution, and keeps only candidates whose raw histogram count is at least `5%` of the second-highest candidate raw count.
 
