@@ -97,7 +97,7 @@ def offset_polygon_features_from_db(
 
     features: list[Feature] = []
     for record in records:
-        print(f"Processing underpass {record.identificatie} (ID: {record.underpass_id}) with {len(record.movable_edges.geoms)} movable edges and {len(record.fixed_edges.geoms)} fixed edges.")
+        #print(f"Processing underpass {record.identificatie} (ID: {record.underpass_id}) with {len(record.movable_edges.geoms)} movable edges and {len(record.fixed_edges.geoms)} fixed edges.")
         classified_polygon = classify_polygon_from_edge_sets(
             movable_edges=record.movable_edges,
             fixed_edges=record.fixed_edges,
