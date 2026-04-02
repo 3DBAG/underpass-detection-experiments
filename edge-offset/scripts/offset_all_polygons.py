@@ -4,10 +4,9 @@ from os import environ
 from pathlib import Path
 import sys
 import time
-from typing import List, Tuple
+from typing import List
 
 from psycopg import connect
-from psycopg.sql import Identifier, SQL
 from shapely import from_wkb, to_wkb
 
 from edge_offset.linework import coerce_multiline_geometry, merge_multiline_geometries
@@ -16,8 +15,9 @@ from edge_offset.postgis import EdgeRecord
 from edge_offset.rings import classify_polygon_from_edge_sets
 
 
-DEFAULT_EDGES_TABLE = Identifier("underpasses", "edges")
-DEFAULT_OUTPUT_TABLE = Identifier("underpasses", "geometries_extended")
+OUTPUT_TABLE = "underpasses.extended_geometries_2"
+SKIPPED_TABLE = "underpasses.skipped_underpasses_2"
+EDGES_TABLE = "underpasses.edges"
 ENV_PATH = Path(".env")
 CHUNK_SIZE = 1000  # Process 1000 underpasses at a time
 
@@ -49,13 +49,13 @@ def main() -> int:
         
         # Check progress
         with conn.cursor() as cursor:
-            cursor.execute("SELECT COUNT(DISTINCT underpass_id) FROM underpasses.extended_geometries")
+            cursor.execute(f"SELECT COUNT(DISTINCT underpass_id) FROM {OUTPUT_TABLE}")
             already_processed = cursor.fetchone()[0]
             
-            cursor.execute("SELECT COUNT(DISTINCT underpass_id) FROM underpasses.skipped_underpasses")
+            cursor.execute(f"SELECT COUNT(DISTINCT underpass_id) FROM {SKIPPED_TABLE}")
             already_skipped = cursor.fetchone()[0]
             
-            cursor.execute("SELECT COUNT(DISTINCT underpass_id) FROM underpasses.edges WHERE geom IS NOT NULL")
+            cursor.execute(f"SELECT COUNT(DISTINCT underpass_id) FROM {EDGES_TABLE} WHERE geom IS NOT NULL")
             total_underpasses = cursor.fetchone()[0]
             
         if already_processed > 0 or already_skipped > 0:
@@ -107,8 +107,8 @@ def main() -> int:
 def setup_skipped_underpasses_table(conn):
     """Create skipped_underpasses table to track failed processing attempts."""
     with conn.cursor() as cursor:
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS underpasses.skipped_underpasses (
+        cursor.execute(f"""
+            CREATE TABLE IF NOT EXISTS {SKIPPED_TABLE} (
                 identificatie TEXT NOT NULL,
                 underpass_id INTEGER NOT NULL,
                 skip_reason TEXT,
@@ -116,8 +116,8 @@ def setup_skipped_underpasses_table(conn):
                 PRIMARY KEY (identificatie, underpass_id)
             );
             
-            CREATE INDEX IF NOT EXISTS idx_skipped_underpass_id ON underpasses.skipped_underpasses (underpass_id);
-            CREATE INDEX IF NOT EXISTS idx_skipped_identificatie ON underpasses.skipped_underpasses (identificatie);
+            CREATE INDEX IF NOT EXISTS idx_skipped_underpass_id ON {SKIPPED_TABLE} (underpass_id);
+            CREATE INDEX IF NOT EXISTS idx_skipped_identificatie ON {SKIPPED_TABLE} (identificatie);
         """)
         conn.commit()
     print("Skipped underpasses table ready")
@@ -126,8 +126,8 @@ def setup_skipped_underpasses_table(conn):
 def setup_extended_geometries_table(conn):
     """Create extended_geometries table if it doesn't exist (don't drop if exists)."""
     with conn.cursor() as cursor:
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS underpasses.extended_geometries (
+        cursor.execute(f"""
+            CREATE TABLE IF NOT EXISTS {OUTPUT_TABLE} (
                 identificatie TEXT NOT NULL,
                 underpass_id INTEGER NOT NULL,
                 offset_distance DOUBLE PRECISION,
@@ -135,9 +135,9 @@ def setup_extended_geometries_table(conn):
                 PRIMARY KEY (identificatie, underpass_id)
             );
             
-            CREATE INDEX IF NOT EXISTS idx_extended_geom_identificatie ON underpasses.extended_geometries (identificatie);
-            CREATE INDEX IF NOT EXISTS idx_extended_geom_underpass_id ON underpasses.extended_geometries (underpass_id);
-            CREATE INDEX IF NOT EXISTS idx_extended_geom_spatial ON underpasses.extended_geometries USING GIST (geom);
+            CREATE INDEX IF NOT EXISTS idx_extended_geom_identificatie ON {OUTPUT_TABLE} (identificatie);
+            CREATE INDEX IF NOT EXISTS idx_extended_geom_underpass_id ON {OUTPUT_TABLE} (underpass_id);
+            CREATE INDEX IF NOT EXISTS idx_extended_geom_spatial ON {OUTPUT_TABLE} USING GIST (geom);
         """)
         conn.commit()
     print("Extended geometries table ready (preserving existing data)")
@@ -146,13 +146,13 @@ def setup_extended_geometries_table(conn):
 def get_underpass_chunks(conn) -> List[List[int]]:
     """Get underpass_id ranges for chunking, excluding already processed and skipped ones."""
     with conn.cursor() as cursor:
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT DISTINCT e.underpass_id 
-            FROM underpasses.edges e
-            LEFT JOIN underpasses.extended_geometries eg 
+            FROM {EDGES_TABLE} e
+            LEFT JOIN {OUTPUT_TABLE} eg 
                 ON e.underpass_id = eg.underpass_id 
                 AND e.identificatie = eg.identificatie
-            LEFT JOIN underpasses.skipped_underpasses su
+            LEFT JOIN {SKIPPED_TABLE} su
                 ON e.underpass_id = su.underpass_id 
                 AND e.identificatie = su.identificatie
             WHERE e.geom IS NOT NULL 
@@ -216,10 +216,10 @@ def process_chunk(chunk: List[int], chunk_num: int, distance: float, db_params: 
         # 1. Batch-load ALL edges for this chunk in ONE query
         t0 = time.time()
         with conn.cursor() as cursor:
-            cursor.execute("""
+            cursor.execute(f"""
                 SELECT identificatie::text, underpass_id, edge_type,
                        ST_AsBinary(geom) AS edge_wkb
-                FROM underpasses.edges
+                FROM {EDGES_TABLE}
                 WHERE underpass_id = ANY(%s)
                   AND geom IS NOT NULL AND NOT ST_IsEmpty(geom)
                 ORDER BY identificatie, underpass_id, edge_type
@@ -281,8 +281,8 @@ def process_chunk(chunk: List[int], chunk_num: int, distance: float, db_params: 
         if batch_inserts:
             print(f"💾 Chunk {chunk_num}: Inserting {len(batch_inserts)} records...")
             with conn.cursor() as cursor:
-                cursor.executemany("""
-                    INSERT INTO underpasses.extended_geometries
+                cursor.executemany(f"""
+                    INSERT INTO {OUTPUT_TABLE}
                     (identificatie, underpass_id, offset_distance, geom)
                     VALUES (%s, %s, %s, ST_GeomFromWKB(%s, 28992))
                     ON CONFLICT (identificatie, underpass_id) DO NOTHING
@@ -292,8 +292,8 @@ def process_chunk(chunk: List[int], chunk_num: int, distance: float, db_params: 
         if skipped_inserts:
             print(f"💾 Chunk {chunk_num}: Recording {len(skipped_inserts)} skipped...")
             with conn.cursor() as cursor:
-                cursor.executemany("""
-                    INSERT INTO underpasses.skipped_underpasses
+                cursor.executemany(f"""
+                    INSERT INTO {SKIPPED_TABLE}
                     (identificatie, underpass_id, skip_reason)
                     VALUES (%s, %s, %s)
                     ON CONFLICT (identificatie, underpass_id) DO NOTHING
