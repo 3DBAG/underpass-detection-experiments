@@ -42,28 +42,22 @@ class FakeConnection:
 def test_load_edge_records_from_db_combines_shared_and_interior_edges() -> None:
     connection = FakeConnection(
         [
-            (
-                "building-1",
-                7,
-                to_wkb(
-                    MultiLineString(
-                        [[(4.0, 0.0), (4.0, 4.0)], [(4.0, 4.0), (0.0, 4.0)]]
-                    )
-                ),
-                to_wkb(LineString([(0.0, 4.0), (0.0, 0.0)])),
-                to_wkb(LineString([(0.0, 0.0), (4.0, 0.0)])),
-            )
+            # Multiple edge rows for one underpass
+            ("building-1", 7, "exterior", to_wkb(LineString([(4.0, 0.0), (4.0, 4.0)]))),
+            ("building-1", 7, "exterior", to_wkb(LineString([(4.0, 4.0), (0.0, 4.0)]))),
+            ("building-1", 7, "shared", to_wkb(LineString([(0.0, 4.0), (0.0, 0.0)]))),
+            ("building-1", 7, "interior", to_wkb(LineString([(0.0, 0.0), (4.0, 0.0)]))),
         ]
     )
 
     records = load_edge_records_from_db(
         connection,
-        edges_table=Identifier("underpasses_edge_extension", "edges"),
+        edges_table=Identifier("underpasses", "edges"),
     )
 
     assert len(records) == 1
     assert records[0].identificatie == "building-1"
-    assert records[0].poly_id == 7
+    assert records[0].underpass_id == 7
     assert len(records[0].movable_edges.geoms) == 2
     assert len(records[0].fixed_edges.geoms) == 2
     assert connection.cursor_instance.executed_query is not None
@@ -72,23 +66,17 @@ def test_load_edge_records_from_db_combines_shared_and_interior_edges() -> None:
 def test_offset_polygon_features_from_db_offsets_all_rows() -> None:
     connection = FakeConnection(
         [
-            (
-                "building-1",
-                7,
-                to_wkb(
-                    MultiLineString(
-                        [[(4.0, 0.0), (4.0, 4.0)], [(4.0, 4.0), (0.0, 4.0)]]
-                    )
-                ),
-                to_wkb(LineString([(0.0, 4.0), (0.0, 0.0)])),
-                to_wkb(LineString([(0.0, 0.0), (4.0, 0.0)])),
-            )
+            # Multiple edge rows for one underpass
+            ("building-1", 7, "exterior", to_wkb(LineString([(4.0, 0.0), (4.0, 4.0)]))),
+            ("building-1", 7, "exterior", to_wkb(LineString([(4.0, 4.0), (0.0, 4.0)]))),
+            ("building-1", 7, "shared", to_wkb(LineString([(0.0, 4.0), (0.0, 0.0)]))),
+            ("building-1", 7, "interior", to_wkb(LineString([(0.0, 0.0), (4.0, 0.0)]))),
         ]
     )
 
     features = offset_polygon_features_from_db(
         connection,
-        edges_table=Identifier("underpasses_edge_extension", "edges"),
+        edges_table=Identifier("underpasses", "edges"),
         distance=1.0,
     )
 
@@ -97,7 +85,7 @@ def test_offset_polygon_features_from_db_offsets_all_rows() -> None:
         Polygon([(0.0, 0.0), (5.0, 0.0), (5.0, 5.0), (0.0, 5.0)])
     )
     assert features[0].properties["identificatie"] == "building-1"
-    assert features[0].properties["poly_id"] == 7
+    assert features[0].properties["underpass_id"] == 7
     assert features[0].properties["strategy"] == "boolean_patch"
 
 
@@ -106,24 +94,18 @@ def test_write_offset_polygons_from_db_writes_feature_collection(
 ) -> None:
     connection = FakeConnection(
         [
-            (
-                "building-1",
-                7,
-                to_wkb(
-                    MultiLineString(
-                        [[(4.0, 0.0), (4.0, 4.0)], [(4.0, 4.0), (0.0, 4.0)]]
-                    )
-                ),
-                to_wkb(LineString([(0.0, 4.0), (0.0, 0.0)])),
-                to_wkb(LineString([(0.0, 0.0), (4.0, 0.0)])),
-            )
+            # Multiple edge rows for one underpass
+            ("building-1", 7, "exterior", to_wkb(LineString([(4.0, 0.0), (4.0, 4.0)]))),
+            ("building-1", 7, "exterior", to_wkb(LineString([(4.0, 4.0), (0.0, 4.0)]))),
+            ("building-1", 7, "shared", to_wkb(LineString([(0.0, 4.0), (0.0, 0.0)]))),
+            ("building-1", 7, "interior", to_wkb(LineString([(0.0, 0.0), (4.0, 0.0)]))),
         ]
     )
     output_path = tmp_path / "offset_polygons.geojson"
 
     features = write_offset_polygons_from_db(
         connection,
-        edges_table=Identifier("underpasses_edge_extension", "edges"),
+        edges_table=Identifier("underpasses", "edges"),
         distance=1.0,
         output_path=output_path,
     )

@@ -5,6 +5,17 @@ from edge_offset.polygon_ops import EdgeOffset
 from edge_offset.polygon_ops import offset_polygon_edges
 
 
+def test_offset_empty_polygon() -> None:
+    polygon = Polygon()
+
+    updated = offset_polygon_edges(
+        polygon,
+        [EdgeOffset(edge_index=1, distance=2.0)],
+    )
+
+    assert updated.equals(Polygon())
+
+
 def test_offset_polygon_edges_moves_one_edge_outward() -> None:
     polygon = Polygon([(0, 0), (4, 0), (4, 4), (0, 4)])
 

@@ -5,7 +5,7 @@
       "type": "Feature",
       "properties": {
         "identificatie": "NL.IMBAG.Pand.0363100012165490",
-        "poly_id": 118
+        "underpass_id": 118
       },
       "geometry": {
         "type": "MultiLineString",

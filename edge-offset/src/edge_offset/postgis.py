@@ -19,7 +19,7 @@ from edge_offset.rings import classify_polygon_from_edge_sets
 @dataclass(frozen=True, slots=True)
 class EdgeRecord:
     identificatie: str
-    poly_id: int
+    underpass_id: int
     movable_edges: MultiLineString
     fixed_edges: MultiLineString
 
@@ -33,33 +33,51 @@ def load_edge_records_from_db(
         """
         SELECT
             identificatie::text,
-            poly_id,
-            ST_AsBinary(ST_CollectionExtract(exterior_edges, 2)) AS exterior_edges_wkb,
-            ST_AsBinary(ST_CollectionExtract(shared_edges, 2)) AS shared_edges_wkb,
-            ST_AsBinary(ST_CollectionExtract(interior_edges, 2)) AS interior_edges_wkb
+            underpass_id,
+            edge_type,
+            ST_AsBinary(geom) AS edge_wkb
         FROM {edges_table}
-        ORDER BY identificatie, poly_id
+        WHERE geom IS NOT NULL AND NOT ST_IsEmpty(geom)
+        ORDER BY identificatie, underpass_id, edge_type
         """
     ).format(edges_table=edges_table)
 
-    records: list[EdgeRecord] = []
+    # Group edges by identificatie and underpass_id
+    edge_groups: dict[tuple[str, int], dict[str, list[bytes]]] = {}
+    
     with connection.cursor() as cursor:
         cursor.execute(query)
         for row in cursor.fetchall():
-            identificatie, poly_id, movable_wkb, shared_wkb, interior_wkb = row
-            movable_edges = _load_multiline_from_wkb(movable_wkb)
-            fixed_edges = merge_multiline_geometries(
-                _load_geometry_from_wkb(shared_wkb),
-                _load_geometry_from_wkb(interior_wkb),
+            identificatie, underpass_id, edge_type, edge_wkb = row
+            key = (str(identificatie), int(underpass_id))
+            
+            if key not in edge_groups:
+                edge_groups[key] = {'exterior': [], 'shared': [], 'interior': []}
+            
+            if edge_type in edge_groups[key] and edge_wkb is not None:
+                edge_groups[key][edge_type].append(edge_wkb)
+
+    # Build EdgeRecord objects
+    records: list[EdgeRecord] = []
+    
+    for (identificatie, underpass_id), edge_types in edge_groups.items():
+        # Convert exterior edges to movable_edges MultiLineString
+        exterior_geometries = [_load_geometry_from_wkb(wkb) for wkb in edge_types['exterior']]
+        movable_edges = merge_multiline_geometries(*exterior_geometries)
+        
+        # Convert shared and interior edges to fixed_edges MultiLineString  
+        shared_geometries = [_load_geometry_from_wkb(wkb) for wkb in edge_types['shared']]
+        interior_geometries = [_load_geometry_from_wkb(wkb) for wkb in edge_types['interior']]
+        fixed_edges = merge_multiline_geometries(*(shared_geometries + interior_geometries))
+        
+        records.append(
+            EdgeRecord(
+                identificatie=identificatie,
+                underpass_id=underpass_id,
+                movable_edges=movable_edges,
+                fixed_edges=fixed_edges,
             )
-            records.append(
-                EdgeRecord(
-                    identificatie=str(identificatie),
-                    poly_id=int(poly_id),
-                    movable_edges=movable_edges,
-                    fixed_edges=fixed_edges,
-                )
-            )
+        )
 
     return tuple(records)
 
@@ -79,6 +97,7 @@ def offset_polygon_features_from_db(
 
     features: list[Feature] = []
     for record in records:
+        #print(f"Processing underpass {record.identificatie} (ID: {record.underpass_id}) with {len(record.movable_edges.geoms)} movable edges and {len(record.fixed_edges.geoms)} fixed edges.")
         classified_polygon = classify_polygon_from_edge_sets(
             movable_edges=record.movable_edges,
             fixed_edges=record.fixed_edges,
@@ -95,7 +114,7 @@ def offset_polygon_features_from_db(
                 geometry=polygon,
                 properties={
                     "identificatie": record.identificatie,
-                    "poly_id": record.poly_id,
+                    "underpass_id": record.underpass_id,
                     "offset_distance": distance,
                     "strategy": strategy,
                 },

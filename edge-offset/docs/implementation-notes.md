@@ -136,8 +136,8 @@
 ### Near-Parallel Spike Fix
 
 - Two live database rows produced incorrect offset spikes:
-  `identificatie='NL.IMBAG.Pand.0363100012165490', poly_id=118` and
-  `identificatie='NL.IMBAG.Pand.0363100012165490', poly_id=119`.
+  `identificatie='NL.IMBAG.Pand.0363100012165490', underpass_id=118` and
+  `identificatie='NL.IMBAG.Pand.0363100012165490', underpass_id=119`.
 - Both failures came from a near-parallel join between a movable chain edge and its neighboring
   fixed edge.
 - The previous implementation accepted the infinite-line intersection at that join, which created a

@@ -129,7 +129,7 @@ def test_offset_polygon_falls_back_to_original_polygon_when_result_is_invalid(
 
 
 @pytest.mark.parametrize(
-    ("poly_id", "expected_bounds", "expected_area_gain"),
+    ("underpass_id", "expected_bounds", "expected_area_gain"),
     [
         (
             118,
@@ -145,16 +145,16 @@ def test_offset_polygon_falls_back_to_original_polygon_when_result_is_invalid(
 )
 @pytest.mark.parametrize("strategy", ["boolean_patch", "linework"])
 def test_offset_polygon_from_edge_geojson_limits_near_parallel_miters(
-    poly_id: int,
+    underpass_id: int,
     expected_bounds: tuple[float, float, float, float],
     expected_area_gain: float,
     strategy: str,
 ) -> None:
     data_dir = Path(__file__).resolve().parent / "data"
     movable_edges_path = (
-        data_dir / f"pand_0363100012165490_poly_{poly_id}_movable.geojson"
+        data_dir / f"pand_0363100012165490_poly_{underpass_id}_movable.geojson"
     )
-    fixed_edges_path = data_dir / f"pand_0363100012165490_poly_{poly_id}_fixed.geojson"
+    fixed_edges_path = data_dir / f"pand_0363100012165490_poly_{underpass_id}_fixed.geojson"
 
     original = load_polygon_from_edge_geojson(
         movable_edges_path=movable_edges_path,
