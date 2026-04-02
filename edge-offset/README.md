@@ -83,9 +83,12 @@ with connect(host="localhost", port=5557, dbname="baseregisters", user="bdukai")
 
 `edge_offset.postgis` expects:
 
-- `exterior_edges` as movable linework
-- `shared_edges` and `interior_edges` as fixed linework
-- one output feature per `identificatie` / `underpass_id` row
+- Individual edge rows with `edge_type` of 'exterior' (movable linework - edges that can be offset)
+- Individual edge rows with `edge_type` of 'shared' (fixed linework - edges shared with adjacent buildings)
+- Individual edge rows with `edge_type` of 'interior' (fixed linework - edges inside the underpass area)
+- Edge table structure: `edge_id`, `underpass_id`, `identificatie`, `edge_type`, `geom`
+- LineString geometries (created by ST_Dump of merged linework from edges.sql)
+- One output feature per unique `identificatie` / `underpass_id` combination
 
 ## Local Export Script
 
