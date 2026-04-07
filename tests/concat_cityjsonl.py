@@ -1,3 +1,7 @@
+# /// script
+# requires-python = ">=3.12"
+# dependencies = []
+# ///
 """Concatenate .city.jsonl files from a single directory into one file.
 
 The output file is named after the source directory and placed in the output
