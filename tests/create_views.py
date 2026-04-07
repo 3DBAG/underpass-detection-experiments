@@ -90,33 +90,50 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def extract_bbox(path: Path) -> tuple[float, float, float, float, int] | None:
-    """Return (minx, miny, maxx, maxy, srid) from the metadata line of a CityJSONL file."""
+    """Return (minx, miny, maxx, maxy, srid) by unioning all CityObject extents in the file.
+
+    The first line is the dataset metadata (no geographicalExtent). Subsequent lines
+    are CityJSONFeature objects whose CityObjects each carry a geographicalExtent.
+    """
     with path.open(encoding="utf-8") as f:
         first_line = f.readline()
-    if not first_line.strip():
+        if not first_line.strip():
+            return None
+        try:
+            obj = json.loads(first_line)
+        except json.JSONDecodeError:
+            return None
+
+        ref_sys = obj.get("metadata", {}).get("referenceSystem", "")
+        try:
+            epsg = int(ref_sys.rstrip("/").rsplit("/", 1)[-1])
+        except (ValueError, IndexError):
+            epsg = 28992  # fallback for Dutch data
+        srid = SRID_3D_TO_2D.get(epsg, epsg)
+
+        min_x = min_y = float("inf")
+        max_x = max_y = float("-inf")
+
+        for line in f:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                feature = json.loads(stripped)
+            except json.JSONDecodeError:
+                continue
+            for city_obj in feature.get("CityObjects", {}).values():
+                extent = city_obj.get("geographicalExtent")
+                if not extent or len(extent) != 6:
+                    continue
+                min_x = min(min_x, extent[0])
+                min_y = min(min_y, extent[1])
+                max_x = max(max_x, extent[3])
+                max_y = max(max_y, extent[4])
+
+    if min_x == float("inf"):
         return None
-
-    try:
-        obj = json.loads(first_line)
-    except json.JSONDecodeError:
-        return None
-
-    metadata = obj.get("metadata", {})
-    extent = metadata.get("geographicalExtent")
-    ref_sys = metadata.get("referenceSystem", "")
-
-    if not extent or len(extent) != 6:
-        return None
-
-    minx, miny, _minz, maxx, maxy, _maxz = extent
-
-    try:
-        epsg = int(ref_sys.rstrip("/").rsplit("/", 1)[-1])
-    except (ValueError, IndexError):
-        epsg = 28992  # fallback for Dutch data
-
-    srid = SRID_3D_TO_2D.get(epsg, epsg)
-    return minx, miny, maxx, maxy, srid
+    return min_x, min_y, max_x, max_y, srid
 
 
 def create_view(
