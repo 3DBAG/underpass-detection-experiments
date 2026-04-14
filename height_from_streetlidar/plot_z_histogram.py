@@ -10,10 +10,11 @@ from height_estimation import (
     iter_rings,
 )
 
-try:
-    import rerun as rr
-except ImportError:
-    rr = None
+# try:
+#     import rerun as rr
+# except ImportError:
+#     rr = None
+rr = None
 
 # Optional diagnostic rows in the matplotlib output.
 SHOW_EXCLUSIVE_ROW = False
