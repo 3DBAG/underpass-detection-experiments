@@ -51,10 +51,11 @@ psutil.cpu_percent(interval=None)
 HEIGHT_ATTR: str = "h_underpass"
 ID_ATTR: str = "identificatie"
 METHOD: str = "manifold"
-DB_CONN_TEMPLATE: str = (
-    "PG:dbname='baseregisters' host=localhost port=5432 "
-    "user=bdukai tables=underpasses.u_{stem}(geom)"
-)
+DB_HOST: str = os.environ.get("UNDERPASS_DB_HOST", "localhost")
+DB_PORT: str = os.environ.get("UNDERPASS_DB_PORT", "5432")
+DB_NAME: str = os.environ.get("UNDERPASS_DB_NAME", "baseregisters")
+DB_USER: str = os.environ.get("UNDERPASS_DB_USER", "rypeters")
+DB_TABLE: str = os.environ.get("UNDERPASS_POLYGON_TABLE", "underpasses.extended_geometries_2")
 CITY_JSONL_SUFFIX: str = ".city.jsonl"
 
 CSV_FIELDNAMES: list[str] = [
@@ -133,8 +134,10 @@ def snapshot_system_load() -> SystemLoadSnapshot:
 
 def build_command(executable: Path, input_file: Path, output_file: Path) -> list[str]:
     """Return the argv list for add_underpass."""
-    stem = input_file.name.removesuffix(CITY_JSONL_SUFFIX)
-    ogr_source = DB_CONN_TEMPLATE.format(stem=stem)
+    ogr_source = (
+        f"PG:dbname='{DB_NAME}' host={DB_HOST} port={DB_PORT} "
+        f"user={DB_USER} tables={DB_TABLE}(geom)"
+    )
     return [
         str(executable),
         ogr_source,
