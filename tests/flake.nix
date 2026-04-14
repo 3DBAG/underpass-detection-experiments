@@ -19,21 +19,20 @@
       devShells = forAllSystems (system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
-          python = pkgs.python312.withPackages (ps: with ps; [
-            laspy
-            lazrs
-            numpy
-            psycopg
-            shapely
-          ]);
+          py = pkgs.python312Packages;
         in
         {
           default = pkgs.mkShell {
             packages = [
+              pkgs.python312
+              py.laspy
+              py.lazrs
+              py.numpy
+              py.psycopg
+              py.shapely
               pkgs.zig
               pkgs.zls
               pkgs.postgresql
-              python
             ];
 
             shellHook = ''
