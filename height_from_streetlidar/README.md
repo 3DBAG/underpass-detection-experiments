@@ -96,6 +96,12 @@ Script output:
 From this directory:
 
 ```bash
+nix develop -c python3 estimate_heights.py
+```
+
+Run the diagnostic plot/Rerun workflow:
+
+```bash
 nix develop -c python3 plot_z_histogram.py
 ```
 
@@ -104,10 +110,22 @@ nix develop -c python3 plot_z_histogram.py
 Use Python 3. Then install the required packages:
 
 ```bash
-python3 -m pip install laspy matplotlib numpy rerun-sdk shapely
+python3 -m pip install laspy matplotlib numpy shapely
+```
+
+Rerun visualization is optional:
+
+```bash
+python3 -m pip install rerun-sdk
 ```
 
 Run the script:
+
+```bash
+python3 estimate_heights.py
+```
+
+Run the diagnostic plot/Rerun workflow:
 
 ```bash
 python3 plot_z_histogram.py
@@ -115,7 +133,10 @@ python3 plot_z_histogram.py
 
 ## Files
 
-- `plot_z_histogram.py`: main analysis and plotting script
+- `height_estimation.py`: plot-free height estimation core
+- `estimate_heights.py`: height-only CSV script
+- `plot_z_histogram.py`: diagnostic plotting and Rerun script
+- `cases.py`: shared input case list
 - `flake.nix`: Nix development shell with Python dependencies
 - `underpass_heights.csv`: CSV summary written by the script
 - `images/`: example point-cloud screenshots and BAG-specific script outputs
