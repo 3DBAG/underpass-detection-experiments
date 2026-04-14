@@ -212,6 +212,43 @@ def build_grid(x, y, x_edges, y_edges):
     return grid.T
 
 
+def precompute_xy_grid_indices(x, y, x_edges, y_edges):
+    rows = len(y_edges) - 1
+    cols = len(x_edges) - 1
+
+    x_idx = np.searchsorted(x_edges, x, side="right") - 1
+    y_idx = np.searchsorted(y_edges, y, side="right") - 1
+
+    # Match numpy.histogram2d edge semantics: include points exactly on the
+    # final edge in the last bin.
+    x_idx = np.where((x_idx == cols) & (x == x_edges[-1]), cols - 1, x_idx)
+    y_idx = np.where((y_idx == rows) & (y == y_edges[-1]), rows - 1, y_idx)
+
+    valid = (
+        (x_idx >= 0)
+        & (x_idx < cols)
+        & (y_idx >= 0)
+        & (y_idx < rows)
+    )
+    flat_cell_idx = y_idx * cols + x_idx
+    return rows, cols, flat_cell_idx, valid
+
+
+def build_grid_from_precomputed_indices(flat_cell_idx, valid_xy, z_mask, rows, cols):
+    valid = valid_xy & z_mask
+    grid = np.bincount(flat_cell_idx[valid], minlength=rows * cols).reshape(rows, cols)
+    return grid.astype(float)
+
+
+def precompute_xyz_bin_indices(x, y, z, x_edges, y_edges, bin_edges):
+    rows = len(y_edges) - 1
+    cols = len(x_edges) - 1
+    x_idx = np.searchsorted(x_edges, x, side="right") - 1
+    y_idx = np.searchsorted(y_edges, y, side="right") - 1
+    z_idx = np.searchsorted(bin_edges, z, side="right") - 1
+    return rows, cols, x_idx, y_idx, z_idx
+
+
 def build_vertical_wall_mask(
     x,
     y,
@@ -239,6 +276,68 @@ def build_vertical_wall_mask(
     x_idx = np.searchsorted(x_edges, x, side="right") - 1
     y_idx = np.searchsorted(y_edges, y, side="right") - 1
     z_idx = np.searchsorted(bin_edges, z, side="right") - 1
+
+    bin_count = len(bin_edges) - 1
+    valid = (
+        (x_idx >= 0)
+        & (x_idx < cols)
+        & (y_idx >= 0)
+        & (y_idx < rows)
+        & (z_idx >= start_idx)
+        & (z_idx <= stop_idx)
+        & (z_idx < bin_count)
+    )
+    if not np.any(valid):
+        return wall_mask
+
+    interval_bin_count = stop_idx - start_idx + 1
+    occupied_bins = np.zeros((rows * cols, interval_bin_count), dtype=bool)
+    flat_cell_idx = y_idx[valid] * cols + x_idx[valid]
+    interval_z_idx = z_idx[valid] - start_idx
+    occupied_bins[flat_cell_idx, interval_z_idx] = True
+
+    occupied_fraction = occupied_bins.mean(axis=1)
+    endpoint_hits = occupied_bins[:, 0] & occupied_bins[:, -1]
+
+    empty_bins = ~occupied_bins
+    padded_empty_bins = np.pad(empty_bins.astype(np.int16), ((0, 0), (1, 1)), constant_values=0)
+    transitions = np.diff(padded_empty_bins, axis=1)
+    run_starts = transitions == 1
+    run_stops = transitions == -1
+    run_lengths = np.where(run_stops)[1] - np.where(run_starts)[1]
+    max_empty_run = np.zeros(rows * cols, dtype=int)
+    if len(run_lengths) > 0:
+        np.maximum.at(max_empty_run, np.where(run_starts)[0], run_lengths)
+
+    wall_mask.flat[:] = (
+        endpoint_hits
+        & (occupied_fraction >= min_bin_fraction)
+        & (max_empty_run <= max_empty_run_bins)
+    )
+    return wall_mask
+
+
+def build_vertical_wall_mask_from_precomputed_indices(
+    rows,
+    cols,
+    x_idx,
+    y_idx,
+    z_idx,
+    bin_edges,
+    lower_peak_idx,
+    upper_peak_idx,
+    min_bin_fraction,
+    max_empty_run_bins,
+):
+    wall_mask = np.zeros((rows, cols), dtype=bool)
+
+    if rows == 0 or cols == 0:
+        return wall_mask
+
+    start_idx = min(lower_peak_idx, upper_peak_idx)
+    stop_idx = max(lower_peak_idx, upper_peak_idx)
+    if stop_idx <= start_idx:
+        return wall_mask
 
     bin_count = len(bin_edges) - 1
     valid = (
@@ -371,6 +470,27 @@ def estimate_underpass_height(las_path, gpkg_path, verbose=True):
     if y_edges[-1] < max_y:
         y_edges = np.append(y_edges, max_y)
 
+    grid_rows, grid_cols, flat_grid_cell_idx, valid_grid_xy = precompute_xy_grid_indices(
+        x,
+        y,
+        x_edges,
+        y_edges,
+    )
+    (
+        wall_rows,
+        wall_cols,
+        wall_x_idx,
+        wall_y_idx,
+        wall_z_idx,
+    ) = precompute_xyz_bin_indices(
+        x,
+        y,
+        z,
+        x_edges,
+        y_edges,
+        bin_edges,
+    )
+
     z_min_all = np.min(z)
     z_max_all = np.max(z)
 
@@ -386,7 +506,13 @@ def estimate_underpass_height(las_path, gpkg_path, verbose=True):
             PEAK_BAND_WIDTH_METERS,
         )
         mask = band_mask(z, z_min, z_max)
-        grid = build_grid(x[mask], y[mask], x_edges, y_edges)
+        grid = build_grid_from_precomputed_indices(
+            flat_grid_cell_idx,
+            valid_grid_xy,
+            mask,
+            grid_rows,
+            grid_cols,
+        )
         area = np.count_nonzero(grid) * (GRID_CELLSIZE ** 2)
         return {
             "peak_idx": peak_idx,
@@ -477,12 +603,12 @@ def estimate_underpass_height(las_path, gpkg_path, verbose=True):
         lower_layer = display_peak_layers[upper_peak_idx - 1]
         upper_layer = display_peak_layers[upper_peak_idx]
         pairwise_wall_masks.append(
-            build_vertical_wall_mask(
-                x,
-                y,
-                z,
-                x_edges,
-                y_edges,
+            build_vertical_wall_mask_from_precomputed_indices(
+                wall_rows,
+                wall_cols,
+                wall_x_idx,
+                wall_y_idx,
+                wall_z_idx,
                 bin_edges,
                 lower_layer["refined_peak_idx"],
                 upper_layer["refined_peak_idx"],
