@@ -26,7 +26,6 @@
             laspy
             lazrs
             shapely
-            fiona
             pyproj
           ]);
         in

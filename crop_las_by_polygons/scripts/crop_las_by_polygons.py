@@ -3,17 +3,19 @@ from __future__ import annotations
 
 import argparse
 import re
+import sqlite3
+import struct
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
 from typing import Iterable
 
-import fiona
 import laspy
 import numpy as np
-from pyproj import CRS, Transformer
-from shapely.geometry import MultiPolygon, Polygon, mapping, shape
+from shapely import wkb
+from shapely.geometry import MultiPolygon, Polygon
 from shapely.ops import transform
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -82,6 +84,8 @@ def sanitize_filename(value: str) -> str:
 
 
 def las_crs(path: Path) -> CRS | None:
+    from pyproj import CRS
+
     with laspy.open(path) as reader:
         try:
             parsed = reader.header.parse_crs()
@@ -124,12 +128,161 @@ def validate_input_headers(paths: list[Path]) -> tuple[laspy.LasHeader, CRS | No
     return base_header, base_crs
 
 
-def source_crs(collection: fiona.Collection) -> CRS | None:
-    if collection.crs_wkt:
-        return CRS.from_wkt(collection.crs_wkt)
-    if collection.crs:
-        return CRS.from_user_input(collection.crs)
+def input_layer_metadata(path: Path, layer: str | None) -> tuple[str, str, int | None, str | None]:
+    with sqlite3.connect(path) as con:
+        if layer is None:
+            row = con.execute(
+                """
+                SELECT table_name
+                FROM gpkg_contents
+                WHERE data_type = 'features'
+                ORDER BY table_name
+                LIMIT 1
+                """
+            ).fetchone()
+            if row is None:
+                raise RuntimeError(f"No feature layers found in {path}")
+            layer_name = str(row[0])
+        else:
+            layer_name = layer
+
+        row = con.execute(
+            """
+            SELECT column_name, srs_id
+            FROM gpkg_geometry_columns
+            WHERE table_name = ?
+            LIMIT 1
+            """,
+            (layer_name,),
+        ).fetchone()
+        if row is None:
+            layers = [
+                str(value)
+                for (value,) in con.execute(
+                    "SELECT table_name FROM gpkg_contents WHERE data_type = 'features' ORDER BY table_name"
+                )
+            ]
+            raise RuntimeError(
+                f"Layer {layer_name!r} not found or has no geometry column. "
+                f"Available layers: {', '.join(layers) if layers else '(none)'}"
+            )
+
+        geom_column = str(row[0])
+        srs_id = int(row[1]) if row[1] is not None else None
+        srs_definition = None
+        if srs_id is not None:
+            srs_row = con.execute(
+                "SELECT definition FROM gpkg_spatial_ref_sys WHERE srs_id = ?",
+                (srs_id,),
+            ).fetchone()
+            if srs_row is not None:
+                srs_definition = str(srs_row[0])
+
+    return layer_name, geom_column, srs_id, srs_definition
+
+
+def crs_from_gpkg_srs(srs_id: int | None, srs_definition: str | None) -> CRS | None:
+    from pyproj import CRS
+
+    if srs_id is None:
+        return None
+    if srs_id > 0:
+        try:
+            return CRS.from_epsg(srs_id)
+        except Exception:
+            pass
+    if srs_definition and srs_definition not in ("undefined", ""):
+        try:
+            return CRS.from_wkt(srs_definition)
+        except Exception:
+            return None
     return None
+
+
+def gpkg_blob_to_geometry(blob):
+    blob = bytes(blob)
+    if blob[:2] != b"GP":
+        raise ValueError("Geometry blob is not in GeoPackage binary format")
+
+    flags = blob[3]
+    envelope_indicator = (flags >> 1) & 0b111
+    envelope_sizes = {
+        0: 0,
+        1: 32,
+        2: 48,
+        3: 48,
+        4: 64,
+    }
+    if envelope_indicator not in envelope_sizes:
+        raise ValueError(f"Unsupported GeoPackage envelope type: {envelope_indicator}")
+
+    wkb_offset = 8 + envelope_sizes[envelope_indicator]
+    return wkb.loads(blob[wkb_offset:])
+
+
+def geometry_to_gpkg_blob(geometry, srs_id: int) -> bytes:
+    minx, miny, maxx, maxy = geometry.bounds
+    flags = 0b00000011  # little endian GeoPackage header, XY envelope.
+    header = struct.pack("<2sBBi4d", b"GP", 0, flags, int(srs_id), minx, maxx, miny, maxy)
+    return header + bytes(geometry.wkb)
+
+
+def quote_identifier(identifier: str) -> str:
+    return '"' + identifier.replace('"', '""') + '"'
+
+
+def sqlite_declared_type_to_gpkg_type(declared_type: str) -> str:
+    upper = declared_type.upper()
+    if "INT" in upper:
+        return "INTEGER"
+    if any(token in upper for token in ("REAL", "FLOA", "DOUB", "NUM")):
+        return "REAL"
+    if "BLOB" in upper:
+        return "BLOB"
+    return "TEXT"
+
+
+def property_value_to_gpkg_type(value) -> str:
+    if isinstance(value, bool):
+        return "BOOLEAN"
+    if isinstance(value, int):
+        return "INTEGER"
+    if isinstance(value, float):
+        return "REAL"
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return "BLOB"
+    return "TEXT"
+
+
+def gpkg_property_schema(path: Path, layer_name: str, geometry_column: str) -> dict[str, str]:
+    with sqlite3.connect(path) as con:
+        rows = con.execute(f"PRAGMA table_info({quote_identifier(layer_name)})").fetchall()
+
+    schema: dict[str, str] = {}
+    for _, name, declared_type, *_ in rows:
+        if name == geometry_column or str(name).lower() == "fid":
+            continue
+        schema[str(name)] = sqlite_declared_type_to_gpkg_type(str(declared_type or "TEXT"))
+    return schema
+
+
+def iter_gpkg_features(path: Path, layer_name: str, geometry_column: str):
+    with sqlite3.connect(path) as con:
+        columns = [row[1] for row in con.execute(f"PRAGMA table_info({quote_identifier(layer_name)})")]
+        property_columns = [
+            str(column)
+            for column in columns
+            if column != geometry_column and str(column).lower() != "fid"
+        ]
+        select_columns = [quote_identifier(geometry_column)] + [
+            quote_identifier(column) for column in property_columns
+        ]
+        query = f"SELECT {', '.join(select_columns)} FROM {quote_identifier(layer_name)} WHERE {quote_identifier(geometry_column)} IS NOT NULL"
+
+        for row in con.execute(query):
+            geom_blob = row[0]
+            properties = dict(zip(property_columns, row[1:], strict=True))
+            yield gpkg_blob_to_geometry(geom_blob), properties
 
 
 def iter_polygons(geometry) -> Iterable[Polygon]:
@@ -284,24 +437,116 @@ def write_feature_gpkg(
     crs: CRS | None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    schema = {
-        "geometry": geometry.geom_type,
-        "properties": property_schema,
+    if path.exists():
+        path.unlink()
+
+    srs_id = crs.to_epsg() if crs is not None else None
+    if srs_id is None:
+        srs_id = 0
+    srs_name = crs.name if crs is not None else "Undefined Cartesian SRS"
+    srs_definition = crs.to_wkt() if crs is not None else "undefined"
+
+    property_schema = {
+        name: property_schema.get(name) or property_value_to_gpkg_type(value)
+        for name, value in properties.items()
     }
-    with fiona.open(
-        path,
-        mode="w",
-        driver="GPKG",
-        layer=layer_name,
-        schema=schema,
-        crs_wkt=crs.to_wkt() if crs else None,
-    ) as dst:
-        dst.write(
-            {
-                "geometry": mapping(geometry),
-                "properties": properties,
-            }
+    quoted_layer = quote_identifier(layer_name)
+    property_columns_sql = [
+        f"{quote_identifier(name)} {sqlite_declared_type_to_gpkg_type(type_name)}"
+        for name, type_name in property_schema.items()
+    ]
+    property_column_clause = ", " + ", ".join(property_columns_sql) if property_columns_sql else ""
+
+    minx, miny, maxx, maxy = geometry.bounds
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+    with sqlite3.connect(path) as con:
+        con.executescript(
+            """
+            PRAGMA application_id = 1196444487;
+            PRAGMA user_version = 10400;
+
+            CREATE TABLE gpkg_spatial_ref_sys (
+                srs_name TEXT NOT NULL,
+                srs_id INTEGER NOT NULL PRIMARY KEY,
+                organization TEXT NOT NULL,
+                organization_coordsys_id INTEGER NOT NULL,
+                definition TEXT NOT NULL,
+                description TEXT
+            );
+
+            CREATE TABLE gpkg_contents (
+                table_name TEXT NOT NULL PRIMARY KEY,
+                data_type TEXT NOT NULL,
+                identifier TEXT UNIQUE,
+                description TEXT DEFAULT '',
+                last_change DATETIME NOT NULL,
+                min_x DOUBLE,
+                min_y DOUBLE,
+                max_x DOUBLE,
+                max_y DOUBLE,
+                srs_id INTEGER,
+                CONSTRAINT fk_gc_r_srs_id FOREIGN KEY (srs_id) REFERENCES gpkg_spatial_ref_sys(srs_id)
+            );
+
+            CREATE TABLE gpkg_geometry_columns (
+                table_name TEXT NOT NULL,
+                column_name TEXT NOT NULL,
+                geometry_type_name TEXT NOT NULL,
+                srs_id INTEGER NOT NULL,
+                z TINYINT NOT NULL,
+                m TINYINT NOT NULL,
+                PRIMARY KEY (table_name, column_name),
+                CONSTRAINT fk_gc_tn FOREIGN KEY (table_name) REFERENCES gpkg_contents(table_name),
+                CONSTRAINT fk_gc_srs FOREIGN KEY (srs_id) REFERENCES gpkg_spatial_ref_sys(srs_id)
+            );
+            """
         )
+        con.executemany(
+            """
+            INSERT INTO gpkg_spatial_ref_sys
+            (srs_name, srs_id, organization, organization_coordsys_id, definition, description)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            [
+                ("Undefined Cartesian SRS", 0, "NONE", 0, "undefined", "undefined Cartesian coordinate reference system"),
+                (srs_name, int(srs_id), "EPSG" if int(srs_id) > 0 else "NONE", int(srs_id), srs_definition, None),
+            ]
+            if int(srs_id) != 0
+            else [
+                ("Undefined Cartesian SRS", 0, "NONE", 0, "undefined", "undefined Cartesian coordinate reference system"),
+            ],
+        )
+        con.execute(
+            f"CREATE TABLE {quoted_layer} (fid INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, geom BLOB NOT NULL{property_column_clause})"
+        )
+        con.execute(
+            """
+            INSERT INTO gpkg_contents
+            (table_name, data_type, identifier, description, last_change, min_x, min_y, max_x, max_y, srs_id)
+            VALUES (?, 'features', ?, '', ?, ?, ?, ?, ?, ?)
+            """,
+            (layer_name, layer_name, now, minx, miny, maxx, maxy, int(srs_id)),
+        )
+        con.execute(
+            """
+            INSERT INTO gpkg_geometry_columns
+            (table_name, column_name, geometry_type_name, srs_id, z, m)
+            VALUES (?, 'geom', ?, ?, 0, 0)
+            """,
+            (layer_name, geometry.geom_type.upper(), int(srs_id)),
+        )
+
+        insert_columns = ["geom"] + list(property_schema)
+        placeholders = ", ".join("?" for _ in insert_columns)
+        values = [geometry_to_gpkg_blob(geometry, int(srs_id))] + [
+            properties.get(name) for name in property_schema
+        ]
+        con.execute(
+            f"INSERT INTO {quoted_layer} ({', '.join(quote_identifier(column) for column in insert_columns)}) VALUES ({placeholders})",
+            values,
+        )
+        con.commit()
 
 
 def load_features(
@@ -315,82 +560,73 @@ def load_features(
     reproject: bool,
     timing: TimingStats,
 ) -> tuple[list[PreparedFeature], str, CRS | None]:
-    layers = fiona.listlayers(polygon_path)
-    if not layers:
-        raise RuntimeError(f"No layers found in {polygon_path}")
-
-    selected_layer = layer or layers[0]
-    if selected_layer not in layers:
-        raise RuntimeError(f"Layer {selected_layer!r} not found. Available layers: {', '.join(layers)}")
+    selected_layer, geometry_column, srs_id, srs_definition = input_layer_metadata(polygon_path, layer)
+    polygon_crs = crs_from_gpkg_srs(srs_id, srs_definition)
+    output_crs = target_crs if target_crs and polygon_crs and target_crs != polygon_crs and reproject else polygon_crs
+    property_schema = gpkg_property_schema(polygon_path, selected_layer, geometry_column)
 
     prepared: list[PreparedFeature] = []
     used_paths: set[Path] = set()
+    transform_fn = None
 
-    with fiona.open(polygon_path, layer=selected_layer) as src:
-        polygon_crs = source_crs(src)
-        output_crs = target_crs if target_crs and polygon_crs and target_crs != polygon_crs and reproject else polygon_crs
-        transform_fn = None
-
-        if target_crs and polygon_crs and target_crs != polygon_crs:
-            if not reproject:
-                raise RuntimeError(
-                    f"CRS mismatch: polygons are {polygon_crs.to_string()} while LAS is {target_crs.to_string()}. "
-                    "Pass --reproject-polygons to transform polygons into the LAS CRS."
-                )
-            transformer = Transformer.from_crs(polygon_crs, target_crs, always_xy=True)
-            transform_fn = transformer.transform
-
-        for feature in src:
-            if not feature.get("geometry"):
-                continue
-
-            geometry = shape(feature["geometry"])
-            if geometry.is_empty:
-                continue
-
-            if transform_fn is not None:
-                t0 = perf_counter()
-                geometry = transform(transform_fn, geometry)
-                timing.feature_transform_s += perf_counter() - t0
-
-            geometry = polygonal_geometry(geometry)
-            try:
-                t0 = perf_counter()
-                geometry = buffer_outer_rings(geometry, POLYGON_BUFFER_DISTANCE)
-                timing.feature_buffer_s += perf_counter() - t0
-            except ValueError:
-                continue
-
-            raw_id = feature["properties"].get(id_field) if feature.get("properties") else None
-            identifier = str(raw_id or feature.get("id") or f"feature_{len(prepared)}")
-            filename = sanitize_filename(identifier)
-            output_path = output_dir / f"{filename}{output_extension}"
-            polygon_output_path = output_dir / f"{filename}.gpkg"
-
-            suffix = 1
-            while output_path in used_paths:
-                output_path = output_dir / f"{filename}_{suffix}{output_extension}"
-                polygon_output_path = output_dir / f"{filename}_{suffix}.gpkg"
-                suffix += 1
-            used_paths.add(output_path)
-
-            t0 = perf_counter()
-            prepared_feature = prepare_feature(geometry, identifier, output_path, resolution)
-            timing.feature_prepare_s += perf_counter() - t0
-            prepared_feature.polygon_path = polygon_output_path
-            t0 = perf_counter()
-            write_feature_gpkg(
-                path=prepared_feature.polygon_path,
-                layer_name=selected_layer,
-                geometry=geometry,
-                properties=dict(feature["properties"] or {}),
-                property_schema=dict(src.schema["properties"]),
-                crs=output_crs,
+    if target_crs and polygon_crs and target_crs != polygon_crs:
+        if not reproject:
+            raise RuntimeError(
+                f"CRS mismatch: polygons are {polygon_crs.to_string()} while LAS is {target_crs.to_string()}. "
+                "Pass --reproject-polygons to transform polygons into the LAS CRS."
             )
-            timing.feature_write_gpkg_s += perf_counter() - t0
-            prepared.append(prepared_feature)
+        from pyproj import Transformer
 
-        return prepared, selected_layer, polygon_crs
+        transformer = Transformer.from_crs(polygon_crs, target_crs, always_xy=True)
+        transform_fn = transformer.transform
+
+    for geometry, properties in iter_gpkg_features(polygon_path, selected_layer, geometry_column):
+        if geometry.is_empty:
+            continue
+
+        if transform_fn is not None:
+            t0 = perf_counter()
+            geometry = transform(transform_fn, geometry)
+            timing.feature_transform_s += perf_counter() - t0
+
+        geometry = polygonal_geometry(geometry)
+        try:
+            t0 = perf_counter()
+            geometry = buffer_outer_rings(geometry, POLYGON_BUFFER_DISTANCE)
+            timing.feature_buffer_s += perf_counter() - t0
+        except ValueError:
+            continue
+
+        raw_id = properties.get(id_field)
+        identifier = str(raw_id or f"feature_{len(prepared)}")
+        filename = sanitize_filename(identifier)
+        output_path = output_dir / f"{filename}{output_extension}"
+        polygon_output_path = output_dir / f"{filename}.gpkg"
+
+        suffix = 1
+        while output_path in used_paths:
+            output_path = output_dir / f"{filename}_{suffix}{output_extension}"
+            polygon_output_path = output_dir / f"{filename}_{suffix}.gpkg"
+            suffix += 1
+        used_paths.add(output_path)
+
+        t0 = perf_counter()
+        prepared_feature = prepare_feature(geometry, identifier, output_path, resolution)
+        timing.feature_prepare_s += perf_counter() - t0
+        prepared_feature.polygon_path = polygon_output_path
+        t0 = perf_counter()
+        write_feature_gpkg(
+            path=prepared_feature.polygon_path,
+            layer_name=selected_layer,
+            geometry=geometry,
+            properties=properties,
+            property_schema=property_schema,
+            crs=output_crs,
+        )
+        timing.feature_write_gpkg_s += perf_counter() - t0
+        prepared.append(prepared_feature)
+
+    return prepared, selected_layer, polygon_crs
 
 
 def crop_point_cloud(
