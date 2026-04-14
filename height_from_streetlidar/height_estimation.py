@@ -428,16 +428,29 @@ def select_underpass_peak_indices(candidate_layers, area_key="largest_component_
     return [layer["peak_idx"] for layer in selected_layers]
 
 
-def estimate_underpass_height(las_path, gpkg_path, verbose=True):
-    bag_id = Path(las_path).stem
+def estimate_underpass_height_from_points(identifier, x, y, z, geometries, verbose=True):
+    bag_id = str(identifier)
 
     if verbose:
         print(f"\n=== {bag_id} ===")
 
-    las = laspy.read(las_path)
-    x = np.asarray(las.x, dtype=float)
-    y = np.asarray(las.y, dtype=float)
-    z = np.asarray(las.z, dtype=float)
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    z = np.asarray(z, dtype=float)
+    if x.shape != y.shape or x.shape != z.shape:
+        raise ValueError("x, y, and z arrays must have the same shape")
+
+    finite = np.isfinite(x) & np.isfinite(y) & np.isfinite(z)
+    if not finite.all():
+        x = x[finite]
+        y = y[finite]
+        z = z[finite]
+    if z.size == 0:
+        raise ValueError("No finite points available for height estimation")
+
+    geometries = [geometry for geometry in geometries if geometry is not None and not geometry.is_empty]
+    if not geometries:
+        raise ValueError("No polygon geometries available for height estimation")
 
     (
         counts,
@@ -451,7 +464,8 @@ def estimate_underpass_height(las_path, gpkg_path, verbose=True):
         smoothing_window=7,
         min_separation_bins=10,
     )
-    geometries = load_polygon_geometries(gpkg_path)
+    if not candidate_peak_indices:
+        raise ValueError("No Z histogram peaks found")
 
     min_x, min_y, max_x, max_y = geometry_bounds(geometries)
     x_edges = np.arange(min_x, max_x + GRID_CELLSIZE, GRID_CELLSIZE)
@@ -561,6 +575,8 @@ def estimate_underpass_height(las_path, gpkg_path, verbose=True):
     ]
     if not display_peak_layers and candidate_layers_by_height:
         display_peak_layers = [candidate_layers_by_height[0]]
+    if len(display_peak_layers) < 2:
+        raise ValueError("Fewer than two usable Z peaks found")
 
     if verbose:
         print(
@@ -639,6 +655,8 @@ def estimate_underpass_height(las_path, gpkg_path, verbose=True):
         display_peak_layers,
         area_key="exclusive_or_wall_largest_component_area",
     )
+    if len(peak_indices) < 2:
+        raise ValueError("Fewer than two underpass peaks selected")
     selected_peak_layers = [
         layer for layer in display_peak_layers
         if layer["peak_idx"] in peak_indices
@@ -690,3 +708,16 @@ def estimate_underpass_height(las_path, gpkg_path, verbose=True):
         "underpass_attributes": underpass_attributes,
         "underpass_metrics": underpass_metrics,
     }
+
+
+def estimate_underpass_height(las_path, gpkg_path, verbose=True):
+    las = laspy.read(las_path)
+    geometries = load_polygon_geometries(gpkg_path)
+    return estimate_underpass_height_from_points(
+        Path(las_path).stem,
+        np.asarray(las.x, dtype=float),
+        np.asarray(las.y, dtype=float),
+        np.asarray(las.z, dtype=float),
+        geometries,
+        verbose=verbose,
+    )
