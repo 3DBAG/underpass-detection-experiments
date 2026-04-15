@@ -48,11 +48,20 @@ class TimingStats:
     feature_buffer_s: float = 0.0
     feature_prepare_s: float = 0.0
     feature_write_gpkg_s: float = 0.0
+    tile_open_s: float = 0.0
+    chunk_read_s: float = 0.0
     chunk_coord_extract_s: float = 0.0
     chunk_feature_cull_s: float = 0.0
     pip_select_s: float = 0.0
     point_write_s: float = 0.0
+    height_estimation_s: float = 0.0
+    db_update_s: float = 0.0
     chunks: int = 0
+    tiles_opened: int = 0
+    unique_tiles_opened: int = 0
+    laz_bytes_seen: int = 0
+    points_read: int = 0
+    points_selected: int = 0
     active_features_total: int = 0
     active_features_max: int = 0
     feature_tests: int = 0
@@ -66,7 +75,13 @@ class TimingStats:
         return self.feature_transform_s + self.feature_buffer_s + self.feature_prepare_s + self.feature_write_gpkg_s
 
     def total_crop_s(self) -> float:
-        return self.chunk_coord_extract_s + self.chunk_feature_cull_s + self.pip_select_s + self.point_write_s
+        return (
+            self.chunk_read_s
+            + self.chunk_coord_extract_s
+            + self.chunk_feature_cull_s
+            + self.pip_select_s
+            + self.point_write_s
+        )
 
     def avg_active_features_per_chunk(self) -> float:
         return self.active_features_total / self.chunks if self.chunks else 0.0

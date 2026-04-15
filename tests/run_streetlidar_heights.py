@@ -17,11 +17,13 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import math
 import os
 import sqlite3
 import sys
 import time
 from collections import Counter, defaultdict
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Iterable
 
@@ -57,6 +59,11 @@ DEFAULT_DB_PORT = 5432
 DEFAULT_DB_NAME = "baseregisters"
 DEFAULT_DB_USER = "rypeters"
 DEFAULT_FALLBACK_HEIGHT = 2.5
+DEFAULT_HEIGHT_WORKERS = max(1, min(4, os.cpu_count() or 1))
+DEFAULT_PIP_WORKERS = max(1, min(4, os.cpu_count() or 1))
+DEFAULT_LAZ_BACKEND = "lazrs-parallel"
+DEFAULT_DECOMPRESSION = "xyz"
+DEFAULT_BATCH_WORKERS = 1
 
 RESULT_COLUMNS = {
     "h_underpass": "double precision",
@@ -141,6 +148,37 @@ class HeightResult:
     error: str | None = None
 
 
+@dataclasses.dataclass
+class HeightEstimationTask:
+    identificatie: str
+    underpass_id: int
+    key: str
+    crop_geometry: object
+    x: np.ndarray
+    y: np.ndarray
+    z: np.ndarray
+    point_count: int
+    laz_count: int
+    error_text: str | None
+    fallback_height: float
+
+
+@dataclasses.dataclass
+class SpatialBatch:
+    grid_x: int
+    grid_y: int
+    part: int
+    records: list[UnderpassRecord]
+
+
+@dataclasses.dataclass
+class BatchWorkerResult:
+    batch_index: int
+    results: list[HeightResult]
+    timing: TimingStats
+    elapsed_s: float
+
+
 class TileIndex:
     def __init__(self, tiles: list[TileRecord]) -> None:
         self.tiles = tiles
@@ -163,6 +201,10 @@ class TileIndex:
         return tiles
 
 
+BATCH_WORKER_ARGS: argparse.Namespace | None = None
+BATCH_WORKER_TILE_INDEX: TileIndex | None = None
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--index", type=Path, default=DEFAULT_INDEX_PATH)
@@ -174,7 +216,33 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--db-name", default=os.environ.get("UNDERPASS_DB_NAME", DEFAULT_DB_NAME))
     parser.add_argument("--db-user", default=os.environ.get("UNDERPASS_DB_USER", DEFAULT_DB_USER))
     parser.add_argument("--batch-size", type=int, default=200)
+    parser.add_argument(
+        "--batch-workers",
+        type=int,
+        default=DEFAULT_BATCH_WORKERS,
+        help="Process spatial batches in parallel. DB updates still happen in the parent process.",
+    )
+    parser.add_argument("--grid-cell-size", type=float, default=200.0)
     parser.add_argument("--chunk-size", type=int, default=1_000_000)
+    parser.add_argument(
+        "--laz-backend",
+        choices=("auto", "lazrs-parallel", "lazrs", "laszip"),
+        default=DEFAULT_LAZ_BACKEND,
+        help="LAZ decompression backend. lazrs-parallel is usually fastest when available.",
+    )
+    parser.add_argument(
+        "--decompression",
+        choices=("all", "xyz"),
+        default=DEFAULT_DECOMPRESSION,
+        help="LAZ dimensions to decompress. xyz skips unused attributes.",
+    )
+    parser.add_argument("--height-workers", type=int, default=DEFAULT_HEIGHT_WORKERS)
+    parser.add_argument(
+        "--pip-workers",
+        type=int,
+        default=DEFAULT_PIP_WORKERS,
+        help="Thread workers for point-in-polygon selection within each sequentially read LAZ chunk.",
+    )
     parser.add_argument("--resolution", type=int, default=64)
     parser.add_argument("--min-points", type=int, default=100)
     parser.add_argument("--max-points-per-underpass", type=int, default=5_000_000)
@@ -227,6 +295,26 @@ def connect_db(args: argparse.Namespace) -> psycopg.Connection:
     )
 
 
+def laz_open_options(args: argparse.Namespace) -> dict[str, object]:
+    options: dict[str, object] = {}
+
+    backend_by_name = {
+        "lazrs-parallel": laspy.LazBackend.LazrsParallel,
+        "lazrs": laspy.LazBackend.Lazrs,
+        "laszip": laspy.LazBackend.Laszip,
+    }
+    if args.laz_backend != "auto":
+        options["laz_backend"] = backend_by_name[args.laz_backend]
+
+    if args.decompression == "xyz":
+        options["decompression_selection"] = (
+            laspy.DecompressionSelection.XY_RETURNS_CHANNEL
+            | laspy.DecompressionSelection.Z
+        )
+
+    return options
+
+
 def ensure_result_columns(conn: psycopg.Connection, table_name: str) -> None:
     table = table_identifier(table_name)
     with conn.cursor() as cur:
@@ -272,12 +360,16 @@ def fetch_pending_records(conn: psycopg.Connection, args: argparse.Namespace) ->
         SELECT identificatie::text, underpass_id::integer, ST_AsBinary(geom)
         FROM {table}
         WHERE {conditions}
-        ORDER BY underpass_id
+        ORDER BY
+            floor(ST_X(ST_PointOnSurface(geom)) / %s),
+            floor(ST_Y(ST_PointOnSurface(geom)) / %s),
+            underpass_id
         """
     ).format(
         table=table_identifier(args.table),
         conditions=sql.SQL(" AND ").join(conditions),
     )
+    params.extend([args.grid_cell_size, args.grid_cell_size])
 
     if args.limit is not None:
         query += sql.SQL(" LIMIT %s")
@@ -364,15 +456,111 @@ def fallback_result(
     fallback_height: float,
     error: str | None,
 ) -> HeightResult:
+    return fallback_result_values(
+        record.identificatie,
+        record.underpass_id,
+        status,
+        point_count,
+        laz_count,
+        fallback_height,
+        error,
+    )
+
+
+def fallback_result_values(
+    identificatie: str,
+    underpass_id: int,
+    status: str,
+    point_count: int,
+    laz_count: int,
+    fallback_height: float,
+    error: str | None,
+) -> HeightResult:
     return HeightResult(
-        identificatie=record.identificatie,
-        underpass_id=record.underpass_id,
+        identificatie=identificatie,
+        underpass_id=underpass_id,
         status=status,
         h_underpass=fallback_height,
         point_count=point_count,
         laz_count=laz_count,
         error=error,
     )
+
+
+def run_height_estimation_task(task: HeightEstimationTask) -> HeightResult:
+    try:
+        estimate = estimate_underpass_height_from_points(
+            task.key,
+            task.x,
+            task.y,
+            task.z,
+            [task.crop_geometry],
+            verbose=False,
+        )
+        metrics = estimate["underpass_metrics"]
+        return HeightResult(
+            identificatie=task.identificatie,
+            underpass_id=task.underpass_id,
+            status="success",
+            h_underpass=float(metrics["underpass_h"]),
+            z_min=float(metrics["underpass_z_min"]),
+            z_max=float(metrics["underpass_z_max"]),
+            point_count=task.point_count,
+            laz_count=task.laz_count,
+            error=task.error_text,
+        )
+    except Exception as exc:
+        return fallback_result_values(
+            task.identificatie,
+            task.underpass_id,
+            status="failed",
+            point_count=task.point_count,
+            laz_count=task.laz_count,
+            fallback_height=task.fallback_height,
+            error=short_error(exc),
+        )
+
+
+def merge_timing_stats(target: TimingStats, source: TimingStats) -> None:
+    target.feature_transform_s += source.feature_transform_s
+    target.feature_buffer_s += source.feature_buffer_s
+    target.feature_prepare_s += source.feature_prepare_s
+    target.feature_write_gpkg_s += source.feature_write_gpkg_s
+    target.tile_open_s += source.tile_open_s
+    target.chunk_read_s += source.chunk_read_s
+    target.chunk_coord_extract_s += source.chunk_coord_extract_s
+    target.chunk_feature_cull_s += source.chunk_feature_cull_s
+    target.pip_select_s += source.pip_select_s
+    target.point_write_s += source.point_write_s
+    target.height_estimation_s += source.height_estimation_s
+    target.db_update_s += source.db_update_s
+    target.chunks += source.chunks
+    target.tiles_opened += source.tiles_opened
+    target.unique_tiles_opened += source.unique_tiles_opened
+    target.laz_bytes_seen += source.laz_bytes_seen
+    target.points_read += source.points_read
+    target.points_selected += source.points_selected
+    target.active_features_total += source.active_features_total
+    target.active_features_max = max(target.active_features_max, source.active_features_max)
+    target.feature_tests += source.feature_tests
+    target.feature_candidate_points_total += source.feature_candidate_points_total
+    target.feature_hits_total += source.feature_hits_total
+    target.component_tests += source.component_tests
+    target.component_candidate_points_total += source.component_candidate_points_total
+    target.component_hits_total += source.component_hits_total
+
+
+def select_feature_points(
+    feature_idx: int,
+    feature: object,
+    xs: np.ndarray,
+    ys: np.ndarray,
+) -> tuple[int, np.ndarray, TimingStats]:
+    local_timing = TimingStats()
+    t0 = time.perf_counter()
+    selected_idx = feature.select_indices(xs, ys, local_timing)
+    local_timing.pip_select_s += time.perf_counter() - t0
+    return feature_idx, selected_idx, local_timing
 
 
 def update_results(conn: psycopg.Connection, table_name: str, results: Iterable[HeightResult]) -> None:
@@ -470,14 +658,24 @@ def load_tile_index(index_path: Path, pointcloud_root: Path, layer_name: str | N
     return TileIndex(tiles)
 
 
+def count_tile_index_records(index_path: Path, layer_name: str | None) -> int:
+    selected_layer, geometry_column = gpkg_feature_table_and_geometry_column(index_path, layer_name)
+    query = (
+        f"SELECT count(*) FROM {quote_sqlite_identifier(selected_layer)} "
+        f"WHERE location IS NOT NULL AND {quote_sqlite_identifier(geometry_column)} IS NOT NULL"
+    )
+    with sqlite3.connect(index_path) as con:
+        row = con.execute(query).fetchone()
+    return int(row[0]) if row is not None else 0
+
+
 def spatial_sort(records: list[UnderpassRecord]) -> list[UnderpassRecord]:
     return sorted(
         records,
         key=lambda record: (
-            int(record.geometry.bounds[0] // 1000),
-            int(record.geometry.bounds[1] // 1000),
             record.geometry.bounds[0],
             record.geometry.bounds[1],
+            record.underpass_id,
         ),
     )
 
@@ -485,6 +683,35 @@ def spatial_sort(records: list[UnderpassRecord]) -> list[UnderpassRecord]:
 def chunks(values: list[UnderpassRecord], size: int) -> Iterable[list[UnderpassRecord]]:
     for start in range(0, len(values), size):
         yield values[start:start + size]
+
+
+def record_grid_cell(record: UnderpassRecord, cell_size: float) -> tuple[int, int]:
+    point = record.geometry.representative_point()
+    return math.floor(point.x / cell_size), math.floor(point.y / cell_size)
+
+
+def spatial_batches(
+    records: list[UnderpassRecord],
+    cell_size: float,
+    max_batch_size: int,
+) -> list[SpatialBatch]:
+    records_by_cell: dict[tuple[int, int], list[UnderpassRecord]] = defaultdict(list)
+    for record in records:
+        records_by_cell[record_grid_cell(record, cell_size)].append(record)
+
+    batches: list[SpatialBatch] = []
+    for grid_x, grid_y in sorted(records_by_cell):
+        cell_records = spatial_sort(records_by_cell[(grid_x, grid_y)])
+        for part, batch_records in enumerate(chunks(cell_records, max_batch_size), start=1):
+            batches.append(
+                SpatialBatch(
+                    grid_x=grid_x,
+                    grid_y=grid_y,
+                    part=part,
+                    records=batch_records,
+                )
+            )
+    return batches
 
 
 def prepare_crop_geometry(record: UnderpassRecord, polygon_buffer: float):
@@ -558,6 +785,8 @@ def stream_points_for_batch(
     errors: list[list[str]],
     chunk_size: int,
     max_points_per_underpass: int | None,
+    pip_workers: int,
+    open_options: dict[str, object],
     timing: TimingStats,
 ) -> None:
     tile_to_feature_indices: dict[Path, list[int]] = defaultdict(list)
@@ -573,64 +802,106 @@ def stream_points_for_batch(
     feature_maxx = np.fromiter((feature.bbox[2] for feature in features), dtype=np.float64, count=len(features))
     feature_maxy = np.fromiter((feature.bbox[3] for feature in features), dtype=np.float64, count=len(features))
 
-    for tile_path, candidate_indices_list in sorted(tile_to_feature_indices.items(), key=lambda item: str(item[0])):
-        candidate_indices = np.asarray(candidate_indices_list, dtype=np.int64)
-        if not tile_path.is_file():
-            for feature_idx in candidate_indices:
-                errors[int(feature_idx)].append(f"Missing LAZ tile: {tile_path}")
-            continue
+    executor = ThreadPoolExecutor(max_workers=pip_workers) if pip_workers > 1 else None
+    opened_tile_paths: set[Path] = set()
+    try:
+        for tile_path, candidate_indices_list in sorted(tile_to_feature_indices.items(), key=lambda item: str(item[0])):
+            candidate_indices = np.asarray(candidate_indices_list, dtype=np.int64)
+            if not tile_path.is_file():
+                for feature_idx in candidate_indices:
+                    errors[int(feature_idx)].append(f"Missing LAZ tile: {tile_path}")
+                continue
 
-        try:
-            reader_context = laspy.open(tile_path)
-        except Exception as exc:
-            for feature_idx in candidate_indices:
-                errors[int(feature_idx)].append(f"Could not open {tile_path}: {short_error(exc)}")
-            continue
+            try:
+                tile_size = tile_path.stat().st_size
+            except OSError:
+                tile_size = 0
 
-        with reader_context as reader:
-            for chunk in reader.chunk_iterator(chunk_size):
-                timing.chunks += 1
-                t0 = time.perf_counter()
-                xs = np.asarray(chunk.x, dtype=np.float64)
-                ys = np.asarray(chunk.y, dtype=np.float64)
-                if xs.size == 0:
-                    continue
-                zs = np.asarray(chunk.z, dtype=np.float64)
-                timing.chunk_coord_extract_s += time.perf_counter() - t0
+            t_open = time.perf_counter()
+            try:
+                reader_context = laspy.open(tile_path, **open_options)
+            except Exception as exc:
+                timing.tile_open_s += time.perf_counter() - t_open
+                for feature_idx in candidate_indices:
+                    errors[int(feature_idx)].append(f"Could not open {tile_path}: {short_error(exc)}")
+                continue
+            timing.tile_open_s += time.perf_counter() - t_open
 
-                t0 = time.perf_counter()
-                chunk_minx = float(xs.min())
-                chunk_miny = float(ys.min())
-                chunk_maxx = float(xs.max())
-                chunk_maxy = float(ys.max())
-                active_mask = (
-                    (feature_minx[candidate_indices] <= chunk_maxx)
-                    & (feature_maxx[candidate_indices] >= chunk_minx)
-                    & (feature_miny[candidate_indices] <= chunk_maxy)
-                    & (feature_maxy[candidate_indices] >= chunk_miny)
-                )
-                active_feature_indices = candidate_indices[active_mask]
-                active_count = int(active_feature_indices.size)
-                timing.active_features_total += active_count
-                timing.active_features_max = max(timing.active_features_max, active_count)
-                timing.chunk_feature_cull_s += time.perf_counter() - t0
+            timing.tiles_opened += 1
+            timing.laz_bytes_seen += tile_size
+            opened_tile_paths.add(tile_path)
+            timing.unique_tiles_opened = len(opened_tile_paths)
 
-                for feature_idx in active_feature_indices:
-                    feature_idx = int(feature_idx)
-                    accumulator = accumulators[feature_idx]
-                    if accumulator.exceeded_limit:
+            with reader_context as reader:
+                chunk_iterator = reader.chunk_iterator(chunk_size)
+                while True:
+                    t0 = time.perf_counter()
+                    try:
+                        chunk = next(chunk_iterator)
+                    except StopIteration:
+                        timing.chunk_read_s += time.perf_counter() - t0
+                        break
+                    timing.chunk_read_s += time.perf_counter() - t0
+                    timing.chunks += 1
+                    t0 = time.perf_counter()
+                    xs = np.asarray(chunk.x, dtype=np.float64)
+                    ys = np.asarray(chunk.y, dtype=np.float64)
+                    timing.points_read += int(xs.size)
+                    if xs.size == 0:
                         continue
+                    zs = np.asarray(chunk.z, dtype=np.float64)
+                    timing.chunk_coord_extract_s += time.perf_counter() - t0
 
                     t0 = time.perf_counter()
-                    selected_idx = features[feature_idx].select_indices(xs, ys, timing)
-                    timing.pip_select_s += time.perf_counter() - t0
-                    accumulator.add(
-                        xs,
-                        ys,
-                        zs,
-                        selected_idx,
-                        max_points_per_underpass,
+                    chunk_minx = float(xs.min())
+                    chunk_miny = float(ys.min())
+                    chunk_maxx = float(xs.max())
+                    chunk_maxy = float(ys.max())
+                    active_mask = (
+                        (feature_minx[candidate_indices] <= chunk_maxx)
+                        & (feature_maxx[candidate_indices] >= chunk_minx)
+                        & (feature_miny[candidate_indices] <= chunk_maxy)
+                        & (feature_maxy[candidate_indices] >= chunk_miny)
                     )
+                    active_feature_indices = candidate_indices[active_mask]
+                    active_count = int(active_feature_indices.size)
+                    timing.active_features_total += active_count
+                    timing.active_features_max = max(timing.active_features_max, active_count)
+                    timing.chunk_feature_cull_s += time.perf_counter() - t0
+
+                    eligible_feature_indices = [
+                        int(feature_idx)
+                        for feature_idx in active_feature_indices
+                        if not accumulators[int(feature_idx)].exceeded_limit
+                    ]
+                    if not eligible_feature_indices:
+                        continue
+
+                    if executor is None or len(eligible_feature_indices) == 1:
+                        selection_results = [
+                            select_feature_points(feature_idx, features[feature_idx], xs, ys)
+                            for feature_idx in eligible_feature_indices
+                        ]
+                    else:
+                        futures = [
+                            executor.submit(select_feature_points, feature_idx, features[feature_idx], xs, ys)
+                            for feature_idx in eligible_feature_indices
+                        ]
+                        selection_results = [future.result() for future in futures]
+
+                    for feature_idx, selected_idx, local_timing in selection_results:
+                        merge_timing_stats(timing, local_timing)
+                        timing.points_selected += int(selected_idx.size)
+                        accumulators[feature_idx].add(
+                            xs,
+                            ys,
+                            zs,
+                            selected_idx,
+                            max_points_per_underpass,
+                        )
+    finally:
+        if executor is not None:
+            executor.shutdown()
 
 
 def estimate_batch_results(
@@ -642,8 +913,10 @@ def estimate_batch_results(
     min_points: int,
     max_points_per_underpass: int | None,
     fallback_height: float,
+    height_workers: int,
 ) -> list[HeightResult]:
     results: list[HeightResult] = []
+    tasks: list[HeightEstimationTask] = []
     for record, crop_geometry, tile_paths, accumulator, record_errors in zip(
         records,
         crop_geometries,
@@ -694,40 +967,31 @@ def estimate_batch_results(
             continue
 
         x, y, z = accumulator.arrays()
-        try:
-            estimate = estimate_underpass_height_from_points(
-                record.key,
-                x,
-                y,
-                z,
-                [crop_geometry],
-                verbose=False,
+        tasks.append(
+            HeightEstimationTask(
+                identificatie=record.identificatie,
+                underpass_id=record.underpass_id,
+                key=record.key,
+                crop_geometry=crop_geometry,
+                x=x,
+                y=y,
+                z=z,
+                point_count=accumulator.point_count,
+                laz_count=existing_laz_count,
+                error_text="; ".join(record_errors)[:1000] if record_errors else None,
+                fallback_height=fallback_height,
             )
-            metrics = estimate["underpass_metrics"]
-            results.append(
-                HeightResult(
-                    identificatie=record.identificatie,
-                    underpass_id=record.underpass_id,
-                    status="success",
-                    h_underpass=float(metrics["underpass_h"]),
-                    z_min=float(metrics["underpass_z_min"]),
-                    z_max=float(metrics["underpass_z_max"]),
-                    point_count=accumulator.point_count,
-                    laz_count=existing_laz_count,
-                    error="; ".join(record_errors)[:1000] if record_errors else None,
-                )
-            )
-        except Exception as exc:
-            results.append(
-                fallback_result(
-                    record,
-                    status="failed",
-                    point_count=accumulator.point_count,
-                    laz_count=existing_laz_count,
-                    fallback_height=fallback_height,
-                    error=short_error(exc),
-                )
-            )
+        )
+
+    if not tasks:
+        return results
+
+    if height_workers <= 1 or len(tasks) == 1:
+        results.extend(run_height_estimation_task(task) for task in tasks)
+    else:
+        worker_count = min(height_workers, len(tasks))
+        with ProcessPoolExecutor(max_workers=worker_count) as executor:
+            results.extend(executor.map(run_height_estimation_task, tasks))
 
     return results
 
@@ -756,8 +1020,11 @@ def process_batch(
             errors,
             args.chunk_size,
             args.max_points_per_underpass,
+            args.pip_workers,
+            laz_open_options(args),
             timing,
         )
+        t0 = time.perf_counter()
         results = early_results + estimate_batch_results(
             prepared_records,
             crop_geometries,
@@ -767,7 +1034,9 @@ def process_batch(
             args.min_points,
             args.max_points_per_underpass,
             args.fallback_height,
+            args.height_workers,
         )
+        timing.height_estimation_s += time.perf_counter() - t0
     finally:
         for feature in features:
             feature.close()
@@ -775,18 +1044,113 @@ def process_batch(
     return results, timing
 
 
+def init_batch_worker(args: argparse.Namespace) -> None:
+    global BATCH_WORKER_ARGS, BATCH_WORKER_TILE_INDEX
+    BATCH_WORKER_ARGS = args
+    BATCH_WORKER_TILE_INDEX = load_tile_index(args.index, args.pointcloud_root, args.index_layer)
+
+
+def process_batch_worker(batch_index: int, batch: SpatialBatch) -> BatchWorkerResult:
+    if BATCH_WORKER_ARGS is None or BATCH_WORKER_TILE_INDEX is None:
+        raise RuntimeError("Batch worker was not initialized")
+
+    t0 = time.perf_counter()
+    results, timing = process_batch(batch.records, BATCH_WORKER_TILE_INDEX, BATCH_WORKER_ARGS)
+    elapsed_s = time.perf_counter() - t0
+    return BatchWorkerResult(
+        batch_index=batch_index,
+        results=results,
+        timing=timing,
+        elapsed_s=elapsed_s,
+    )
+
+
+def consume_batch_result(
+    batch_count: int,
+    batch: SpatialBatch,
+    batch_result: BatchWorkerResult,
+    update_conn: psycopg.Connection | None,
+    args: argparse.Namespace,
+    total_counts: Counter[str],
+) -> None:
+    timing = batch_result.timing
+    total_counts.update(result.status for result in batch_result.results)
+    if update_conn is not None:
+        t_db = time.perf_counter()
+        update_results(update_conn, args.table, batch_result.results)
+        timing.db_update_s += time.perf_counter() - t_db
+
+    elapsed_s = batch_result.elapsed_s + timing.db_update_s
+    print_batch_summary(
+        batch_result.batch_index,
+        batch_count,
+        batch,
+        batch_result.results,
+        timing,
+        elapsed_s,
+    )
+
+
 def short_error(exc: BaseException) -> str:
     text = str(exc) or exc.__class__.__name__
     return text[:1000]
 
 
-def print_batch_summary(batch_index: int, batch_count: int, results: list[HeightResult], timing: TimingStats, elapsed_s: float) -> None:
+def format_bytes(value: int) -> str:
+    amount = float(value)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if amount < 1024.0 or unit == "TiB":
+            return f"{amount:.1f} {unit}"
+        amount /= 1024.0
+    return f"{amount:.1f} TiB"
+
+
+def format_rate(bytes_count: int, elapsed_s: float) -> str:
+    if elapsed_s <= 0:
+        return "n/a"
+    return f"{bytes_count / 1024.0 / 1024.0 / elapsed_s:.1f} MiB/s"
+
+
+def format_points_per_second(point_count: int, elapsed_s: float) -> str:
+    if elapsed_s <= 0:
+        return "n/a"
+    return f"{point_count / 1_000_000.0 / elapsed_s:.2f} Mpts/s"
+
+
+def print_batch_summary(
+    batch_index: int,
+    batch_count: int,
+    batch: SpatialBatch,
+    results: list[HeightResult],
+    timing: TimingStats,
+    elapsed_s: float,
+) -> None:
     status_counts = Counter(result.status for result in results)
     statuses = ", ".join(f"{status}={count}" for status, count in sorted(status_counts.items()))
     print(
         f"batch {batch_index}/{batch_count}: {len(results)} underpasses, "
+        f"grid=({batch.grid_x}, {batch.grid_y}), part={batch.part}, "
         f"{statuses}; chunks={timing.chunks}, "
         f"active_features_max={timing.active_features_max}, elapsed={elapsed_s:.1f}s"
+    )
+    print(
+        "  profile: "
+        f"tiles={timing.tiles_opened} unique={timing.unique_tiles_opened}, "
+        f"laz={format_bytes(timing.laz_bytes_seen)}, "
+        f"open={timing.tile_open_s:.2f}s, "
+        f"read+decomp={timing.chunk_read_s:.2f}s ({format_rate(timing.laz_bytes_seen, timing.chunk_read_s)}), "
+        f"coord={timing.chunk_coord_extract_s:.2f}s, "
+        f"cull={timing.chunk_feature_cull_s:.2f}s, "
+        f"pip_worker={timing.pip_select_s:.2f}s, "
+        f"height={timing.height_estimation_s:.2f}s, "
+        f"db={timing.db_update_s:.2f}s"
+    )
+    print(
+        "  points: "
+        f"read={timing.points_read:,} ({format_points_per_second(timing.points_read, timing.chunk_read_s)} read+decomp), "
+        f"selected={timing.points_selected:,}, "
+        f"feature_tests={timing.feature_tests:,}, "
+        f"component_tests={timing.component_tests:,}"
     )
 
 
@@ -794,6 +1158,14 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     if args.batch_size <= 0:
         raise ValueError("--batch-size must be positive")
+    if args.batch_workers <= 0:
+        raise ValueError("--batch-workers must be positive")
+    if args.grid_cell_size <= 0:
+        raise ValueError("--grid-cell-size must be positive")
+    if args.height_workers <= 0:
+        raise ValueError("--height-workers must be positive")
+    if args.pip_workers <= 0:
+        raise ValueError("--pip-workers must be positive")
     if args.min_points < 0:
         raise ValueError("--min-points cannot be negative")
     if args.max_points_per_underpass <= 0:
@@ -832,33 +1204,90 @@ def main(argv: list[str] | None = None) -> int:
         print("Use --all to ignore existing h_underpass values/statuses.")
         return 0
 
-    records = spatial_sort(records)
     print(f"Loaded {len(records)} pending underpasses from {args.table}")
     print(f"Loading street-lidar tile index from {args.index}")
-    tile_index = load_tile_index(args.index, args.pointcloud_root, args.index_layer)
-    print(f"Loaded {len(tile_index.tiles)} street-lidar tile footprints")
+    tile_index: TileIndex | None = None
+    if args.batch_workers == 1:
+        tile_index = load_tile_index(args.index, args.pointcloud_root, args.index_layer)
+        tile_count = len(tile_index.tiles)
+    else:
+        tile_count = count_tile_index_records(args.index, args.index_layer)
+    print(f"Loaded {tile_count} street-lidar tile footprints")
 
-    record_batches = list(chunks(records, args.batch_size))
+    record_batches = spatial_batches(records, args.grid_cell_size, args.batch_size)
+    print(
+        f"Built {len(record_batches)} spatial batches "
+        f"using {args.grid_cell_size:g} m grid cells and max {args.batch_size} underpasses per batch"
+    )
+    print(f"LAZ backend: {args.laz_backend}; decompression: {args.decompression}")
+    print(f"Batch workers: {args.batch_workers}")
+    print(f"Point-in-polygon workers per batch: {args.pip_workers}")
+    print(f"Height estimation workers per batch: {args.height_workers}")
+    if args.batch_workers > 1 and (args.pip_workers > 1 or args.height_workers > 1):
+        print(
+            "Note: --pip-workers and --height-workers are per batch worker; "
+            "reduce them if CPU oversubscribes."
+        )
+    if args.batch_workers > 1 and args.laz_backend == "lazrs-parallel":
+        print(
+            "Note: lazrs-parallel also uses Rayon threads per batch worker. "
+            "Consider RAYON_NUM_THREADS or --laz-backend lazrs when tuning."
+    )
     update_conn = None
-    if not args.dry_run:
-        update_conn = connect_db(args)
-
     total_counts: Counter[str] = Counter()
+    run_t0 = time.perf_counter()
     try:
-        for batch_index, batch_records in enumerate(record_batches, start=1):
-            t0 = time.perf_counter()
-            results, timing = process_batch(batch_records, tile_index, args)
-            elapsed_s = time.perf_counter() - t0
-            print_batch_summary(batch_index, len(record_batches), results, timing, elapsed_s)
-            total_counts.update(result.status for result in results)
-            if update_conn is not None:
-                update_results(update_conn, args.table, results)
+        if args.batch_workers == 1:
+            if tile_index is None:
+                raise RuntimeError("Tile index was not loaded")
+            if not args.dry_run:
+                update_conn = connect_db(args)
+            for batch_index, batch in enumerate(record_batches, start=1):
+                t0 = time.perf_counter()
+                results, timing = process_batch(batch.records, tile_index, args)
+                batch_result = BatchWorkerResult(
+                    batch_index=batch_index,
+                    results=results,
+                    timing=timing,
+                    elapsed_s=time.perf_counter() - t0,
+                )
+                consume_batch_result(
+                    len(record_batches),
+                    batch,
+                    batch_result,
+                    update_conn,
+                    args,
+                    total_counts,
+                )
+        else:
+            with ProcessPoolExecutor(
+                max_workers=args.batch_workers,
+                initializer=init_batch_worker,
+                initargs=(args,),
+            ) as executor:
+                future_to_batch = {
+                    executor.submit(process_batch_worker, batch_index, batch): batch
+                    for batch_index, batch in enumerate(record_batches, start=1)
+                }
+                if not args.dry_run:
+                    update_conn = connect_db(args)
+                for future in as_completed(future_to_batch):
+                    batch = future_to_batch[future]
+                    batch_result = future.result()
+                    consume_batch_result(
+                        len(record_batches),
+                        batch,
+                        batch_result,
+                        update_conn,
+                        args,
+                        total_counts,
+                    )
     finally:
         if update_conn is not None:
             update_conn.close()
 
     total_statuses = ", ".join(f"{status}={count}" for status, count in sorted(total_counts.items()))
-    print(f"Done: {total_statuses}")
+    print(f"Done: {total_statuses}; wall_elapsed={time.perf_counter() - run_t0:.1f}s")
     if args.dry_run:
         print("Dry run only; PostGIS was not updated.")
     return 0
