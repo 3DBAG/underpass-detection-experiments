@@ -215,3 +215,5 @@ rotterdam3d_underpass_extraction/data/
 .codex
 
 **/.zig-cache
+**/zig-out
+**/result
