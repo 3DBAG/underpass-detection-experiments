@@ -48,7 +48,7 @@ import psutil
 # Prime psutil CPU measurement; first call always returns 0.0 (establishes baseline).
 psutil.cpu_percent(interval=None)
 
-HEIGHT_ATTR: str = "h_underpass"
+HEIGHT_ATTR: str = "underpass_z_max"
 ID_ATTR: str = "identificatie"
 METHOD: str = "manifold"
 DB_HOST: str = os.environ.get("UNDERPASS_DB_HOST", "localhost")
