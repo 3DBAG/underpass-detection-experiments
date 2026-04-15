@@ -1,6 +1,6 @@
 # add_underpass
 
-A program to carve out underpasses from 2.5D building models by using boolean mesh operations. 2D underpass polygons are read from an OGR source and extruded using a height attribute. Then the boolean mesh difference between 2.5D building model and extruded underpass polygons is computed.
+A program to carve out underpasses from 2.5D building models by using boolean mesh operations. 2D underpass polygons are read from an OGR source and extruded using an absolute underpass elevation attribute. If the attribute is null, the extrusion falls back to 2.5 m above the local ground reference. Then the boolean mesh difference between 2.5D building model and extruded underpass polygons is computed.
 
 ### Limitations
 - Mesh processing:
@@ -94,7 +94,7 @@ Arguments: `<ogr_source> <model_input> <model_output> <height_attr> [id_attr] [m
 | `ogr_source` | — | Input OGR datasource path that contains 2D underpass polygons |
 | `model_input` | — | Input path with 2.5D building model (`.fcb` or `.jsonl`). Use `-` only for FCB stdin. |
 | `model_output` | — | Output path (`.fcb` or `.jsonl`). Use `-` only for FCB stdout. |
-| `height_attr` | — | OGR height attribute name |
+| `height_attr` | — | OGR absolute underpass elevation attribute name |
 | `id_attr` | `identificatie` | OGR Feature ID attribute name. This is used to match with ID of the building models. |
 | `method` | `manifold` | Boolean method: `manifold`, `nef`, `pmp`, or `geogram` |
 

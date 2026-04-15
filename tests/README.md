@@ -13,7 +13,7 @@ RAYON_NUM_THREADS=3 python run_streetlidar_heights.py --within-index-extent     
 | Fallback rows | 48,968 |
 | Still placeholder/null | 298,971 |
 
-The 298,971 unprocessed/placeholder rows all have h_underpass = 3.5 with h_underpass_source/status still null.
+The 298,971 unprocessed/placeholder rows all have h_underpass = 2.5 with h_underpass_source/status still null.
 
 ### Status Counts
 

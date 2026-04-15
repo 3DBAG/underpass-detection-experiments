@@ -58,7 +58,6 @@ DEFAULT_DB_HOST = "localhost"
 DEFAULT_DB_PORT = 5432
 DEFAULT_DB_NAME = "baseregisters"
 DEFAULT_DB_USER = "rypeters"
-DEFAULT_FALLBACK_HEIGHT = 2.5
 DEFAULT_HEIGHT_WORKERS = max(1, min(4, os.cpu_count() or 1))
 DEFAULT_PIP_WORKERS = max(1, min(4, os.cpu_count() or 1))
 DEFAULT_LAZ_BACKEND = "lazrs-parallel"
@@ -160,7 +159,6 @@ class HeightEstimationTask:
     point_count: int
     laz_count: int
     error_text: str | None
-    fallback_height: float
 
 
 @dataclasses.dataclass
@@ -246,14 +244,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--resolution", type=int, default=64)
     parser.add_argument("--min-points", type=int, default=100)
     parser.add_argument("--max-points-per-underpass", type=int, default=10_000_000)
-    parser.add_argument("--fallback-height", type=float, default=DEFAULT_FALLBACK_HEIGHT)
-    parser.add_argument(
-        "--replace-height",
-        type=float,
-        action="append",
-        default=[],
-        help="Treat rows with this existing h_underpass value as pending, useful for replacing placeholders.",
-    )
     parser.add_argument(
         "--only-status",
         action="append",
@@ -346,14 +336,7 @@ def fetch_pending_records(conn: psycopg.Connection, args: argparse.Namespace) ->
         conditions.append(sql.SQL("h_underpass_status = ANY(%s::text[])"))
         params.append(args.only_status)
     elif not args.all:
-        pending_conditions = [
-            sql.SQL("h_underpass IS NULL"),
-            sql.SQL("h_underpass_status IN ('failed', 'no_laz_tiles', 'no_points', 'too_few_points')"),
-        ]
-        if args.replace_height:
-            pending_conditions.append(sql.SQL("h_underpass = ANY(%s::double precision[])"))
-            params.append(args.replace_height)
-        conditions.append(sql.SQL("(") + sql.SQL(" OR ").join(pending_conditions) + sql.SQL(")"))
+        conditions.append(sql.SQL("h_underpass IS NULL"))
 
     if args.only_underpass_id:
         conditions.append(sql.SQL("underpass_id = ANY(%s)"))
@@ -457,39 +440,36 @@ def fetch_table_summary(conn: psycopg.Connection, table_name: str) -> dict[str, 
     }
 
 
-def fallback_result(
+def null_result(
     record: UnderpassRecord,
     status: str,
     point_count: int,
     laz_count: int,
-    fallback_height: float,
     error: str | None,
 ) -> HeightResult:
-    return fallback_result_values(
+    return null_result_values(
         record.identificatie,
         record.underpass_id,
         status,
         point_count,
         laz_count,
-        fallback_height,
         error,
     )
 
 
-def fallback_result_values(
+def null_result_values(
     identificatie: str,
     underpass_id: int,
     status: str,
     point_count: int,
     laz_count: int,
-    fallback_height: float,
     error: str | None,
 ) -> HeightResult:
     return HeightResult(
         identificatie=identificatie,
         underpass_id=underpass_id,
         status=status,
-        h_underpass=fallback_height,
+        h_underpass=None,
         point_count=point_count,
         laz_count=laz_count,
         error=error,
@@ -519,13 +499,12 @@ def run_height_estimation_task(task: HeightEstimationTask) -> HeightResult:
             error=task.error_text,
         )
     except Exception as exc:
-        return fallback_result_values(
+        return null_result_values(
             task.identificatie,
             task.underpass_id,
             status="failed",
             point_count=task.point_count,
             laz_count=task.laz_count,
-            fallback_height=task.fallback_height,
             error=short_error(exc),
         )
 
@@ -735,7 +714,6 @@ def build_batch_inputs(
     tile_index: TileIndex,
     resolution: int,
     polygon_buffer: float,
-    fallback_height: float,
 ) -> tuple[list[UnderpassRecord], list[object], list[object], list[list[Path]], list[HeightResult]]:
     prepared_records: list[UnderpassRecord] = []
     prepared_features: list[object] = []
@@ -749,12 +727,11 @@ def build_batch_inputs(
             tiles = tile_index.query(crop_geometry)
             if not tiles:
                 early_results.append(
-                    fallback_result(
+                    null_result(
                         record,
                         status="no_laz_tiles",
                         point_count=0,
                         laz_count=0,
-                        fallback_height=fallback_height,
                         error="No street-lidar tiles intersect the underpass polygon",
                     )
                 )
@@ -768,12 +745,11 @@ def build_batch_inputs(
             )
         except Exception as exc:
             early_results.append(
-                fallback_result(
+                null_result(
                     record,
                     status="invalid_geometry",
                     point_count=0,
                     laz_count=0,
-                    fallback_height=fallback_height,
                     error=short_error(exc),
                 )
             )
@@ -921,7 +897,6 @@ def estimate_batch_results(
     errors: list[list[str]],
     min_points: int,
     max_points_per_underpass: int | None,
-    fallback_height: float,
     height_workers: int,
 ) -> list[HeightResult]:
     results: list[HeightResult] = []
@@ -938,12 +913,11 @@ def estimate_batch_results(
 
         if accumulator.exceeded_limit:
             results.append(
-                fallback_result(
+                null_result(
                     record,
                     status="too_many_points",
                     point_count=accumulator.point_count,
                     laz_count=existing_laz_count,
-                    fallback_height=fallback_height,
                     error=f"Selected more than {max_points_per_underpass} points",
                 )
             )
@@ -951,12 +925,11 @@ def estimate_batch_results(
 
         if accumulator.point_count == 0:
             results.append(
-                fallback_result(
+                null_result(
                     record,
                     status="no_points",
                     point_count=0,
                     laz_count=existing_laz_count,
-                    fallback_height=fallback_height,
                     error="; ".join(record_errors)[:1000] if record_errors else "No points inside polygon",
                 )
             )
@@ -964,12 +937,11 @@ def estimate_batch_results(
 
         if accumulator.point_count < min_points:
             results.append(
-                fallback_result(
+                null_result(
                     record,
                     status="too_few_points",
                     point_count=accumulator.point_count,
                     laz_count=existing_laz_count,
-                    fallback_height=fallback_height,
                     error=f"Only {accumulator.point_count} points inside polygon; minimum is {min_points}",
                 )
             )
@@ -988,7 +960,6 @@ def estimate_batch_results(
                 point_count=accumulator.point_count,
                 laz_count=existing_laz_count,
                 error_text="; ".join(record_errors)[:1000] if record_errors else None,
-                fallback_height=fallback_height,
             )
         )
 
@@ -1016,7 +987,6 @@ def process_batch(
         tile_index,
         args.resolution,
         args.polygon_buffer,
-        args.fallback_height,
     )
     accumulators = [PointAccumulator() for _ in features]
     errors: list[list[str]] = [[] for _ in features]
@@ -1042,7 +1012,6 @@ def process_batch(
             errors,
             args.min_points,
             args.max_points_per_underpass,
-            args.fallback_height,
             args.height_workers,
         )
         timing.height_estimation_s += time.perf_counter() - t0

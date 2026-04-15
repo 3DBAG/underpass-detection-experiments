@@ -41,7 +41,8 @@ class VectorReader {
   struct PolygonFeature {
     LinearRing polygon;
     std::string id;
-    double extrusion_height = 0.0;
+    double absolute_elevation = 0.0;
+    bool has_absolute_elevation = false;
   };
 
   VectorReader() = default;
@@ -61,7 +62,7 @@ class VectorReader {
   // Read all polygons from the layer
   std::vector<LinearRing> read_polygons();
 
-  // Read polygons with per-feature ID and extrusion height attributes.
+  // Read polygons with per-feature ID and absolute underpass elevation attributes.
   std::vector<PolygonFeature> read_polygon_features(
       const std::string& id_attribute,
       const std::string& height_attribute);
@@ -86,7 +87,8 @@ class VectorReader {
   void read_polygon(OGRPolygon* poPolygon, std::vector<LinearRing>& polygons);
   void read_polygon_feature(OGRPolygon* poPolygon,
                             const std::string& id,
-                            double extrusion_height,
+                            double absolute_elevation,
+                            bool has_absolute_elevation,
                             std::vector<PolygonFeature>& features);
 
   GDALDatasetUniquePtr poDS_;

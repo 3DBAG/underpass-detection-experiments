@@ -23,7 +23,6 @@
 
 #include <iomanip>
 #include <iostream>
-#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <string_view>
@@ -232,7 +231,8 @@ void VectorReader::read_polygon(OGRPolygon* poPolygon,
 void VectorReader::read_polygon_feature(
     OGRPolygon* poPolygon,
     const std::string& id,
-    double extrusion_height,
+    double absolute_elevation,
+    bool has_absolute_elevation,
     std::vector<PolygonFeature>& features) {
   if (poPolygon == nullptr) {
     return;
@@ -276,7 +276,8 @@ void VectorReader::read_polygon_feature(
   PolygonFeature feature;
   feature.polygon = std::move(polygon);
   feature.id = id;
-  feature.extrusion_height = extrusion_height;
+  feature.absolute_elevation = absolute_elevation;
+  feature.has_absolute_elevation = has_absolute_elevation;
   features.push_back(std::move(feature));
 }
 
@@ -358,20 +359,22 @@ std::vector<VectorReader::PolygonFeature> VectorReader::read_polygon_features(
       id = poFeature->GetFieldAsString(id_field_idx);
     }
 
-    double extrusion_height = std::numeric_limits<double>::quiet_NaN();
+    double absolute_elevation = 0.0;
+    bool has_absolute_elevation = false;
     int h_field_idx = poFeature->GetFieldIndex(height_attribute.c_str());
     if (h_field_idx >= 0 && poFeature->IsFieldSetAndNotNull(h_field_idx)) {
-      extrusion_height = poFeature->GetFieldAsDouble(h_field_idx);
+      absolute_elevation = poFeature->GetFieldAsDouble(h_field_idx);
+      has_absolute_elevation = true;
     }
 
     if (wkbFlatten(poGeometry->getGeometryType()) == wkbPolygon) {
       OGRPolygon* poPolygon = poGeometry->toPolygon();
-      read_polygon_feature(poPolygon, id, extrusion_height, features);
+      read_polygon_feature(poPolygon, id, absolute_elevation, has_absolute_elevation, features);
     } else if (wkbFlatten(poGeometry->getGeometryType()) == wkbMultiPolygon) {
       OGRMultiPolygon* poMultiPolygon = poGeometry->toMultiPolygon();
       for (auto poly_it = poMultiPolygon->begin();
            poly_it != poMultiPolygon->end(); ++poly_it) {
-        read_polygon_feature(*poly_it, id, extrusion_height, features);
+        read_polygon_feature(*poly_it, id, absolute_elevation, has_absolute_elevation, features);
       }
     }
 

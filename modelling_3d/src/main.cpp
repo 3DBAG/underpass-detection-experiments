@@ -55,6 +55,7 @@ namespace SemanticSurfaceType {
 // Classify each triangle by face normal orientation and Z-position.
 // ground_z: building ground level (local coords).
 // underpass_z: underpass ceiling height (local coords).
+static constexpr double kNullUnderpassHeightAboveGround = 2.5;
 static std::vector<uint8_t> classify_triangle_semantics(
     const manifold::MeshGL& mesh,
     double ground_z,
@@ -151,6 +152,9 @@ static FeatureCarveResult carve_underpasses_for_feature(
         const auto& feature = polygon_features[feature_idx];
 
         auto t_conversion_start = Clock::now();
+        double roof_height = (feature.has_absolute_elevation && std::isfinite(feature.absolute_elevation))
+            ? feature.absolute_elevation
+            : result.house_min_z + kNullUnderpassHeightAboveGround;
         auto offset_polygon = make_offset_polygon(
             feature.polygon,
             global_offset_x,
@@ -159,7 +163,7 @@ static FeatureCarveResult carve_underpasses_for_feature(
         Surface_mesh underpass_sm;
         try {
             underpass_sm = extrusion::extrude_polygon(
-                offset_polygon, result.house_min_z - 0.1, result.house_min_z + feature.extrusion_height, ignore_holes);
+                offset_polygon, result.house_min_z - 0.1, roof_height, ignore_holes);
         } catch (const std::exception& e) {
             auto t_conversion_end = Clock::now();
             ds_conversion_ms += t_conversion_end - t_conversion_start;
@@ -186,7 +190,7 @@ static FeatureCarveResult carve_underpasses_for_feature(
         }
 
         underpass_meshes.push_back(std::move(underpass_sm));
-        result.underpass_z = feature.extrusion_height - global_offset_z;
+        result.underpass_z = roof_height - global_offset_z;
         ++merged_feature_count;
     }
 
@@ -724,9 +728,10 @@ int main(int argc, char* argv[]) {
 
     if (argc < 5) {
         std::cerr << "Usage: " << argv[0]
-                  << " <ogr_source> <model_input> <model_output> <height_attribute> [id_attribute] [method]" << std::endl;
+                  << " <ogr_source> <model_input> <model_output> <absolute_underpass_elevation_attribute> [id_attribute] [method]" << std::endl;
         std::cerr << "  model formats: .fcb (FlatCityBuf) or .jsonl (CityJSONSeq)" << std::endl;
         std::cerr << "  id_attribute default: identificatie" << std::endl;
+        std::cerr << "  missing absolute underpass elevation falls back to 2.5 m above the local ground reference" << std::endl;
         std::cerr << "  method: pmp (default), manifold, nef"
 #ifdef ENABLE_GEOGRAM
                   << ", geogram"
@@ -875,12 +880,6 @@ int main(int argc, char* argv[]) {
         const auto& feature = polygon_features[i];
         if (feature.id.empty()) {
             std::cerr << std::format("Skipping feature {}: empty id attribute '{}'", i, id_attribute) << std::endl;
-            ++skipped_count;
-            continue;
-        }
-        if (!std::isfinite(feature.extrusion_height)) {
-            std::cerr << std::format("Skipping feature {} (id='{}'): invalid height attribute '{}'",
-                                     i, feature.id, height_attribute) << std::endl;
             ++skipped_count;
             continue;
         }
