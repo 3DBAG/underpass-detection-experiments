@@ -245,7 +245,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--resolution", type=int, default=64)
     parser.add_argument("--min-points", type=int, default=100)
-    parser.add_argument("--max-points-per-underpass", type=int, default=5_000_000)
+    parser.add_argument("--max-points-per-underpass", type=int, default=10_000_000)
     parser.add_argument("--fallback-height", type=float, default=DEFAULT_FALLBACK_HEIGHT)
     parser.add_argument(
         "--replace-height",
@@ -253,6 +253,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="append",
         default=[],
         help="Treat rows with this existing h_underpass value as pending, useful for replacing placeholders.",
+    )
+    parser.add_argument(
+        "--only-status",
+        action="append",
+        default=[],
+        help="Only process rows with this existing h_underpass_status. Can be passed multiple times.",
     )
     parser.add_argument("--polygon-buffer", type=float, default=POLYGON_BUFFER_DISTANCE)
     parser.add_argument(
@@ -336,7 +342,10 @@ def fetch_pending_records(conn: psycopg.Connection, args: argparse.Namespace) ->
     ]
     params: list[object] = []
 
-    if not args.all:
+    if args.only_status:
+        conditions.append(sql.SQL("h_underpass_status = ANY(%s::text[])"))
+        params.append(args.only_status)
+    elif not args.all:
         pending_conditions = [
             sql.SQL("h_underpass IS NULL"),
             sql.SQL("h_underpass_status IN ('failed', 'no_laz_tiles', 'no_points', 'too_few_points')"),

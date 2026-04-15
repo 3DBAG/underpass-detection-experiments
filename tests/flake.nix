@@ -30,6 +30,7 @@
               py.numpy
               py.psycopg
               py.shapely
+              pkgs.uv
               pkgs.zig
               pkgs.zls
               pkgs.postgresql
