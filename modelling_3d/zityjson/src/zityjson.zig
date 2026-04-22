@@ -1,4 +1,37 @@
 const std = @import("std");
+const File = std.Io.File;
+const default_io = std.Options.debug_io;
+
+fn openFileRead(path: []const u8) !File {
+    if (std.fs.path.isAbsolute(path)) {
+        return std.Io.Dir.openFileAbsolute(default_io, path, .{ .mode = .read_only });
+    }
+    return std.Io.Dir.cwd().openFile(default_io, path, .{ .mode = .read_only });
+}
+
+fn createFileTruncate(path: []const u8) !File {
+    if (std.fs.path.isAbsolute(path)) {
+        return std.Io.Dir.createFileAbsolute(default_io, path, .{ .truncate = true });
+    }
+    return std.Io.Dir.cwd().createFile(default_io, path, .{ .truncate = true });
+}
+
+fn closeFile(file: File) void {
+    file.close(default_io);
+}
+
+fn writeAll(file: File, bytes: []const u8) !void {
+    try file.writeStreamingAll(default_io, bytes);
+}
+
+fn enumFromIntChecked(comptime E: type, value: anytype) ?E {
+    inline for (std.meta.fields(E)) |field| {
+        if (field.value == value) {
+            return @enumFromInt(value);
+        }
+    }
+    return null;
+}
 
 // Face type attribute
 pub const FaceType = enum(u8) {
@@ -99,11 +132,11 @@ pub const CityJSON = struct {
             return StoredGeometry{
                 .type = geometry_type,
                 .lod = try allocator.dupe(u8, lod),
-                .vertices = .{},
-                .surfaces = .{},
-                .strings = .{},
-                .boundaries = .{},
-                .face_types = .{},
+                .vertices = .empty,
+                .surfaces = .empty,
+                .strings = .empty,
+                .boundaries = .empty,
+                .face_types = .empty,
             };
         }
 
@@ -135,14 +168,14 @@ pub const CityJSON = struct {
 
     allocator: std.mem.Allocator,
     // file: CJFile,
-    objects: std.StringArrayHashMap(StoredCityObject),
+    objects: std.array_hash_map.String(StoredCityObject),
 
     pub fn init(allocator: std.mem.Allocator) !CityJSON {
-        return CityJSON{
-            .allocator = allocator,
-            // .file = undefined,
-            .objects = .init(allocator),
-        };
+            return CityJSON{
+                .allocator = allocator,
+                // .file = undefined,
+                .objects = .empty,
+            };
     }
 
     pub fn deinit(self: *CityJSON) void {
@@ -151,14 +184,14 @@ pub const CityJSON = struct {
             // need to add 1 to account for null terminator (needed for C api)
             self.allocator.free(key.ptr[0..key.len + 1]);
         }
-        self.objects.deinit();
+        self.objects.deinit(self.allocator);
     }
 
     /// Add a new CityObject. Returns the object index.
     pub fn addObject(self: *CityJSON, name: []const u8, object_type: CJObjectType) !usize {
         const owned_key = try self.allocator.dupeZ(u8, name);
         errdefer self.allocator.free(owned_key.ptr[0..owned_key.len + 1]);
-        try self.objects.put(owned_key, try StoredCityObject.init(self.allocator, object_type, 0));
+        try self.objects.put(self.allocator, owned_key, try StoredCityObject.init(self.allocator, object_type, 0));
         return self.objects.count() - 1;
     }
 
@@ -191,14 +224,11 @@ pub const CityJSON = struct {
     }
 
     fn loadCityJSON(self: *CityJSON, path: []const u8) !void {
-        const file = if (std.fs.path.isAbsolute(path))
-            try std.fs.openFileAbsolute(path, .{ .mode = .read_only })
-        else
-            try std.fs.cwd().openFile(path, .{ .mode = .read_only });
-        defer file.close();
+        const file = try openFileRead(path);
+        defer closeFile(file);
 
         var read_buf: [64 * 1024]u8 = undefined;
-        var f_reader: std.fs.File.Reader = file.reader(&read_buf);
+        var f_reader: std.Io.File.Reader = file.reader(default_io, &read_buf);
         var j_reader = std.json.Reader.init(self.allocator, &f_reader.interface);
         defer j_reader.deinit();
 
@@ -211,21 +241,18 @@ pub const CityJSON = struct {
     }
 
     fn loadCityJSONSeq(self: *CityJSON, path: []const u8) !void {
-        const file = if (std.fs.path.isAbsolute(path))
-            try std.fs.openFileAbsolute(path, .{ .mode = .read_only })
-        else
-            try std.fs.cwd().openFile(path, .{ .mode = .read_only });
-        defer file.close();
+        const file = try openFileRead(path);
+        defer closeFile(file);
 
         var did_read_header = false;
         var seq_transform: CJTransform = undefined;
 
-        var pending_line: std.ArrayList(u8) = .{};
+        var pending_line: std.ArrayList(u8) = .empty;
         defer pending_line.deinit(self.allocator);
 
         var read_chunk: [8192]u8 = undefined;
         while (true) {
-            const bytes_read = try file.read(&read_chunk);
+            const bytes_read = try std.posix.read(file.handle, &read_chunk);
             if (bytes_read == 0) break;
 
             var start: usize = 0;
@@ -318,7 +345,7 @@ pub const CityJSON = struct {
             const owned_key = try self.allocator.dupeZ(u8, key);
             errdefer self.allocator.free(owned_key.ptr[0..owned_key.len + 1]);
 
-            var entry = try self.objects.getOrPut(owned_key);
+            var entry = try self.objects.getOrPut(self.allocator, owned_key);
             if (entry.found_existing) {
                 // Existing entry keeps ownership of its original key allocation.
                 self.allocator.free(owned_key.ptr[0..owned_key.len + 1]);
@@ -346,7 +373,7 @@ pub const CityJSON = struct {
         vertices: []const [3]i64,
         transform: CJTransform,
     ) !void {
-        var vertex_remap = std.AutoArrayHashMap(usize, usize).init(self.allocator);
+        var vertex_remap = std.AutoHashMap(usize, usize).init(self.allocator);
         defer vertex_remap.deinit();
 
         switch (g.type) {
@@ -368,7 +395,7 @@ pub const CityJSON = struct {
                 }
 
                 for (bounds) |polygon| {
-                    var rings = std.ArrayList([]const usize){};
+                    var rings = std.ArrayList([]const usize).empty;
                     defer rings.deinit(self.allocator);
                     try rings.ensureTotalCapacity(self.allocator, polygon.len);
                     for (polygon) |ring| {
@@ -408,7 +435,7 @@ pub const CityJSON = struct {
                 // Second pass: add surfaces with remapped rings (holes preserved).
                 for (bounds) |shell| {
                     for (shell) |polygon| {
-                        var rings = std.ArrayList([]const usize){};
+                        var rings = std.ArrayList([]const usize).empty;
                         defer rings.deinit(self.allocator);
                         try rings.ensureTotalCapacity(self.allocator, polygon.len);
                         for (polygon) |ring| {
@@ -460,7 +487,7 @@ pub const CityJSON = struct {
         // We need to know each geometry's offset into the global vertex array
         // Store as a flat list parallel to objects × geometries
         var global_vertex_count: usize = 0;
-        var geom_offsets: std.ArrayList(usize) = .{};
+        var geom_offsets: std.ArrayList(usize) = .empty;
         defer geom_offsets.deinit(self.allocator);
         for (self.objects.values()) |object| {
             for (object.geometries) |geom| {
@@ -470,13 +497,10 @@ pub const CityJSON = struct {
         }
 
         // Open file for writing
-        const file = if (std.fs.path.isAbsolute(path))
-            try std.fs.createFileAbsolute(path, .{ .truncate = true })
-        else
-            try std.fs.cwd().createFile(path, .{ .truncate = true });
-        defer file.close();
+        const file = try createFileTruncate(path);
+        defer closeFile(file);
         var write_buf: [4096]u8 = undefined;
-        var f_writer = file.writer(&write_buf);
+        var f_writer = file.writer(default_io, &write_buf);
         var jw: std.json.Stringify = .{ .writer = &f_writer.interface, .options = .{ .whitespace = .indent_2 } };
 
         // Root object
@@ -687,7 +711,7 @@ export fn cityjson_save(handle: ?CityJSONHandle, path: [*c]const u8) callconv(.c
 export fn cityjson_add_object(handle: ?CityJSONHandle, name: [*c]const u8, object_type: u8) callconv(.c) isize {
     const cj = handle orelse return -1;
     const name_slice = std.mem.span(name);
-    const obj_type = std.meta.intToEnum(CJObjectType, object_type) catch return -1;
+    const obj_type = enumFromIntChecked(CJObjectType, object_type) orelse return -1;
     const idx = cj.addObject(name_slice, obj_type) catch return -1;
     return @intCast(idx);
 }
@@ -696,7 +720,7 @@ export fn cityjson_add_object(handle: ?CityJSONHandle, name: [*c]const u8, objec
 /// geometry_type: CITYJSON_MULTISURFACE or CITYJSON_SOLID.
 export fn cityjson_add_geometry(handle: ?CityJSONHandle, object_index: usize, geometry_type: u8, lod: [*c]const u8) callconv(.c) isize {
     const cj = handle orelse return -1;
-    const geom_type = std.meta.intToEnum(CJGeometryType, geometry_type) catch return -1;
+    const geom_type = enumFromIntChecked(CJGeometryType, geometry_type) orelse return -1;
     const lod_slice = std.mem.span(lod);
     const idx = cj.addGeometry(object_index, geom_type, lod_slice) catch return -1;
     return @intCast(idx);
@@ -717,7 +741,7 @@ export fn cityjson_add_vertex(handle: ?CityJSONHandle, object_index: usize, geom
 export fn cityjson_add_face(handle: ?CityJSONHandle, object_index: usize, geometry_index: usize, vertex_indices: [*c]const usize, num_indices: usize, face_type: u8) callconv(.c) c_int {
     const cj = handle orelse return -1;
     const geom = cj.getGeometry(object_index, geometry_index) catch return -1;
-    const ft = std.meta.intToEnum(FaceType, face_type) catch return -1;
+    const ft = enumFromIntChecked(FaceType, face_type) orelse return -1;
     const indices_slice = vertex_indices[0..num_indices];
     const rings = [_][]const usize{indices_slice};
     geom.addSurface(&rings, ft, cj.allocator) catch return -1;
@@ -1075,7 +1099,7 @@ fn featureCityObjectsContainsKey(city_objs: std.json.ArrayHashMap(CJObject), key
 
 const CityJSONSeqReader = struct {
     allocator: std.mem.Allocator,
-    file: std.fs.File,
+    file: File,
     read_buf: [8192]u8,
     read_len: usize,
     read_pos: usize,
@@ -1090,10 +1114,7 @@ const CityJSONSeqReader = struct {
     current_cj: CityJSON,
 
     fn init(allocator: std.mem.Allocator, path: []const u8) !*CityJSONSeqReader {
-        const file = if (std.fs.path.isAbsolute(path))
-            try std.fs.openFileAbsolute(path, .{ .mode = .read_only })
-        else
-            try std.fs.cwd().openFile(path, .{ .mode = .read_only });
+        const file = try openFileRead(path);
 
         var current_cj = try CityJSON.init(allocator);
         errdefer current_cj.deinit();
@@ -1151,7 +1172,7 @@ const CityJSONSeqReader = struct {
             self.allocator.free(self.header_line);
         }
         self.current_cj.deinit();
-        self.file.close();
+        closeFile(self.file);
         self.allocator.destroy(self);
     }
 
@@ -1172,7 +1193,7 @@ const CityJSONSeqReader = struct {
     }
 
     fn readNextMeaningfulLineAlloc(self: *CityJSONSeqReader) !?[]u8 {
-        var line: std.ArrayList(u8) = .{};
+        var line: std.ArrayList(u8) = .empty;
         defer line.deinit(self.allocator);
 
         while (true) {
@@ -1181,7 +1202,7 @@ const CityJSONSeqReader = struct {
 
             while (true) {
                 if (self.read_pos >= self.read_len) {
-                    self.read_len = try self.file.read(&self.read_buf);
+                    self.read_len = try std.posix.read(self.file.handle, &self.read_buf);
                     self.read_pos = 0;
                     if (self.read_len == 0) break;
                 }
@@ -1240,13 +1261,10 @@ const CityJSONSeqReader = struct {
 
 const CityJSONSeqWriter = struct {
     allocator: std.mem.Allocator,
-    file: std.fs.File,
+    file: File,
 
     fn init(allocator: std.mem.Allocator, reader: *const CityJSONSeqReader, path: []const u8) !*CityJSONSeqWriter {
-        const file = if (std.fs.path.isAbsolute(path))
-            try std.fs.createFileAbsolute(path, .{ .truncate = true })
-        else
-            try std.fs.cwd().createFile(path, .{ .truncate = true });
+        const file = try createFileTruncate(path);
 
         const writer = try allocator.create(CityJSONSeqWriter);
         writer.* = .{
@@ -1260,13 +1278,13 @@ const CityJSONSeqWriter = struct {
     }
 
     fn deinit(self: *CityJSONSeqWriter) void {
-        self.file.close();
+        closeFile(self.file);
         self.allocator.destroy(self);
     }
 
     fn writeLine(self: *CityJSONSeqWriter, line: []const u8) !void {
-        try self.file.writeAll(line);
-        try self.file.writeAll("\n");
+        try writeAll(self.file, line);
+        try writeAll(self.file, "\n");
     }
 };
 
@@ -1491,7 +1509,7 @@ fn writeReplacedCurrentFeatureLine(
     }
     const target_geometry_value = target_geometry orelse return error.TargetGeometryNotFound;
 
-    var old_vertices = std.ArrayList([3]i64){};
+    var old_vertices = std.ArrayList([3]i64).empty;
     defer old_vertices.deinit(arena_alloc);
     for (vertices_value.array.items) |vertex| {
         if (vertex != .array or vertex.array.items.len != 3) return error.InvalidCityJSONSeqFeature;
@@ -1521,7 +1539,7 @@ fn writeReplacedCurrentFeatureLine(
     defer old_to_new.deinit();
     var coord_to_new = std.AutoHashMap([3]i64, usize).init(arena_alloc);
     defer coord_to_new.deinit();
-    var new_vertices = std.ArrayList([3]i64){};
+    var new_vertices = std.ArrayList([3]i64).empty;
     defer new_vertices.deinit(arena_alloc);
 
     for (old_vertices.items, 0..) |coord, old_idx| {
@@ -1533,7 +1551,7 @@ fn writeReplacedCurrentFeatureLine(
         }
     }
 
-    var replacement_indices = std.ArrayList(usize){};
+    var replacement_indices = std.ArrayList(usize).empty;
     defer replacement_indices.deinit(arena_alloc);
     try replacement_indices.ensureTotalCapacity(arena_alloc, triangle_indices.len);
 
@@ -1590,15 +1608,15 @@ fn writeReplacedCurrentFeatureLine(
     var surfaces = std.json.Array.init(arena_alloc);
     var semantic_to_surface = std.AutoHashMap(u8, usize).init(arena_alloc);
     defer semantic_to_surface.deinit();
-    var semantic_values = std.ArrayList(usize){};
+    var semantic_values = std.ArrayList(usize).empty;
     defer semantic_values.deinit(arena_alloc);
 
     for (semantic_types) |semantic_type| {
         const surface_idx = if (semantic_to_surface.get(semantic_type)) |idx| blk: {
             break :blk idx;
         } else blk: {
-            var surface_obj = std.json.ObjectMap.init(arena_alloc);
-            try surface_obj.put("type", .{ .string = semanticSurfaceTypeName(semantic_type) });
+            var surface_obj: std.json.ObjectMap = .empty;
+            try surface_obj.put(arena_alloc, "type", .{ .string = semanticSurfaceTypeName(semantic_type) });
             const idx = surfaces.items.len;
             try surfaces.append(.{ .object = surface_obj });
             try semantic_to_surface.put(semantic_type, idx);
@@ -1614,15 +1632,15 @@ fn writeReplacedCurrentFeatureLine(
     var values_outer = std.json.Array.init(arena_alloc);
     try values_outer.append(.{ .array = shell_values });
 
-    var semantics_obj = std.json.ObjectMap.init(arena_alloc);
-    try semantics_obj.put("surfaces", .{ .array = surfaces });
-    try semantics_obj.put("values", .{ .array = values_outer });
+    var semantics_obj: std.json.ObjectMap = .empty;
+    try semantics_obj.put(arena_alloc, "surfaces", .{ .array = surfaces });
+    try semantics_obj.put(arena_alloc, "values", .{ .array = values_outer });
 
     if (target_geometry_value.* != .object) return error.TargetGeometryNotFound;
-    try target_geometry_value.object.put("type", .{ .string = "Solid" });
-    try target_geometry_value.object.put("lod", .{ .string = "2.2" });
-    try target_geometry_value.object.put("boundaries", .{ .array = solid_boundaries });
-    try target_geometry_value.object.put("semantics", .{ .object = semantics_obj });
+    try target_geometry_value.object.put(arena_alloc, "type", .{ .string = "Solid" });
+    try target_geometry_value.object.put(arena_alloc, "lod", .{ .string = "2.2" });
+    try target_geometry_value.object.put(arena_alloc, "boundaries", .{ .array = solid_boundaries });
+    try target_geometry_value.object.put(arena_alloc, "semantics", .{ .object = semantics_obj });
 
     var vertices_array = std.json.Array.init(arena_alloc);
     try vertices_array.ensureTotalCapacity(new_vertices.items.len);
@@ -1637,7 +1655,7 @@ fn writeReplacedCurrentFeatureLine(
 
     // Serialize the replaced feature to an in-memory line, then append through
     // writeLine() so we preserve output stream ordering.
-    var out: std.io.Writer.Allocating = .init(reader.allocator);
+    var out: std.Io.Writer.Allocating = .init(reader.allocator);
     defer out.deinit();
     try std.json.Stringify.value(parsed.value, .{ .whitespace = .minified }, &out.writer);
     try writer.writeLine(out.written());
@@ -1699,7 +1717,7 @@ test "save round-trip" {
     try geom.addSurface(&rings, .wall, allocator);
 
     const key = try allocator.dupeZ(u8, "TestBuilding");
-    try cj.objects.put(key, obj);
+    try cj.objects.put(cj.allocator, key, obj);
 
     // Save to a temp file
     const tmp_path = "/tmp/zityjson_test_output.city.json";
@@ -1822,9 +1840,9 @@ test "load cityjson sequence" {
     ;
 
     const tmp_path = "/tmp/zityjson_seq_test.city.jsonl";
-    const file = try std.fs.createFileAbsolute(tmp_path, .{ .truncate = true });
-    defer file.close();
-    try file.writeAll(seq_content);
+    const file = try createFileTruncate(tmp_path);
+    defer closeFile(file);
+    try writeAll(file, seq_content);
 
     var cj = try CityJSON.init(allocator);
     defer cj.deinit();

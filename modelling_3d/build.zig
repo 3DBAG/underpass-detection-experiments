@@ -1,9 +1,7 @@
 const std = @import("std");
 
 fn addGeogramIncludePathFromNixFlags(b: *std.Build, module: *std.Build.Module) void {
-    if (std.process.getEnvVarOwned(b.allocator, "NIX_CFLAGS_COMPILE")) |nix_cflags| {
-        defer b.allocator.free(nix_cflags);
-
+    if (b.graph.environ_map.get("NIX_CFLAGS_COMPILE")) |nix_cflags| {
         var it = std.mem.tokenizeAny(u8, nix_cflags, " \t\r\n");
         var expect_path = false;
         while (it.next()) |token| {
@@ -41,7 +39,7 @@ fn addGeogramIncludePathFromNixFlags(b: *std.Build, module: *std.Build.Module) v
                 }
             }
         }
-    } else |_| {}
+    }
 }
 
 pub fn build(b: *std.Build) void {
@@ -167,10 +165,10 @@ pub fn build(b: *std.Build) void {
 
         if (is_macos) {
             // macOS frameworks required by rerun
-            if (std.process.getEnvVarOwned(b.allocator, "SDKROOT")) |sdk_root| {
+            if (b.graph.environ_map.get("SDKROOT")) |sdk_root| {
                 const framework_path = std.fmt.allocPrint(b.allocator, "{s}/System/Library/Frameworks", .{sdk_root}) catch @panic("OOM");
                 exe.root_module.addFrameworkPath(.{ .cwd_relative = framework_path });
-            } else |_| {}
+            }
             exe.root_module.linkFramework("CoreFoundation", .{});
             exe.root_module.linkFramework("IOKit", .{});
             exe.root_module.linkFramework("Security", .{});
@@ -190,8 +188,8 @@ pub fn build(b: *std.Build) void {
     }
 
     // 4. Link zfcb_lib + zityjson_lib
-    exe.linkLibrary(zfcb_lib);
-    exe.linkLibrary(zityjson_lib);
+    exe.root_module.linkLibrary(zfcb_lib);
+    exe.root_module.linkLibrary(zityjson_lib);
     exe.root_module.addIncludePath(b.path("zityjson/include"));
 
     // 5. Installation

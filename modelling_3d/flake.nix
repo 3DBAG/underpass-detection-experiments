@@ -58,16 +58,11 @@
           arrow-cpp
         ];
 
-        # Optional: geogram dependencies (pass -Dgeogram=true to zig build)
-        geogramDeps = with pkgs; [
-          geogram
-        ];
-
       in
       {
-        # Development shell (includes geogram for optional use)
+        # Development shell
         devShells.default = pkgs.mkShell {
-          buildInputs = cppDeps ++ geogramDeps ++ buildTools ++ [ pkgs.wget pkgs.just ];
+          buildInputs = cppDeps ++ buildTools ++ [ pkgs.wget pkgs.just ];
 
           # Environment variables
           GDAL_DATA = "${pkgs.gdal}/share/gdal";
@@ -78,15 +73,13 @@
             export ZIG_LOCAL_CACHE_DIR="$PWD/.zig-cache"
             export ZIG_GLOBAL_CACHE_DIR="$PWD/.zig-global-cache"
             mkdir -p "$ZIG_LOCAL_CACHE_DIR" "$ZIG_GLOBAL_CACHE_DIR"
-            export LD_LIBRARY_PATH="${pkgs.geogram.lib}/lib:$LD_LIBRARY_PATH"
-            export DYLD_FALLBACK_LIBRARY_PATH="${pkgs.geogram.lib}/lib:$DYLD_FALLBACK_LIBRARY_PATH"
             echo "Entering development environment for add_underpass"
             echo ""
             echo "To build the project run:"
             echo "  zig build"
             echo ""
             echo "  (To compile in release mode add: -Doptimize=ReleaseFast)"
-            echo "  (To enable geogram support add: -Dgeogram=true)"
+            echo "  (Geogram is not included in the default dev shell; add it separately if you need -Dgeogram=true)"
             echo ""
             echo "To run the program with sample data:"
             echo "  ./zig-out/bin/add_underpass ./sample_data/amsterdam_beemsterstraat_42.gpkg ./sample_data/9-444-728_sm.fcb ./sample_data/out.fcb hoogte identificatie"

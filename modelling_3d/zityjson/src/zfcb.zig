@@ -1,5 +1,34 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const File = std.Io.File;
+const default_io = std.Options.debug_io;
+
+fn openFileRead(path: []const u8) !File {
+    if (std.fs.path.isAbsolute(path)) {
+        return std.Io.Dir.openFileAbsolute(default_io, path, .{ .mode = .read_only });
+    }
+    return std.Io.Dir.cwd().openFile(default_io, path, .{ .mode = .read_only });
+}
+
+fn createFileTruncate(path: []const u8) !File {
+    if (std.fs.path.isAbsolute(path)) {
+        return std.Io.Dir.createFileAbsolute(default_io, path, .{ .truncate = true });
+    }
+    return std.Io.Dir.cwd().createFile(default_io, path, .{ .truncate = true });
+}
+
+fn closeFile(file: File) void {
+    file.close(default_io);
+}
+
+fn writeAll(file: File, bytes: []const u8) !void {
+    try file.writeStreamingAll(default_io, bytes);
+}
+
+fn seekTo(file: File, pos: u64) !void {
+    var writer = file.writer(default_io, &.{});
+    try writer.seekTo(pos);
+}
 
 pub const MAGIC_BYTES = [_]u8{ 'f', 'c', 'b', 1, 'f', 'c', 'b', 0 };
 pub const HEADER_MAX_BUFFER_SIZE: usize = 512 * 1024 * 1024; // 512MB
@@ -206,7 +235,7 @@ pub const FeatureView = struct {
 
 pub const Reader = struct {
     allocator: std.mem.Allocator,
-    file: std.fs.File,
+    file: File,
     owns_file: bool = true,
 
     transform: Transform = .{},
@@ -221,15 +250,15 @@ pub const Reader = struct {
     root_columns: []const ColumnSchema = EMPTY_COLUMNS,
     owns_root_columns: bool = false,
 
-    feature_buf: std.ArrayList(u8) = .{},
-    scratch_vertices: std.ArrayList([3]f64) = .{},
-    scratch_objects: std.ArrayList(ObjectView) = .{},
-    scratch_geometries: std.ArrayList(GeometryView) = .{},
-    scratch_attributes: std.ArrayList(Attribute) = .{},
-    scratch_columns: std.ArrayList(ColumnSchema) = .{},
-    scratch_column_types: std.ArrayList(ColumnTypeByIndex) = .{},
-    scratch_u32: std.ArrayList(u32) = .{},
-    scratch_u8: std.ArrayList(u8) = .{},
+    feature_buf: std.ArrayList(u8) = .empty,
+    scratch_vertices: std.ArrayList([3]f64) = .empty,
+    scratch_objects: std.ArrayList(ObjectView) = .empty,
+    scratch_geometries: std.ArrayList(GeometryView) = .empty,
+    scratch_attributes: std.ArrayList(Attribute) = .empty,
+    scratch_columns: std.ArrayList(ColumnSchema) = .empty,
+    scratch_column_types: std.ArrayList(ColumnTypeByIndex) = .empty,
+    scratch_u32: std.ArrayList(u32) = .empty,
+    scratch_u8: std.ArrayList(u8) = .empty,
 
     pending_loaded: bool = false,
     pending_id_owned: ?[]u8 = null,
@@ -242,15 +271,11 @@ pub const Reader = struct {
     },
 
     pub fn openPath(allocator: std.mem.Allocator, path: []const u8) !Reader {
-        const file = if (std.fs.path.isAbsolute(path))
-            try std.fs.openFileAbsolute(path, .{ .mode = .read_only })
-        else
-            try std.fs.cwd().openFile(path, .{ .mode = .read_only });
-
+        const file = try openFileRead(path);
         return openFile(allocator, file, true);
     }
 
-    pub fn openFile(allocator: std.mem.Allocator, file: std.fs.File, owns_file: bool) !Reader {
+    pub fn openFile(allocator: std.mem.Allocator, file: File, owns_file: bool) !Reader {
         var reader = Reader{
             .allocator = allocator,
             .file = file,
@@ -263,7 +288,7 @@ pub const Reader = struct {
 
     pub fn deinit(self: *Reader) void {
         if (self.owns_file) {
-            self.file.close();
+            closeFile(self.file);
         }
 
         self.feature_buf.deinit(self.allocator);
@@ -379,14 +404,14 @@ pub const Reader = struct {
         if (self.pending_loaded) return true;
 
         var size_buf: [4]u8 = undefined;
-        const size_read = try self.file.read(&size_buf);
+        const size_read = try std.posix.read(self.file.handle, &size_buf);
         if (size_read == 0) {
             self.reached_eof = true;
             return false;
         }
         var have: usize = size_read;
         while (have < size_buf.len) {
-            const n = try self.file.read(size_buf[have..]);
+            const n = try std.posix.read(self.file.handle, size_buf[have..]);
             if (n == 0) return error.UnexpectedEndOfStream;
             have += n;
         }
@@ -940,7 +965,7 @@ fn packedRtreeIndexSize(feature_count: u64, node_size: u16) !u64 {
     return try checkedMulU64(node_count, NODE_ITEM_SIZE_BYTES);
 }
 
-fn skipBytes(file: *std.fs.File, count: u64) !void {
+fn skipBytes(file: *File, count: u64) !void {
     var remaining = count;
     var buf: [4096]u8 = undefined;
     while (remaining > 0) {
@@ -950,10 +975,10 @@ fn skipBytes(file: *std.fs.File, count: u64) !void {
     }
 }
 
-fn readExact(file: *std.fs.File, out: []u8) !void {
+fn readExact(file: *File, out: []u8) !void {
     var read_total: usize = 0;
     while (read_total < out.len) {
-        const n = try file.read(out[read_total..]);
+        const n = try std.posix.read(file.handle, out[read_total..]);
         if (n == 0) return error.UnexpectedEndOfStream;
         read_total += n;
     }
@@ -1124,28 +1149,25 @@ const fb = struct {
 };
 
 pub const Writer = struct {
-    file: std.fs.File,
+    file: File,
     owns_file: bool = true,
     transform: Transform = .{},
     feature_count_patch_pos: ?u64 = null,
     written_feature_count: u64 = 0,
 
     pub fn openPathFromReader(reader: *const Reader, path: []const u8) !Writer {
-        const file = if (std.fs.path.isAbsolute(path))
-            try std.fs.createFileAbsolute(path, .{ .truncate = true })
-        else
-            try std.fs.cwd().createFile(path, .{ .truncate = true });
-        errdefer file.close();
+        const file = try createFileTruncate(path);
+        errdefer closeFile(file);
 
         return openFileFromReader(reader, file, true);
     }
 
-    pub fn openFileFromReader(reader: *const Reader, file: std.fs.File, owns_file: bool) !Writer {
+    pub fn openFileFromReader(reader: *const Reader, file: File, owns_file: bool) !Writer {
         if (owns_file) {
-            errdefer file.close();
+            errdefer closeFile(file);
         }
         if (reader.preamble().len == 0) return error.MissingReaderPreamble;
-        try file.writeAll(reader.preamble());
+        try writeAll(file, reader.preamble());
         return .{
             .file = file,
             .owns_file = owns_file,
@@ -1155,13 +1177,13 @@ pub const Writer = struct {
 
     pub fn deinit(self: *Writer) void {
         if (self.feature_count_patch_pos) |pos| {
-            self.file.seekTo(pos) catch {};
+            seekTo(self.file, pos) catch {};
             var tmp: [8]u8 = undefined;
             std.mem.writeInt(u64, &tmp, self.written_feature_count, .little);
-            _ = self.file.writeAll(&tmp) catch {};
+            writeAll(self.file, &tmp) catch {};
         }
         if (self.owns_file) {
-            self.file.close();
+            closeFile(self.file);
         }
     }
 
@@ -1170,18 +1192,15 @@ pub const Writer = struct {
     /// may be modified (e.g. via FeatureBuilder-based rewrites), since changed
     /// feature byte lengths invalidate the original index offsets.
     pub fn openPathFromReaderNoIndex(reader: *const Reader, path: []const u8) !Writer {
-        var file = if (std.fs.path.isAbsolute(path))
-            try std.fs.createFileAbsolute(path, .{ .truncate = true })
-        else
-            try std.fs.cwd().createFile(path, .{ .truncate = true });
-        errdefer file.close();
+        const file = try createFileTruncate(path);
+        errdefer closeFile(file);
 
         return openFileFromReaderNoIndex(reader, file, true);
     }
 
-    pub fn openFileFromReaderNoIndex(reader: *const Reader, file: std.fs.File, owns_file: bool) !Writer {
+    pub fn openFileFromReaderNoIndex(reader: *const Reader, file: File, owns_file: bool) !Writer {
         if (owns_file) {
-            errdefer file.close();
+            errdefer closeFile(file);
         }
         if (reader.header_buf.len < 8) return error.MissingReaderPreamble;
 
@@ -1243,7 +1262,7 @@ pub const Writer = struct {
             buf[pos + 1] = 0;
         }
 
-        try file.writeAll(buf[0..write_len]);
+        try writeAll(file, buf[0..write_len]);
         return .{
             .file = file,
             .owns_file = owns_file,
@@ -1252,17 +1271,14 @@ pub const Writer = struct {
     }
 
     pub fn openPathNewNoIndex(path: []const u8, transform: Transform, root_columns: []const ColumnSchema) !Writer {
-        const file = if (std.fs.path.isAbsolute(path))
-            try std.fs.createFileAbsolute(path, .{ .truncate = true })
-        else
-            try std.fs.cwd().createFile(path, .{ .truncate = true });
-        errdefer file.close();
+        const file = try createFileTruncate(path);
+        errdefer closeFile(file);
 
         const header = try buildHeaderNoIndex(std.heap.page_allocator, transform, root_columns);
         defer std.heap.page_allocator.free(header.bytes);
 
-        try file.writeAll(&MAGIC_BYTES);
-        try file.writeAll(header.bytes);
+        try writeAll(file, &MAGIC_BYTES);
+        try writeAll(file, header.bytes);
 
         const patch_pos = try checkedAddU64(8, header.feature_count_field_pos);
         return .{
@@ -1274,14 +1290,14 @@ pub const Writer = struct {
     }
 
     pub fn writeFeatureRaw(self: *Writer, feature_bytes: []const u8) !void {
-        try self.file.writeAll(feature_bytes);
+        try writeAll(self.file, feature_bytes);
         if (self.feature_count_patch_pos != null) {
             self.written_feature_count = try checkedAddU64(self.written_feature_count, 1);
         }
     }
 
     pub fn writeFeatureBuilt(self: *Writer, allocator: std.mem.Allocator, feature: *const FeatureBuilder) !void {
-        var feature_bytes = std.ArrayList(u8){};
+        var feature_bytes = std.ArrayList(u8).empty;
         defer feature_bytes.deinit(allocator);
         try feature.encodeFeature(&feature_bytes);
         try self.writeFeatureRaw(feature_bytes.items);
@@ -1792,9 +1808,9 @@ pub const FeatureBuilder = struct {
         defer self.allocator.free(src_to_final);
         @memset(src_to_final, unresolved);
 
-        var appended_vertices = std.ArrayList(QuantizedVertex){};
+        var appended_vertices = std.ArrayList(QuantizedVertex).empty;
         defer appended_vertices.deinit(self.allocator);
-        var remapped_boundaries = std.ArrayList(u32){};
+        var remapped_boundaries = std.ArrayList(u32).empty;
         defer remapped_boundaries.deinit(self.allocator);
         try remapped_boundaries.ensureTotalCapacity(self.allocator, triangle_indices.len);
 
@@ -1834,7 +1850,7 @@ pub const FeatureBuilder = struct {
         var unique_types: [256]bool = .{false} ** 256;
         for (semantic_types) |t| unique_types[t] = true;
         var type_to_obj_index: [256]u32 = .{std.math.maxInt(u32)} ** 256;
-        var object_types = std.ArrayList(u8){};
+        var object_types = std.ArrayList(u8).empty;
         defer object_types.deinit(self.allocator);
         for (0..256) |t| {
             if (unique_types[t]) {
@@ -2461,7 +2477,7 @@ fn buildHeaderNoIndex(
     transform: Transform,
     root_columns: []const ColumnSchema,
 ) !HeaderBuild {
-    var header = std.ArrayList(u8){};
+    var header = std.ArrayList(u8).empty;
     errdefer header.deinit(allocator);
     try header.appendNTimes(allocator, 0, 8);
 
@@ -2569,11 +2585,11 @@ fn getCurrentGeometry(reader: *Reader, object_index: usize, geometry_index: usiz
     return &obj.geometries[geometry_index];
 }
 
-fn fileFromFd(fd: c_int) ?std.fs.File {
+fn fileFromFd(fd: c_int) ?File {
     if (fd < 0) return null;
     if (builtin.os.tag == .windows) return null;
-    const handle: std.fs.File.Handle = @as(std.posix.fd_t, @intCast(fd));
-    return .{ .handle = handle };
+    const handle: File.Handle = @as(std.posix.fd_t, @intCast(fd));
+    return .{ .handle = handle, .flags = .{ .nonblocking = false } };
 }
 
 export fn zfcb_reader_open(path: [*c]const u8) callconv(.c) ?ZfcbReaderHandle {
@@ -3036,7 +3052,7 @@ export fn zfcb_writer_write_current_replaced_lod22(
     builder.loadCurrentFromReader(reader) catch return -1;
     builder.replaceLod22Solid(feature_id, vertices_xyz_world, triangle_indices, semantic_types) catch return -1;
 
-    var rewritten_feature = std.ArrayList(u8){};
+    var rewritten_feature = std.ArrayList(u8).empty;
     defer rewritten_feature.deinit(c_allocator);
     builder.encodeFeature(&rewritten_feature) catch return -1;
     writer.writeFeatureRaw(rewritten_feature.items) catch return -1;
@@ -3209,7 +3225,7 @@ test "feature builder encode/decode preserves geometry semantics" {
     var builder = try buildSyntheticFeatureBuilder(std.testing.allocator, .{}, false);
     defer builder.deinit();
 
-    var feature_bytes = std.ArrayList(u8){};
+    var feature_bytes = std.ArrayList(u8).empty;
     defer feature_bytes.deinit(std.testing.allocator);
     try builder.encodeFeature(&feature_bytes);
 
@@ -3284,7 +3300,7 @@ test "feature builder encoded tables are aligned" {
     var builder = try buildSyntheticFeatureBuilder(std.testing.allocator, .{}, false);
     defer builder.deinit();
 
-    var feature_bytes = std.ArrayList(u8){};
+    var feature_bytes = std.ArrayList(u8).empty;
     defer feature_bytes.deinit(std.testing.allocator);
     try builder.encodeFeature(&feature_bytes);
 
@@ -3314,7 +3330,7 @@ test "feature builder preserves object parent child links" {
     defer builder.deinit();
     try builder.loadCurrentFromReader(&reader);
 
-    var feature_bytes = std.ArrayList(u8){};
+    var feature_bytes = std.ArrayList(u8).empty;
     defer feature_bytes.deinit(std.testing.allocator);
     try builder.encodeFeature(&feature_bytes);
 
