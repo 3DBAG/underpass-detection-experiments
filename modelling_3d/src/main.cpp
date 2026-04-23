@@ -732,7 +732,26 @@ static bool process_stream_features(Backend& backend, StreamProcessingContext& c
             std::string feature_id_str(next_id);
             auto t_output_write_start_local = Clock::now();
             int write_result = -1;
-            if (carve_result.has_polygonal_result) {
+            if (ctx.method == BooleanMethod::Manifold && carve_result.result_meshgl.NumTri() > 0) {
+                PolygonalOutput polygonal_output;
+                if (build_polygonal_output_from_manifold_meshgl(
+                        carve_result.result_meshgl,
+                        house,
+                        carve_result.house_min_z,
+                        carve_result.underpass_z,
+                        ctx.global_offset_x,
+                        ctx.global_offset_y,
+                        ctx.global_offset_z,
+                        polygonal_output)) {
+                    write_result = backend.write_current_replaced_lod22_polygonal(
+                        feature_id_str.c_str(), feature_id_str.size(),
+                        polygonal_output.vertices_xyz_world.data(), polygonal_output.vertices_xyz_world.size() / 3,
+                        polygonal_output.surface_ring_counts.data(), polygonal_output.surface_ring_counts.size(),
+                        polygonal_output.ring_vertex_counts.data(), polygonal_output.ring_vertex_counts.size(),
+                        polygonal_output.boundary_indices.data(), polygonal_output.boundary_indices.size(),
+                        polygonal_output.surface_semantic_types.data(), polygonal_output.surface_semantic_types.size());
+                }
+            } else if (carve_result.has_polygonal_result) {
                 PolygonalOutput polygonal_output;
                 if (build_polygonal_output_from_cgal_mesh(
                         carve_result.result_surface_mesh,

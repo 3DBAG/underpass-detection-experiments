@@ -18,9 +18,19 @@ constexpr uint8_t kGroundSurface = 1;
 constexpr uint8_t kWallSurface = 2;
 constexpr uint8_t kOuterCeilingSurface = 4;
 
-constexpr double kNormalDotTolerance = 1e-4;
-constexpr double kPlaneDistanceTolerance = 1e-2;
+// Maximum angular deviation allowed when merging two nearly coplanar faces.
+// This is approximately 1.8 degrees from parallel/anti-parallel.
+// Internally we compare normals via abs(abs(dot(n0, n1)) - 1).
+constexpr double kNormalDotTolerance = 5e-4;
+// Maximum point-to-plane distance allowed when treating two faces as coplanar.
+// Units are the same as the mesh coordinate system.
+constexpr double kPlaneDistanceTolerance = 2e-2;
+// Faces with |nz| below this value are treated as vertical enough to classify
+// as walls in the fallback semantic classifier.
 constexpr double kSemanticNzThreshold = 0.3;
+// Downward-facing faces within this Z distance of the building minimum Z are
+// classified as ground; otherwise they are classified as outer ceilings.
+// Units are the same as the mesh coordinate system.
 constexpr double kGroundZTolerance = 0.5;
 
 struct Vec2 {
@@ -46,6 +56,19 @@ struct PreparedSourceSurface {
 struct BoundaryEdge {
     uint32_t from = 0;
     uint32_t to = 0;
+};
+
+struct TriangleGroupKey {
+    uint32_t run_index = 0;
+    uint32_t face_id = 0;
+
+    bool operator==(const TriangleGroupKey& other) const = default;
+};
+
+struct TriangleGroupKeyHash {
+    size_t operator()(const TriangleGroupKey& key) const {
+        return (static_cast<size_t>(key.run_index) << 32) ^ static_cast<size_t>(key.face_id);
+    }
 };
 
 size_t descriptor_id(Surface_mesh::Vertex_index v) {
@@ -413,6 +436,208 @@ void orient_cycles(
     }
 }
 
+struct ProjectedCycleInfo {
+    size_t cycle_index = 0;
+    std::vector<Vec2> ring_2d;
+    double signed_area = 0.0;
+    double abs_area = 0.0;
+    size_t nesting_depth = 0;
+    size_t parent_index = std::numeric_limits<size_t>::max();
+};
+
+void orient_cycle_for_area_sign(std::vector<uint32_t>& cycle, double signed_area, bool want_positive) {
+    const bool is_positive = signed_area >= 0.0;
+    if (is_positive != want_positive) {
+        std::reverse(cycle.begin(), cycle.end());
+    }
+}
+
+std::vector<std::vector<std::vector<uint32_t>>> group_cycles_into_surfaces(
+    const std::vector<K::Point_3>& dense_vertices,
+    const K::Vector_3& normal,
+    std::vector<std::vector<uint32_t>> cycles) {
+    std::vector<std::vector<std::vector<uint32_t>>> surfaces;
+    if (cycles.empty()) {
+        return surfaces;
+    }
+
+    const int drop_axis = choose_drop_axis(normal);
+    std::vector<ProjectedCycleInfo> infos;
+    infos.reserve(cycles.size());
+    for (size_t i = 0; i < cycles.size(); ++i) {
+        ProjectedCycleInfo info;
+        info.cycle_index = i;
+        info.ring_2d.reserve(cycles[i].size());
+        for (uint32_t idx : cycles[i]) {
+            info.ring_2d.push_back(project_point(dense_vertices[idx], drop_axis));
+        }
+        info.signed_area = signed_area_2d(info.ring_2d);
+        info.abs_area = std::abs(info.signed_area);
+        infos.push_back(std::move(info));
+    }
+
+    for (size_t i = 0; i < infos.size(); ++i) {
+        const auto& test_point = infos[i].ring_2d.front();
+        double best_parent_area = std::numeric_limits<double>::max();
+        for (size_t j = 0; j < infos.size(); ++j) {
+            if (i == j) {
+                continue;
+            }
+            if (infos[j].abs_area <= infos[i].abs_area) {
+                continue;
+            }
+            if (!point_in_ring(test_point, infos[j].ring_2d)) {
+                continue;
+            }
+            infos[i].nesting_depth += 1;
+            if (infos[j].abs_area < best_parent_area) {
+                best_parent_area = infos[j].abs_area;
+                infos[i].parent_index = j;
+            }
+        }
+    }
+
+    std::unordered_map<size_t, size_t> surface_index_by_outer;
+    for (size_t i = 0; i < infos.size(); ++i) {
+        const bool is_outer = (infos[i].nesting_depth % 2) == 0;
+        if (!is_outer) {
+            continue;
+        }
+
+        orient_cycle_for_area_sign(cycles[infos[i].cycle_index], infos[i].signed_area, true);
+        surface_index_by_outer.emplace(i, surfaces.size());
+        surfaces.push_back({cycles[infos[i].cycle_index]});
+    }
+
+    for (size_t i = 0; i < infos.size(); ++i) {
+        const bool is_hole = (infos[i].nesting_depth % 2) == 1;
+        if (!is_hole) {
+            continue;
+        }
+
+        size_t current_parent = infos[i].parent_index;
+        while (current_parent != std::numeric_limits<size_t>::max() &&
+               (infos[current_parent].nesting_depth % 2) == 1) {
+            current_parent = infos[current_parent].parent_index;
+        }
+        if (current_parent == std::numeric_limits<size_t>::max()) {
+            continue;
+        }
+
+        auto surface_it = surface_index_by_outer.find(current_parent);
+        if (surface_it == surface_index_by_outer.end()) {
+            continue;
+        }
+
+        orient_cycle_for_area_sign(cycles[infos[i].cycle_index], infos[i].signed_area, false);
+        surfaces[surface_it->second].push_back(cycles[infos[i].cycle_index]);
+    }
+
+    return surfaces;
+}
+
+std::vector<uint32_t> meshgl_triangle_runs(const manifold::MeshGL& meshgl) {
+    const size_t tri_count = meshgl.NumTri();
+    std::vector<uint32_t> tri_runs(tri_count, 0);
+    if (tri_count == 0) {
+        return tri_runs;
+    }
+
+    if (meshgl.runIndex.empty()) {
+        return tri_runs;
+    }
+
+    const size_t run_count = meshgl.runOriginalID.empty()
+        ? (meshgl.runIndex.size() > 1 ? meshgl.runIndex.size() - 1 : 1)
+        : meshgl.runOriginalID.size();
+
+    for (size_t run_idx = 0; run_idx < run_count; ++run_idx) {
+        const size_t tri_begin = static_cast<size_t>(meshgl.runIndex[run_idx]) / 3;
+        const size_t tri_end = (run_idx + 1 < meshgl.runIndex.size())
+            ? static_cast<size_t>(meshgl.runIndex[run_idx + 1]) / 3
+            : tri_count;
+        for (size_t tri_idx = tri_begin; tri_idx < std::min(tri_end, tri_count); ++tri_idx) {
+            tri_runs[tri_idx] = static_cast<uint32_t>(run_idx);
+        }
+    }
+
+    return tri_runs;
+}
+
+bool build_polygonal_output_from_grouped_mesh(
+    const Surface_mesh& mesh,
+    const std::unordered_map<size_t, size_t>& face_group,
+    const std::vector<std::vector<Surface_mesh::Face_index>>& groups,
+    const LoadedSolidMesh& source_mesh,
+    double house_min_z,
+    double offset_x,
+    double offset_y,
+    double offset_z,
+    PolygonalOutput& out) {
+    out = {};
+    if (mesh.number_of_faces() == 0 || mesh.number_of_vertices() == 0) {
+        return false;
+    }
+
+    std::unordered_map<size_t, uint32_t> vertex_to_dense;
+    vertex_to_dense.reserve(mesh.number_of_vertices());
+    std::vector<K::Point_3> dense_vertices;
+    dense_vertices.reserve(mesh.number_of_vertices());
+    for (auto v : mesh.vertices()) {
+        const uint32_t dense_index = static_cast<uint32_t>(dense_vertices.size());
+        vertex_to_dense.emplace(descriptor_id(v), dense_index);
+        const auto& p = mesh.point(v);
+        dense_vertices.push_back(K::Point_3(p.x(), p.y(), p.z()));
+        out.vertices_xyz_world.push_back(p.x() + offset_x);
+        out.vertices_xyz_world.push_back(p.y() + offset_y);
+        out.vertices_xyz_world.push_back(p.z() + offset_z);
+    }
+
+    const auto prepared_sources = prepare_source_surfaces(source_mesh);
+
+    std::unordered_map<size_t, FaceGeometry> face_geometry;
+    std::unordered_map<size_t, uint8_t> face_semantic;
+    face_geometry.reserve(mesh.number_of_faces());
+    face_semantic.reserve(mesh.number_of_faces());
+    for (auto face : mesh.faces()) {
+        auto geom = compute_face_geometry(mesh, face);
+        const size_t face_id = descriptor_id(face);
+        face_semantic.emplace(face_id, infer_face_semantic(geom, prepared_sources, house_min_z));
+        face_geometry.emplace(face_id, std::move(geom));
+    }
+
+    for (size_t group_id = 0; group_id < groups.size(); ++group_id) {
+        if (groups[group_id].empty()) {
+            continue;
+        }
+
+        auto cycles = extract_group_cycles(mesh, groups[group_id], face_group, group_id, vertex_to_dense);
+        if (cycles.empty()) {
+            continue;
+        }
+
+        const auto& seed_geom = face_geometry.at(descriptor_id(groups[group_id].front()));
+        auto grouped_surfaces = group_cycles_into_surfaces(dense_vertices, seed_geom.unit_normal, std::move(cycles));
+        if (grouped_surfaces.empty()) {
+            continue;
+        }
+
+        for (const auto& surface_rings : grouped_surfaces) {
+            if (surface_rings.empty()) {
+                continue;
+            }
+            out.surface_ring_counts.push_back(static_cast<uint32_t>(surface_rings.size()));
+            out.surface_semantic_types.push_back(face_semantic.at(descriptor_id(groups[group_id].front())));
+            for (const auto& cycle : surface_rings) {
+                out.ring_vertex_counts.push_back(static_cast<uint32_t>(cycle.size()));
+                out.boundary_indices.insert(out.boundary_indices.end(), cycle.begin(), cycle.end());
+            }
+        }
+    }
+
+    return !out.surface_ring_counts.empty() && !out.boundary_indices.empty();
+}
+
 } // namespace
 
 bool build_polygonal_output_from_cgal_mesh(
@@ -425,27 +650,12 @@ bool build_polygonal_output_from_cgal_mesh(
     double offset_z,
     PolygonalOutput& out) {
     (void)underpass_z;
-    out = {};
     if (result_mesh.number_of_faces() == 0 || result_mesh.number_of_vertices() == 0) {
+        out = {};
         return false;
     }
 
-    std::unordered_map<size_t, uint32_t> vertex_to_dense;
-    vertex_to_dense.reserve(result_mesh.number_of_vertices());
-    std::vector<K::Point_3> dense_vertices;
-    dense_vertices.reserve(result_mesh.number_of_vertices());
-    for (auto v : result_mesh.vertices()) {
-        const uint32_t dense_index = static_cast<uint32_t>(dense_vertices.size());
-        vertex_to_dense.emplace(descriptor_id(v), dense_index);
-        const auto& p = result_mesh.point(v);
-        dense_vertices.push_back(K::Point_3(p.x(), p.y(), p.z()));
-        out.vertices_xyz_world.push_back(p.x() + offset_x);
-        out.vertices_xyz_world.push_back(p.y() + offset_y);
-        out.vertices_xyz_world.push_back(p.z() + offset_z);
-    }
-
     const auto prepared_sources = prepare_source_surfaces(source_mesh);
-
     std::unordered_map<size_t, FaceGeometry> face_geometry;
     std::unordered_map<size_t, uint8_t> face_semantic;
     face_geometry.reserve(result_mesh.number_of_faces());
@@ -509,26 +719,65 @@ bool build_polygonal_output_from_cgal_mesh(
         groups.push_back(std::move(group_faces));
     }
 
-    for (size_t group_id = 0; group_id < groups.size(); ++group_id) {
-        if (groups[group_id].empty()) {
+    return build_polygonal_output_from_grouped_mesh(
+        result_mesh,
+        face_group,
+        groups,
+        source_mesh,
+        house_min_z,
+        offset_x,
+        offset_y,
+        offset_z,
+        out);
+}
+
+bool build_polygonal_output_from_manifold_meshgl(
+    const manifold::MeshGL& result_meshgl,
+    const LoadedSolidMesh& source_mesh,
+    double house_min_z,
+    double underpass_z,
+    double offset_x,
+    double offset_y,
+    double offset_z,
+    PolygonalOutput& out) {
+    (void)underpass_z;
+    const size_t tri_count = result_meshgl.NumTri();
+    const size_t vertex_count = result_meshgl.NumVert();
+    if (tri_count == 0 || vertex_count == 0 || result_meshgl.numProp < 3) {
+        return false;
+    }
+
+    Surface_mesh mesh;
+    std::vector<Surface_mesh::Vertex_index> vertex_handles;
+    vertex_handles.reserve(vertex_count);
+    for (size_t v = 0; v < vertex_count; ++v) {
+        vertex_handles.push_back(mesh.add_vertex(K::Point_3(
+            result_meshgl.vertProperties[v * result_meshgl.numProp + 0],
+            result_meshgl.vertProperties[v * result_meshgl.numProp + 1],
+            result_meshgl.vertProperties[v * result_meshgl.numProp + 2])));
+    }
+
+    for (size_t tri_idx = 0; tri_idx < tri_count; ++tri_idx) {
+        const uint32_t i0 = result_meshgl.triVerts[tri_idx * 3 + 0];
+        const uint32_t i1 = result_meshgl.triVerts[tri_idx * 3 + 1];
+        const uint32_t i2 = result_meshgl.triVerts[tri_idx * 3 + 2];
+        if (i0 >= vertex_handles.size() || i1 >= vertex_handles.size() || i2 >= vertex_handles.size()) {
             continue;
         }
 
-        auto cycles = extract_group_cycles(result_mesh, groups[group_id], face_group, group_id, vertex_to_dense);
-        if (cycles.empty()) {
+        const auto face = mesh.add_face(vertex_handles[i0], vertex_handles[i1], vertex_handles[i2]);
+        if (face == Surface_mesh::null_face()) {
             continue;
-        }
-
-        const auto& seed_geom = face_geometry.at(descriptor_id(groups[group_id].front()));
-        orient_cycles(dense_vertices, seed_geom.unit_normal, cycles);
-
-        out.surface_ring_counts.push_back(static_cast<uint32_t>(cycles.size()));
-        out.surface_semantic_types.push_back(face_semantic.at(descriptor_id(groups[group_id].front())));
-        for (const auto& cycle : cycles) {
-            out.ring_vertex_counts.push_back(static_cast<uint32_t>(cycle.size()));
-            out.boundary_indices.insert(out.boundary_indices.end(), cycle.begin(), cycle.end());
         }
     }
 
-    return !out.surface_ring_counts.empty() && !out.boundary_indices.empty();
+    return build_polygonal_output_from_cgal_mesh(
+        mesh,
+        source_mesh,
+        house_min_z,
+        underpass_z,
+        offset_x,
+        offset_y,
+        offset_z,
+        out);
 }

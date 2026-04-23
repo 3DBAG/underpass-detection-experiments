@@ -4,6 +4,8 @@
 #include <cstdint>
 #include <vector>
 
+#include <manifold/manifold.h>
+
 #include "BooleanOps.h"
 #include "ModelLoaders.h"
 
@@ -17,6 +19,16 @@ struct PolygonalOutput {
 
 bool build_polygonal_output_from_cgal_mesh(
     const Surface_mesh& result_mesh,
+    const LoadedSolidMesh& source_mesh,
+    double house_min_z,
+    double underpass_z,
+    double offset_x,
+    double offset_y,
+    double offset_z,
+    PolygonalOutput& out);
+
+bool build_polygonal_output_from_manifold_meshgl(
+    const manifold::MeshGL& result_meshgl,
     const LoadedSolidMesh& source_mesh,
     double house_min_z,
     double underpass_z,
