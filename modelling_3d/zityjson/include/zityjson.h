@@ -108,6 +108,17 @@ size_t cityjson_get_geometry_boundary_count(CityJSONHandle handle, size_t object
 const size_t* cityjson_get_geometry_surfaces(CityJSONHandle handle, size_t object_index, size_t geometry_index);
 const size_t* cityjson_get_geometry_strings(CityJSONHandle handle, size_t object_index, size_t geometry_index);
 const size_t* cityjson_get_geometry_boundaries(CityJSONHandle handle, size_t object_index, size_t geometry_index);
+// Returns:
+//   1 => semantic type returned
+//   0 => geometry/surface exists but has no semantic assignment
+//  -1 => invalid args/handle/indices
+int cityjson_get_geometry_surface_semantic_type(
+    CityJSONHandle handle,
+    size_t object_index,
+    size_t geometry_index,
+    size_t surface_index,
+    uint8_t* out_semantic_type
+);
 
 // Get the vertex count for a geometry by object and geometry index.
 size_t cityjson_get_vertex_count(CityJSONHandle handle, size_t object_index, size_t geometry_index);
@@ -203,6 +214,33 @@ int cityjsonseq_writer_write_current_replaced_lod22(
     size_t triangle_index_count,
     const uint8_t* semantic_types,
     size_t semantic_types_count
+);
+
+// Write current feature with LoD 2.2 Solid geometry replaced by polygonal
+// surfaces with optional holes.
+// Semantics type values match zfcb semantic enum values:
+//   0=RoofSurface, 1=GroundSurface, 2=WallSurface, 4=OuterCeilingSurface.
+// surface_ring_counts: length = surface_count.
+// ring_vertex_counts: length = ring_count, where ring_count is the sum of
+//   surface_ring_counts.
+// boundary_indices: flat vertex indices for every ring vertex.
+// surface_semantic_types_count must equal surface_count.
+// Returns 0 on success, -1 on failure.
+int cityjsonseq_writer_write_current_replaced_lod22_polygonal(
+    CityJSONSeqReaderHandle reader_handle,
+    CityJSONSeqWriterHandle writer_handle,
+    const char* feature_id,
+    size_t feature_id_len,
+    const double* vertices_xyz_world,
+    size_t vertex_count,
+    const uint32_t* surface_ring_counts,
+    size_t surface_count,
+    const uint32_t* ring_vertex_counts,
+    size_t ring_count,
+    const uint32_t* boundary_indices,
+    size_t boundary_index_count,
+    const uint8_t* surface_semantic_types,
+    size_t surface_semantic_types_count
 );
 
 #ifdef __cplusplus

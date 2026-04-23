@@ -20,6 +20,7 @@
 #include "BooleanOpsManifold.h"
 #include "MeshConversion.h"
 #include "ModelLoaders.h"
+#include "PolygonalOutput.h"
 #include "zityjson.h"
 #include "zfcb.h"
 #include "OGRVectorReader.h"
@@ -111,6 +112,8 @@ static std::vector<uint8_t> classify_triangle_semantics(
 struct FeatureCarveResult {
     bool any_succeeded = false;
     manifold::MeshGL result_meshgl;
+    Surface_mesh result_surface_mesh;
+    bool has_polygonal_result = false;
     double house_min_z = std::numeric_limits<double>::quiet_NaN();
     double underpass_z = 0.0;
     size_t processed_count = 0;
@@ -118,7 +121,7 @@ struct FeatureCarveResult {
 };
 
 static FeatureCarveResult carve_underpasses_for_feature(
-    const Surface_mesh& house_mesh,
+    const LoadedSolidMesh& house_data,
     std::string_view model_feature_id,
     const std::vector<ogr::VectorReader::PolygonFeature>& polygon_features,
     const std::vector<size_t>& matched_indices,
@@ -132,7 +135,7 @@ static FeatureCarveResult carve_underpasses_for_feature(
     std::chrono::duration<double, std::milli>& ds_conversion_ms,
     std::chrono::duration<double, std::milli>& intersection_ms) {
     FeatureCarveResult result;
-    result.house_min_z = mesh_min_z(house_mesh);
+    result.house_min_z = mesh_min_z(house_data.mesh);
     if (!std::isfinite(result.house_min_z)) {
         for (size_t feature_idx : matched_indices) {
             seen_feature[feature_idx] = true;
@@ -200,7 +203,7 @@ static FeatureCarveResult carve_underpasses_for_feature(
 
     BooleanOpTiming timing;
     bool success = true;
-    Surface_mesh house_sm = house_mesh;
+    Surface_mesh house_sm = house_data.mesh;
     if (method == BooleanMethod::Manifold) {
         ManifoldBooleanError error = ManifoldBooleanError::None;
         success = manifold_boolean_difference(
@@ -220,8 +223,8 @@ static FeatureCarveResult carve_underpasses_for_feature(
     } else if (method == BooleanMethod::CgalNef) {
         Surface_mesh result_sm = nef_boolean_difference(house_sm, underpass_meshes, &timing);
         auto t_conversion_start_local = Clock::now();
-        CGAL::Polygon_mesh_processing::triangulate_faces(result_sm);
-        result.result_meshgl = surface_mesh_to_meshgl(result_sm, false);
+        result.result_surface_mesh = std::move(result_sm);
+        result.has_polygonal_result = true;
         auto t_conversion_end_local = Clock::now();
         ds_conversion_ms += t_conversion_end_local - t_conversion_start_local;
 #ifdef ENABLE_GEOGRAM
@@ -235,14 +238,18 @@ static FeatureCarveResult carve_underpasses_for_feature(
     } else {
         Surface_mesh result_sm = corefine_boolean_difference(house_sm, underpass_meshes, &timing);
         auto t_conversion_start_local = Clock::now();
-        result.result_meshgl = surface_mesh_to_meshgl(result_sm, false);
+        result.result_surface_mesh = std::move(result_sm);
+        result.has_polygonal_result = true;
         auto t_conversion_end_local = Clock::now();
         ds_conversion_ms += t_conversion_end_local - t_conversion_start_local;
     }
     intersection_ms += timing.boolean_ms;
     ds_conversion_ms += timing.conversion_ms;
 
-    if (success && result.result_meshgl.NumTri() > 0) {
+    const bool has_output_mesh =
+        result.has_polygonal_result ? result.result_surface_mesh.number_of_faces() > 0
+                                    : result.result_meshgl.NumTri() > 0;
+    if (success && has_output_mesh) {
         result.any_succeeded = true;
         result.processed_count += merged_feature_count;
     } else {
@@ -357,6 +364,29 @@ struct FcbStreamBackend {
             semantic_types, semantic_types_count);
     }
 
+    int write_current_replaced_lod22_polygonal(
+        const char* feature_id_ptr,
+        size_t feature_id_len,
+        const double* vertices_xyz_world,
+        size_t vertex_count,
+        const uint32_t* surface_ring_counts,
+        size_t surface_count,
+        const uint32_t* ring_vertex_counts,
+        size_t ring_count,
+        const uint32_t* boundary_indices,
+        size_t boundary_index_count,
+        const uint8_t* surface_semantic_types,
+        size_t surface_semantic_types_count) {
+        return zfcb_writer_write_current_replaced_lod22_polygonal(
+            reader, writer,
+            feature_id_ptr, feature_id_len,
+            vertices_xyz_world, vertex_count,
+            surface_ring_counts, surface_count,
+            ring_vertex_counts, ring_count,
+            boundary_indices, boundary_index_count,
+            surface_semantic_types, surface_semantic_types_count);
+    }
+
     bool prepare_current_feature(
         std::string_view next_id,
         const std::vector<size_t>& matched_indices,
@@ -401,14 +431,14 @@ struct FcbStreamBackend {
 
     bool load_current_house_mesh(
         std::string_view next_id,
-        Surface_mesh& house_sm,
+        LoadedSolidMesh& house,
         double offset_x,
         double offset_y,
         double offset_z,
         std::string& val3dity_suffix) {
         std::string fcb_b3_val3dity_lod22;
         bool loaded = load_fcb_feature_mesh(
-            reader, next_id, house_sm, offset_x, offset_y, offset_z, &fcb_b3_val3dity_lod22);
+            reader, next_id, house, offset_x, offset_y, offset_z, &fcb_b3_val3dity_lod22);
         val3dity_suffix = fcb_b3_val3dity_lod22.empty()
             ? std::string{}
             : std::format(" (b3_val3dity_lod22='{}')", fcb_b3_val3dity_lod22);
@@ -475,6 +505,29 @@ struct CjseqStreamBackend {
             semantic_types, semantic_types_count);
     }
 
+    int write_current_replaced_lod22_polygonal(
+        const char* feature_id_ptr,
+        size_t feature_id_len,
+        const double* vertices_xyz_world,
+        size_t vertex_count,
+        const uint32_t* surface_ring_counts,
+        size_t surface_count,
+        const uint32_t* ring_vertex_counts,
+        size_t ring_count,
+        const uint32_t* boundary_indices,
+        size_t boundary_index_count,
+        const uint8_t* surface_semantic_types,
+        size_t surface_semantic_types_count) {
+        return cityjsonseq_writer_write_current_replaced_lod22_polygonal(
+            reader, writer,
+            feature_id_ptr, feature_id_len,
+            vertices_xyz_world, vertex_count,
+            surface_ring_counts, surface_count,
+            ring_vertex_counts, ring_count,
+            boundary_indices, boundary_index_count,
+            surface_semantic_types, surface_semantic_types_count);
+    }
+
     bool prepare_current_feature(
         std::string_view next_id,
         const std::vector<size_t>& matched_indices,
@@ -503,7 +556,7 @@ struct CjseqStreamBackend {
 
     bool load_current_house_mesh(
         std::string_view next_id,
-        Surface_mesh& house_sm,
+        LoadedSolidMesh& house,
         double offset_x,
         double offset_y,
         double offset_z,
@@ -520,7 +573,7 @@ struct CjseqStreamBackend {
         return load_cityjson_object_mesh(
             current_feature_cj,
             static_cast<size_t>(object_index),
-            house_sm,
+            house,
             offset_x,
             offset_y,
             offset_z);
@@ -612,7 +665,7 @@ static bool process_stream_features(Backend& backend, StreamProcessingContext& c
             continue;
         }
 
-        Surface_mesh house_sm;
+        LoadedSolidMesh house;
         bool house_mesh_loaded = false;
         std::string house_mesh_error;
         std::string val3dity_suffix;
@@ -620,7 +673,7 @@ static bool process_stream_features(Backend& backend, StreamProcessingContext& c
         try {
             house_mesh_loaded = backend.load_current_house_mesh(
                 next_id,
-                house_sm,
+                house,
                 ctx.global_offset_x,
                 ctx.global_offset_y,
                 ctx.global_offset_z,
@@ -659,7 +712,7 @@ static bool process_stream_features(Backend& backend, StreamProcessingContext& c
         ctx.model_stream_read_ms += t_stream_read_end_mesh - t_stream_read_start_mesh;
 
         auto carve_result = carve_underpasses_for_feature(
-            house_sm,
+            house,
             next_id,
             ctx.polygon_features,
             matched_indices,
@@ -675,22 +728,51 @@ static bool process_stream_features(Backend& backend, StreamProcessingContext& c
         ctx.processed_count += carve_result.processed_count;
         ctx.skipped_count += carve_result.skipped_count;
 
-        if (carve_result.any_succeeded && carve_result.result_meshgl.NumTri() > 0) {
-            auto world_verts = meshgl_to_world_vertices(
-                carve_result.result_meshgl,
-                ctx.global_offset_x,
-                ctx.global_offset_y,
-                ctx.global_offset_z);
-            auto semantics = classify_triangle_semantics(
-                carve_result.result_meshgl, carve_result.house_min_z, carve_result.underpass_z);
-
+        if (carve_result.any_succeeded) {
             std::string feature_id_str(next_id);
             auto t_output_write_start_local = Clock::now();
-            int write_result = backend.write_current_replaced_lod22(
-                feature_id_str.c_str(), feature_id_str.size(),
-                world_verts.data(), world_verts.size() / 3,
-                carve_result.result_meshgl.triVerts.data(), carve_result.result_meshgl.triVerts.size(),
-                semantics.data(), semantics.size());
+            int write_result = -1;
+            if (carve_result.has_polygonal_result) {
+                PolygonalOutput polygonal_output;
+                if (build_polygonal_output_from_cgal_mesh(
+                        carve_result.result_surface_mesh,
+                        house,
+                        carve_result.house_min_z,
+                        carve_result.underpass_z,
+                        ctx.global_offset_x,
+                        ctx.global_offset_y,
+                        ctx.global_offset_z,
+                        polygonal_output)) {
+                    write_result = backend.write_current_replaced_lod22_polygonal(
+                        feature_id_str.c_str(), feature_id_str.size(),
+                        polygonal_output.vertices_xyz_world.data(), polygonal_output.vertices_xyz_world.size() / 3,
+                        polygonal_output.surface_ring_counts.data(), polygonal_output.surface_ring_counts.size(),
+                        polygonal_output.ring_vertex_counts.data(), polygonal_output.ring_vertex_counts.size(),
+                        polygonal_output.boundary_indices.data(), polygonal_output.boundary_indices.size(),
+                        polygonal_output.surface_semantic_types.data(), polygonal_output.surface_semantic_types.size());
+                }
+
+                if (write_result < 0) {
+                    Surface_mesh triangulated_mesh = carve_result.result_surface_mesh;
+                    CGAL::Polygon_mesh_processing::triangulate_faces(triangulated_mesh);
+                    carve_result.result_meshgl = surface_mesh_to_meshgl(triangulated_mesh, false);
+                }
+            }
+
+            if (write_result < 0 && carve_result.result_meshgl.NumTri() > 0) {
+                auto world_verts = meshgl_to_world_vertices(
+                    carve_result.result_meshgl,
+                    ctx.global_offset_x,
+                    ctx.global_offset_y,
+                    ctx.global_offset_z);
+                auto semantics = classify_triangle_semantics(
+                    carve_result.result_meshgl, carve_result.house_min_z, carve_result.underpass_z);
+                write_result = backend.write_current_replaced_lod22(
+                    feature_id_str.c_str(), feature_id_str.size(),
+                    world_verts.data(), world_verts.size() / 3,
+                    carve_result.result_meshgl.triVerts.data(), carve_result.result_meshgl.triVerts.size(),
+                    semantics.data(), semantics.size());
+            }
             auto t_output_write_end_local = Clock::now();
             auto d_output_write = t_output_write_end_local - t_output_write_start_local;
             ctx.output_write_ms += d_output_write;

@@ -44,10 +44,34 @@ pub const FaceType = enum(u8) {
     // Add more as needed
 };
 
+const SemanticRoofSurface: u8 = 0;
+const SemanticGroundSurface: u8 = 1;
+const SemanticWallSurface: u8 = 2;
+const SemanticOuterCeilingSurface: u8 = 4;
+
+fn faceTypeToSemanticType(face_type: FaceType) u8 {
+    return switch (face_type) {
+        .wall, .window, .door => SemanticWallSurface,
+        .floor => SemanticGroundSurface,
+        .ceiling => SemanticOuterCeilingSurface,
+        .roof => SemanticRoofSurface,
+    };
+}
+
+fn semanticTypeToFaceType(semantic_type: u8) FaceType {
+    return switch (semantic_type) {
+        SemanticRoofSurface => .roof,
+        SemanticGroundSurface => .floor,
+        SemanticOuterCeilingSurface => .ceiling,
+        else => .wall,
+    };
+}
+
 pub const CJGeometry = struct {
     type: CJGeometryType,
     lod: []const u8,
     boundaries: std.json.Value,
+    semantics: ?std.json.Value = null,
 };
 
 pub const CJObject = struct {
@@ -126,7 +150,7 @@ pub const CityJSON = struct {
         surfaces: std.ArrayList(usize),
         strings: std.ArrayList(usize),
         boundaries: std.ArrayList(usize),
-        face_types: std.ArrayList(FaceType),
+        surface_semantic_types: std.ArrayList(u8),
 
         pub fn init(allocator: std.mem.Allocator, geometry_type: CJGeometryType, lod: []const u8) !StoredGeometry {
             return StoredGeometry{
@@ -136,7 +160,7 @@ pub const CityJSON = struct {
                 .surfaces = .empty,
                 .strings = .empty,
                 .boundaries = .empty,
-                .face_types = .empty,
+                .surface_semantic_types = .empty,
             };
         }
 
@@ -146,7 +170,7 @@ pub const CityJSON = struct {
             self.surfaces.deinit(allocator);
             self.strings.deinit(allocator);
             self.boundaries.deinit(allocator);
-            self.face_types.deinit(allocator);
+            self.surface_semantic_types.deinit(allocator);
         }
 
         pub fn addVertex(self: *StoredGeometry, v: [3]f64, allocator: std.mem.Allocator) !usize {
@@ -155,10 +179,10 @@ pub const CityJSON = struct {
             return idx;
         }
 
-        pub fn addSurface(self: *StoredGeometry, rings: []const []const usize, face_type: FaceType, allocator: std.mem.Allocator) !void {
+        pub fn addSurface(self: *StoredGeometry, rings: []const []const usize, semantic_type: u8, allocator: std.mem.Allocator) !void {
             if (rings.len == 0) return;
             try self.surfaces.append(allocator, rings.len);
-            try self.face_types.append(allocator, face_type);
+            try self.surface_semantic_types.append(allocator, semantic_type);
             for (rings) |ring| {
                 try self.strings.append(allocator, ring.len);
                 try self.boundaries.appendSlice(allocator, ring);
@@ -375,6 +399,26 @@ pub const CityJSON = struct {
     ) !void {
         var vertex_remap = std.AutoHashMap(usize, usize).init(self.allocator);
         defer vertex_remap.deinit();
+        const semantic_types = try extractSurfaceSemanticTypes(
+            self.allocator,
+            g.type,
+            g.semantics,
+            switch (g.type) {
+                .MultiSurface => blk: {
+                    const parsed_ = try std.json.parseFromValue(CJMultiSurfaceBounds, self.allocator, g.boundaries, .{});
+                    defer parsed_.deinit();
+                    break :blk parsed_.value.len;
+                },
+                .Solid => blk: {
+                    const parsed_ = try std.json.parseFromValue(CJSolidBounds, self.allocator, g.boundaries, .{});
+                    defer parsed_.deinit();
+                    var count: usize = 0;
+                    for (parsed_.value) |shell| count += shell.len;
+                    break :blk count;
+                },
+            },
+        );
+        defer self.allocator.free(semantic_types);
 
         switch (g.type) {
             .MultiSurface => {
@@ -394,7 +438,7 @@ pub const CityJSON = struct {
                     }
                 }
 
-                for (bounds) |polygon| {
+                for (bounds, 0..) |polygon, surface_index| {
                     var rings = std.ArrayList([]const usize).empty;
                     defer rings.deinit(self.allocator);
                     try rings.ensureTotalCapacity(self.allocator, polygon.len);
@@ -409,13 +453,18 @@ pub const CityJSON = struct {
                     defer {
                         for (rings.items) |mapped_ring| self.allocator.free(mapped_ring);
                     }
-                    try geom.addSurface(rings.items, .wall, self.allocator);
+                    const semantic_type = if (surface_index < semantic_types.len)
+                        semantic_types[surface_index]
+                    else
+                        SemanticWallSurface;
+                    try geom.addSurface(rings.items, semantic_type, self.allocator);
                 }
             },
             .Solid => {
                 const parsed_ = try std.json.parseFromValue(CJSolidBounds, self.allocator, g.boundaries, .{});
                 defer parsed_.deinit();
                 const bounds = parsed_.value;
+                var surface_index: usize = 0;
 
                 // First pass: collect unique vertices
                 for (bounds) |shell| {
@@ -449,7 +498,12 @@ pub const CityJSON = struct {
                         defer {
                             for (rings.items) |mapped_ring| self.allocator.free(mapped_ring);
                         }
-                        try geom.addSurface(rings.items, .wall, self.allocator);
+                        const semantic_type = if (surface_index < semantic_types.len)
+                            semantic_types[surface_index]
+                        else
+                            SemanticWallSurface;
+                        try geom.addSurface(rings.items, semantic_type, self.allocator);
+                        surface_index += 1;
                     }
                 }
             },
@@ -557,6 +611,11 @@ pub const CityJSON = struct {
                 try jw.objectField("boundaries");
                 try self.writeBoundaries(&jw, &geom, offset);
 
+                if (geom.surface_semantic_types.items.len == geom.surfaces.items.len and geom.surfaces.items.len > 0) {
+                    try jw.objectField("semantics");
+                    try self.writeSemantics(&jw, &geom);
+                }
+
                 try jw.endObject();
             }
 
@@ -648,6 +707,60 @@ pub const CityJSON = struct {
                 try jw.endArray();
             },
         }
+    }
+
+    fn writeSemantics(self: *const CityJSON, jw: *std.json.Stringify, geom: *const StoredGeometry) !void {
+        var unique_types = std.ArrayList(u8).empty;
+        defer unique_types.deinit(self.allocator);
+        var type_to_index = std.AutoHashMap(u8, usize).init(self.allocator);
+        defer type_to_index.deinit();
+        var semantic_indices = std.ArrayList(usize).empty;
+        defer semantic_indices.deinit(self.allocator);
+
+        try semantic_indices.ensureTotalCapacity(self.allocator, geom.surface_semantic_types.items.len);
+        for (geom.surface_semantic_types.items) |semantic_type| {
+            const semantic_index = if (type_to_index.get(semantic_type)) |existing| blk: {
+                break :blk existing;
+            } else blk: {
+                const next_index = unique_types.items.len;
+                try unique_types.append(self.allocator, semantic_type);
+                try type_to_index.put(semantic_type, next_index);
+                break :blk next_index;
+            };
+            semantic_indices.appendAssumeCapacity(semantic_index);
+        }
+
+        try jw.beginObject();
+        try jw.objectField("surfaces");
+        try jw.beginArray();
+        for (unique_types.items) |semantic_type| {
+            try jw.beginObject();
+            try jw.objectField("type");
+            try jw.write(semanticSurfaceTypeName(semantic_type));
+            try jw.endObject();
+        }
+        try jw.endArray();
+
+        try jw.objectField("values");
+        switch (geom.type) {
+            .MultiSurface => {
+                try jw.beginArray();
+                for (semantic_indices.items) |semantic_index| {
+                    try jw.write(semantic_index);
+                }
+                try jw.endArray();
+            },
+            .Solid => {
+                try jw.beginArray();
+                try jw.beginArray();
+                for (semantic_indices.items) |semantic_index| {
+                    try jw.write(semantic_index);
+                }
+                try jw.endArray();
+                try jw.endArray();
+            },
+        }
+        try jw.endObject();
     }
 
 };
@@ -744,7 +857,7 @@ export fn cityjson_add_face(handle: ?CityJSONHandle, object_index: usize, geomet
     const ft = enumFromIntChecked(FaceType, face_type) orelse return -1;
     const indices_slice = vertex_indices[0..num_indices];
     const rings = [_][]const usize{indices_slice};
-    geom.addSurface(&rings, ft, cj.allocator) catch return -1;
+    geom.addSurface(&rings, faceTypeToSemanticType(ft), cj.allocator) catch return -1;
     return 0;
 }
 
@@ -900,11 +1013,30 @@ export fn cityjson_get_face_info(
     if (outer_ring_size > geom.boundaries.items.len - boundary_cursor) return -1;
     out_start.* = boundary_cursor;
     out_count.* = outer_ring_size;
-    out_face_type.* = if (face_index < geom.face_types.items.len)
-        @intFromEnum(geom.face_types.items[face_index])
+    out_face_type.* = if (face_index < geom.surface_semantic_types.items.len)
+        @intFromEnum(semanticTypeToFaceType(geom.surface_semantic_types.items[face_index]))
     else
         @intFromEnum(FaceType.wall);
     return 0;
+}
+
+export fn cityjson_get_geometry_surface_semantic_type(
+    handle: ?CityJSONHandle,
+    object_index: usize,
+    geometry_index: usize,
+    surface_index: usize,
+    out_semantic_type: *u8,
+) callconv(.c) c_int {
+    const cj = handle orelse return -1;
+    const values = cj.objects.values();
+    if (object_index >= values.len) return -1;
+    const geometries = values[object_index].geometries;
+    if (geometry_index >= geometries.len) return -1;
+    const geom = &geometries[geometry_index];
+    if (surface_index >= geom.surfaces.items.len) return -1;
+    if (surface_index >= geom.surface_semantic_types.items.len) return 0;
+    out_semantic_type.* = geom.surface_semantic_types.items[surface_index];
+    return 1;
 }
 
 export fn cityjson_get_geometry_surface_count(handle: ?CityJSONHandle, object_index: usize, geometry_index: usize) callconv(.c) usize {
@@ -981,10 +1113,10 @@ const CJSeqFeatureId = struct {
 
 fn semanticSurfaceTypeName(semantic_type: u8) []const u8 {
     return switch (semantic_type) {
-        0 => "RoofSurface",
-        1 => "GroundSurface",
-        2 => "WallSurface",
-        4 => "OuterCeilingSurface",
+        SemanticRoofSurface => "RoofSurface",
+        SemanticGroundSurface => "GroundSurface",
+        SemanticWallSurface => "WallSurface",
+        SemanticOuterCeilingSurface => "OuterCeilingSurface",
         else => "WallSurface",
     };
 }
@@ -1026,6 +1158,86 @@ fn parseJsonI64(value: std.json.Value) !i64 {
         .number_string => |v| try std.fmt.parseInt(i64, v, 10),
         else => error.InvalidJsonNumber,
     };
+}
+
+fn parseSemanticSurfaceTypeName(type_name: []const u8) u8 {
+    if (std.mem.eql(u8, type_name, "RoofSurface")) return SemanticRoofSurface;
+    if (std.mem.eql(u8, type_name, "GroundSurface")) return SemanticGroundSurface;
+    if (std.mem.eql(u8, type_name, "OuterCeilingSurface")) return SemanticOuterCeilingSurface;
+    return SemanticWallSurface;
+}
+
+fn parseSemanticIndex(value: std.json.Value) !?usize {
+    return switch (value) {
+        .null => null,
+        else => try parseJsonIntegerIndex(value),
+    };
+}
+
+fn extractSurfaceSemanticTypes(
+    allocator: std.mem.Allocator,
+    geometry_type: CJGeometryType,
+    semantics_value: ?std.json.Value,
+    surface_count: usize,
+) ![]u8 {
+    const semantic_types = try allocator.alloc(u8, surface_count);
+    errdefer allocator.free(semantic_types);
+    @memset(semantic_types, SemanticWallSurface);
+
+    const semantics = semantics_value orelse return semantic_types;
+    if (semantics != .object) return semantic_types;
+
+    const surfaces_value = semantics.object.get("surfaces") orelse return semantic_types;
+    const values_value = semantics.object.get("values") orelse return semantic_types;
+    if (surfaces_value != .array) return semantic_types;
+
+    var surface_type_by_semantic_index = std.ArrayList(u8).empty;
+    defer surface_type_by_semantic_index.deinit(allocator);
+    try surface_type_by_semantic_index.ensureTotalCapacity(allocator, surfaces_value.array.items.len);
+    for (surfaces_value.array.items) |surface_value| {
+        if (surface_value != .object) {
+            surface_type_by_semantic_index.appendAssumeCapacity(SemanticWallSurface);
+            continue;
+        }
+        const type_value = surface_value.object.get("type") orelse {
+            surface_type_by_semantic_index.appendAssumeCapacity(SemanticWallSurface);
+            continue;
+        };
+        if (type_value != .string) {
+            surface_type_by_semantic_index.appendAssumeCapacity(SemanticWallSurface);
+            continue;
+        }
+        surface_type_by_semantic_index.appendAssumeCapacity(parseSemanticSurfaceTypeName(type_value.string));
+    }
+
+    switch (geometry_type) {
+        .MultiSurface => {
+            if (values_value != .array) return semantic_types;
+            const count = @min(values_value.array.items.len, surface_count);
+            for (0..count) |surface_index| {
+                if (try parseSemanticIndex(values_value.array.items[surface_index])) |semantic_index| {
+                    if (semantic_index < surface_type_by_semantic_index.items.len) {
+                        semantic_types[surface_index] = surface_type_by_semantic_index.items[semantic_index];
+                    }
+                }
+            }
+        },
+        .Solid => {
+            if (values_value != .array or values_value.array.items.len == 0) return semantic_types;
+            const shell_values = values_value.array.items[0];
+            if (shell_values != .array) return semantic_types;
+            const count = @min(shell_values.array.items.len, surface_count);
+            for (0..count) |surface_index| {
+                if (try parseSemanticIndex(shell_values.array.items[surface_index])) |semantic_index| {
+                    if (semantic_index < surface_type_by_semantic_index.items.len) {
+                        semantic_types[surface_index] = surface_type_by_semantic_index.items[semantic_index];
+                    }
+                }
+            }
+        },
+    }
+
+    return semantic_types;
 }
 
 fn quantizeWorldCoordinate(value: f64, scale: f64, translate: f64) !i64 {
@@ -1455,18 +1667,32 @@ export fn cityjsonseq_writer_write_current_raw(
     return 0;
 }
 
-fn writeReplacedCurrentFeatureLine(
+fn writeReplacedCurrentFeatureLinePolygonal(
     reader: *CityJSONSeqReader,
     writer: *CityJSONSeqWriter,
     feature_id: []const u8,
     vertices_xyz_world: []const f64,
-    triangle_indices: []const u32,
-    semantic_types: []const u8,
+    surface_ring_counts: []const u32,
+    ring_vertex_counts: []const u32,
+    boundary_indices: []const u32,
+    surface_semantic_types: []const u8,
 ) !void {
-    if (triangle_indices.len % 3 != 0) return error.InvalidTriangleIndexArray;
     if (vertices_xyz_world.len % 3 != 0) return error.InvalidVertexArray;
-    if (semantic_types.len != triangle_indices.len / 3) return error.InvalidSemanticTypesArray;
-    if (vertices_xyz_world.len == 0 or triangle_indices.len == 0) return error.InvalidReplacementGeometry;
+    if (surface_ring_counts.len == 0 or ring_vertex_counts.len == 0 or boundary_indices.len == 0) {
+        return error.InvalidReplacementGeometry;
+    }
+    if (surface_semantic_types.len != surface_ring_counts.len) return error.InvalidSemanticTypesArray;
+    var expected_ring_count: usize = 0;
+    for (surface_ring_counts) |ring_count| {
+        expected_ring_count += ring_count;
+    }
+    if (expected_ring_count != ring_vertex_counts.len) return error.InvalidReplacementGeometry;
+    var expected_boundary_count: usize = 0;
+    for (ring_vertex_counts) |ring_size| {
+        expected_boundary_count += ring_size;
+    }
+    if (expected_boundary_count != boundary_indices.len) return error.InvalidReplacementGeometry;
+    if (vertices_xyz_world.len == 0) return error.InvalidReplacementGeometry;
 
     const parsed = try std.json.parseFromSlice(std.json.Value, reader.allocator, reader.current_line, .{});
     defer parsed.deinit();
@@ -1551,14 +1777,13 @@ fn writeReplacedCurrentFeatureLine(
         }
     }
 
-    var replacement_indices = std.ArrayList(usize).empty;
-    defer replacement_indices.deinit(arena_alloc);
-    try replacement_indices.ensureTotalCapacity(arena_alloc, triangle_indices.len);
-
     const input_vertex_count = vertices_xyz_world.len / 3;
-    for (triangle_indices) |src_idx_u32| {
+    var remapped_boundary_indices = std.ArrayList(usize).empty;
+    defer remapped_boundary_indices.deinit(arena_alloc);
+    try remapped_boundary_indices.ensureTotalCapacity(arena_alloc, boundary_indices.len);
+    for (boundary_indices) |src_idx_u32| {
         const src_idx: usize = @intCast(src_idx_u32);
-        if (src_idx >= input_vertex_count) return error.InvalidTriangleIndexArray;
+        if (src_idx >= input_vertex_count) return error.InvalidReplacementGeometry;
 
         const quantized = [3]i64{
             try quantizeWorldCoordinate(vertices_xyz_world[src_idx * 3 + 0], reader.seq_transform.scale[0], reader.seq_transform.translate[0]),
@@ -1575,7 +1800,7 @@ fn writeReplacedCurrentFeatureLine(
             break :blk appended_idx;
         };
 
-        replacement_indices.appendAssumeCapacity(final_idx);
+        remapped_boundary_indices.appendAssumeCapacity(final_idx);
     }
 
     object_it = city_objects_obj.iterator();
@@ -1592,15 +1817,28 @@ fn writeReplacedCurrentFeatureLine(
     }
 
     var shell_polygons = std.json.Array.init(arena_alloc);
-    for (0..(replacement_indices.items.len / 3)) |tri_idx| {
-        var ring = std.json.Array.init(arena_alloc);
-        try ring.append(.{ .integer = @intCast(replacement_indices.items[tri_idx * 3 + 0]) });
-        try ring.append(.{ .integer = @intCast(replacement_indices.items[tri_idx * 3 + 1]) });
-        try ring.append(.{ .integer = @intCast(replacement_indices.items[tri_idx * 3 + 2]) });
-
+    var ring_cursor: usize = 0;
+    var boundary_cursor: usize = 0;
+    for (surface_ring_counts) |surface_ring_count| {
         var polygon = std.json.Array.init(arena_alloc);
-        try polygon.append(.{ .array = ring });
+        for (0..surface_ring_count) |_| {
+            if (ring_cursor >= ring_vertex_counts.len) return error.InvalidReplacementGeometry;
+            const ring_size = ring_vertex_counts[ring_cursor];
+            ring_cursor += 1;
+
+            var ring = std.json.Array.init(arena_alloc);
+            try ring.ensureTotalCapacity(ring_size);
+            for (0..ring_size) |_| {
+                if (boundary_cursor >= remapped_boundary_indices.items.len) return error.InvalidReplacementGeometry;
+                ring.appendAssumeCapacity(.{ .integer = @intCast(remapped_boundary_indices.items[boundary_cursor]) });
+                boundary_cursor += 1;
+            }
+            try polygon.append(.{ .array = ring });
+        }
         try shell_polygons.append(.{ .array = polygon });
+    }
+    if (ring_cursor != ring_vertex_counts.len or boundary_cursor != remapped_boundary_indices.items.len) {
+        return error.InvalidReplacementGeometry;
     }
     var solid_boundaries = std.json.Array.init(arena_alloc);
     try solid_boundaries.append(.{ .array = shell_polygons });
@@ -1611,7 +1849,7 @@ fn writeReplacedCurrentFeatureLine(
     var semantic_values = std.ArrayList(usize).empty;
     defer semantic_values.deinit(arena_alloc);
 
-    for (semantic_types) |semantic_type| {
+    for (surface_semantic_types) |semantic_type| {
         const surface_idx = if (semantic_to_surface.get(semantic_type)) |idx| blk: {
             break :blk idx;
         } else blk: {
@@ -1661,6 +1899,37 @@ fn writeReplacedCurrentFeatureLine(
     try writer.writeLine(out.written());
 }
 
+fn writeReplacedCurrentFeatureLine(
+    reader: *CityJSONSeqReader,
+    writer: *CityJSONSeqWriter,
+    feature_id: []const u8,
+    vertices_xyz_world: []const f64,
+    triangle_indices: []const u32,
+    semantic_types: []const u8,
+) !void {
+    if (triangle_indices.len % 3 != 0) return error.InvalidTriangleIndexArray;
+    if (semantic_types.len != triangle_indices.len / 3) return error.InvalidSemanticTypesArray;
+
+    const tri_count = triangle_indices.len / 3;
+    const surface_ring_counts = try reader.allocator.alloc(u32, tri_count);
+    defer reader.allocator.free(surface_ring_counts);
+    const ring_vertex_counts = try reader.allocator.alloc(u32, tri_count);
+    defer reader.allocator.free(ring_vertex_counts);
+    @memset(surface_ring_counts, 1);
+    @memset(ring_vertex_counts, 3);
+
+    try writeReplacedCurrentFeatureLinePolygonal(
+        reader,
+        writer,
+        feature_id,
+        vertices_xyz_world,
+        surface_ring_counts,
+        ring_vertex_counts,
+        triangle_indices,
+        semantic_types,
+    );
+}
+
 export fn cityjsonseq_writer_write_current_replaced_lod22(
     reader_handle: ?CityJSONSeqReaderHandle,
     writer_handle: ?CityJSONSeqWriterHandle,
@@ -1698,6 +1967,53 @@ export fn cityjsonseq_writer_write_current_replaced_lod22(
     return 0;
 }
 
+export fn cityjsonseq_writer_write_current_replaced_lod22_polygonal(
+    reader_handle: ?CityJSONSeqReaderHandle,
+    writer_handle: ?CityJSONSeqWriterHandle,
+    feature_id_ptr: [*c]const u8,
+    feature_id_len: usize,
+    vertices_xyz_world_ptr: [*c]const f64,
+    vertex_count: usize,
+    surface_ring_counts_ptr: [*c]const u32,
+    surface_count: usize,
+    ring_vertex_counts_ptr: [*c]const u32,
+    ring_count: usize,
+    boundary_indices_ptr: [*c]const u32,
+    boundary_index_count: usize,
+    surface_semantic_types_ptr: [*c]const u8,
+    surface_semantic_types_count: usize,
+) callconv(.c) c_int {
+    const reader = reader_handle orelse return -1;
+    const writer = writer_handle orelse return -1;
+    if (feature_id_ptr == null or feature_id_len == 0) return -1;
+    if (vertices_xyz_world_ptr == null or vertex_count == 0) return -1;
+    if (surface_ring_counts_ptr == null or surface_count == 0) return -1;
+    if (ring_vertex_counts_ptr == null or ring_count == 0) return -1;
+    if (boundary_indices_ptr == null or boundary_index_count == 0) return -1;
+    if (surface_semantic_types_ptr == null or surface_semantic_types_count != surface_count) return -1;
+    if (reader.current_line.len == 0) return -1;
+
+    const feature_id = feature_id_ptr[0..feature_id_len];
+    const vertices_xyz_world = vertices_xyz_world_ptr[0 .. vertex_count * 3];
+    const surface_ring_counts = surface_ring_counts_ptr[0..surface_count];
+    const ring_vertex_counts = ring_vertex_counts_ptr[0..ring_count];
+    const boundary_indices = boundary_indices_ptr[0..boundary_index_count];
+    const surface_semantic_types = surface_semantic_types_ptr[0..surface_semantic_types_count];
+
+    writeReplacedCurrentFeatureLinePolygonal(
+        reader,
+        writer,
+        feature_id,
+        vertices_xyz_world,
+        surface_ring_counts,
+        ring_vertex_counts,
+        boundary_indices,
+        surface_semantic_types,
+    ) catch return -1;
+
+    return 0;
+}
+
 test "save round-trip" {
     const allocator = std.testing.allocator;
 
@@ -1714,7 +2030,7 @@ test "save round-trip" {
     _ = try geom.addVertex(.{ 105.0, 210.0, 5.0 }, allocator);
     const ring = [_]usize{ 0, 1, 2 };
     const rings = [_][]const usize{&ring};
-    try geom.addSurface(&rings, .wall, allocator);
+    try geom.addSurface(&rings, SemanticWallSurface, allocator);
 
     const key = try allocator.dupeZ(u8, "TestBuilding");
     try cj.objects.put(cj.allocator, key, obj);
@@ -1775,7 +2091,7 @@ test "builder API round-trip" {
     const v3 = try geom.addVertex(.{ 0.0, 10.0, 0.0 }, allocator);
     const floor_ring = [_]usize{ v0, v1, v2, v3 };
     const floor_rings = [_][]const usize{&floor_ring};
-    try geom.addSurface(&floor_rings, .floor, allocator);
+    try geom.addSurface(&floor_rings, faceTypeToSemanticType(.floor), allocator);
 
     const v4 = try geom.addVertex(.{ 0.0, 0.0, 5.0 }, allocator);
     const v5 = try geom.addVertex(.{ 10.0, 0.0, 5.0 }, allocator);
@@ -1783,7 +2099,7 @@ test "builder API round-trip" {
     const v7 = try geom.addVertex(.{ 0.0, 10.0, 5.0 }, allocator);
     const roof_ring = [_]usize{ v4, v5, v6, v7 };
     const roof_rings = [_][]const usize{&roof_ring};
-    try geom.addSurface(&roof_rings, .roof, allocator);
+    try geom.addSurface(&roof_rings, faceTypeToSemanticType(.roof), allocator);
 
     // Add a second geometry to the same object
     const geom_idx2 = try cj.addGeometry(obj_idx, .Solid, "1.0");
@@ -1795,7 +2111,7 @@ test "builder API round-trip" {
     _ = try geom2.addVertex(.{ 5.0, 5.0, 0.0 }, allocator);
     const wall_ring = [_]usize{ 0, 1, 2 };
     const wall_rings = [_][]const usize{&wall_ring};
-    try geom2.addSurface(&wall_rings, .wall, allocator);
+    try geom2.addSurface(&wall_rings, SemanticWallSurface, allocator);
 
     // Add a second object
     const obj_idx2 = try cj.addObject("MyBuildingPart", .BuildingPart);

@@ -1765,13 +1765,52 @@ pub const FeatureBuilder = struct {
         semantic_types: []const u8,
     ) !void {
         if (triangle_indices.len % 3 != 0) return error.InvalidTriangleIndexArray;
+        const tri_count = triangle_indices.len / 3;
+        const surface_ring_counts = try self.allocator.alloc(u32, tri_count);
+        defer self.allocator.free(surface_ring_counts);
+        const ring_vertex_counts = try self.allocator.alloc(u32, tri_count);
+        defer self.allocator.free(ring_vertex_counts);
+        @memset(surface_ring_counts, 1);
+        @memset(ring_vertex_counts, 3);
+
+        try self.replaceLod22SolidPolygonal(
+            feature_id,
+            vertices_xyz_world,
+            surface_ring_counts,
+            ring_vertex_counts,
+            triangle_indices,
+            semantic_types,
+        );
+    }
+
+    pub fn replaceLod22SolidPolygonal(
+        self: *FeatureBuilder,
+        feature_id: []const u8,
+        vertices_xyz_world: []const f64,
+        surface_ring_counts: []const u32,
+        ring_vertex_counts: []const u32,
+        boundary_indices: []const u32,
+        surface_semantic_types: []const u8,
+    ) !void {
         if (vertices_xyz_world.len % 3 != 0) return error.InvalidVertexArray;
         const new_vertex_count = vertices_xyz_world.len / 3;
         if (new_vertex_count == 0) return error.InvalidVertexArray;
-        const tri_count = triangle_indices.len / 3;
-        if (semantic_types.len != tri_count) return error.InvalidSemanticTypesArray;
-        for (triangle_indices) |idx| {
-            if (idx >= new_vertex_count) return error.InvalidTriangleIndexArray;
+        if (surface_ring_counts.len == 0 or ring_vertex_counts.len == 0 or boundary_indices.len == 0) {
+            return error.InvalidReplacementGeometry;
+        }
+        if (surface_semantic_types.len != surface_ring_counts.len) return error.InvalidSemanticTypesArray;
+        var expected_ring_count: usize = 0;
+        for (surface_ring_counts) |ring_count| {
+            expected_ring_count = try checkedAdd(expected_ring_count, ring_count);
+        }
+        if (expected_ring_count != ring_vertex_counts.len) return error.InvalidReplacementGeometry;
+        var expected_boundary_count: usize = 0;
+        for (ring_vertex_counts) |ring_size| {
+            expected_boundary_count = try checkedAdd(expected_boundary_count, ring_size);
+        }
+        if (expected_boundary_count != boundary_indices.len) return error.InvalidReplacementGeometry;
+        for (boundary_indices) |idx| {
+            if (idx >= new_vertex_count) return error.InvalidReplacementGeometry;
         }
 
         if (!self.has_objects) return error.TargetObjectNotFound;
@@ -1812,9 +1851,9 @@ pub const FeatureBuilder = struct {
         defer appended_vertices.deinit(self.allocator);
         var remapped_boundaries = std.ArrayList(u32).empty;
         defer remapped_boundaries.deinit(self.allocator);
-        try remapped_boundaries.ensureTotalCapacity(self.allocator, triangle_indices.len);
+        try remapped_boundaries.ensureTotalCapacity(self.allocator, boundary_indices.len);
 
-        for (triangle_indices) |src_idx_u32| {
+        for (boundary_indices) |src_idx_u32| {
             const src_idx: usize = @intCast(src_idx_u32);
             var final_idx = src_to_final[src_idx];
             if (final_idx == unresolved) {
@@ -1848,7 +1887,7 @@ pub const FeatureBuilder = struct {
         self.has_vertices = true;
 
         var unique_types: [256]bool = .{false} ** 256;
-        for (semantic_types) |t| unique_types[t] = true;
+        for (surface_semantic_types) |t| unique_types[t] = true;
         var type_to_obj_index: [256]u32 = .{std.math.maxInt(u32)} ** 256;
         var object_types = std.ArrayList(u8).empty;
         defer object_types.deinit(self.allocator);
@@ -1862,16 +1901,16 @@ pub const FeatureBuilder = struct {
         const solids = try self.allocator.alloc(u32, 1);
         solids[0] = 1;
         const shells = try self.allocator.alloc(u32, 1);
-        shells[0] = @intCast(tri_count);
-        const surfaces = try self.allocator.alloc(u32, tri_count);
-        @memset(surfaces, 1);
-        const strings = try self.allocator.alloc(u32, tri_count);
-        @memset(strings, 3);
+        shells[0] = @intCast(surface_ring_counts.len);
+        const surfaces = try self.allocator.alloc(u32, surface_ring_counts.len);
+        @memcpy(surfaces, surface_ring_counts);
+        const strings = try self.allocator.alloc(u32, ring_vertex_counts.len);
+        @memcpy(strings, ring_vertex_counts);
         const boundaries = try self.allocator.alloc(u32, remapped_boundaries.items.len);
         @memcpy(boundaries, remapped_boundaries.items);
 
-        const semantics = try self.allocator.alloc(u32, semantic_types.len);
-        for (semantic_types, 0..) |t, i| {
+        const semantics = try self.allocator.alloc(u32, surface_semantic_types.len);
+        for (surface_semantic_types, 0..) |t, i| {
             semantics[i] = type_to_obj_index[t];
         }
         const semantics_objects = try self.allocator.alloc(u8, object_types.items.len);
@@ -2877,6 +2916,23 @@ export fn zfcb_current_geometry_boundaries(
     return geom.boundaries.ptr;
 }
 
+export fn zfcb_current_geometry_surface_semantic_type(
+    handle: ?ZfcbReaderHandle,
+    object_index: usize,
+    geometry_index: usize,
+    surface_index: usize,
+    out_semantic_type: *u8,
+) callconv(.c) c_int {
+    const reader = handle orelse return -1;
+    const geom = getCurrentGeometry(reader, object_index, geometry_index) orelse return -1;
+    if (surface_index >= geom.surfaces.len) return -1;
+    if (surface_index >= geom.semantics.len) return 0;
+    const semantic_object_index = geom.semantics[surface_index];
+    if (semantic_object_index >= geom.semantics_objects.len) return 0;
+    out_semantic_type.* = geom.semantics_objects[semantic_object_index];
+    return 1;
+}
+
 export fn zfcb_writer_open_from_reader(
     reader_handle: ?ZfcbReaderHandle,
     output_path: [*c]const u8,
@@ -3059,6 +3115,57 @@ export fn zfcb_writer_write_current_replaced_lod22(
     return 0;
 }
 
+export fn zfcb_writer_write_current_replaced_lod22_polygonal(
+    reader_handle: ?ZfcbReaderHandle,
+    writer_handle: ?ZfcbWriterHandle,
+    feature_id_ptr: [*c]const u8,
+    feature_id_len: usize,
+    vertices_xyz_world_ptr: [*c]const f64,
+    vertex_count: usize,
+    surface_ring_counts_ptr: [*c]const u32,
+    surface_count: usize,
+    ring_vertex_counts_ptr: [*c]const u32,
+    ring_count: usize,
+    boundary_indices_ptr: [*c]const u32,
+    boundary_index_count: usize,
+    surface_semantic_types_ptr: [*c]const u8,
+    surface_semantic_types_count: usize,
+) callconv(.c) c_int {
+    const reader = reader_handle orelse return -1;
+    const writer = writer_handle orelse return -1;
+    if (feature_id_ptr == null or feature_id_len == 0) return -1;
+    if (vertices_xyz_world_ptr == null or vertex_count == 0) return -1;
+    if (surface_ring_counts_ptr == null or surface_count == 0) return -1;
+    if (ring_vertex_counts_ptr == null or ring_count == 0) return -1;
+    if (boundary_indices_ptr == null or boundary_index_count == 0) return -1;
+    if (surface_semantic_types_ptr == null or surface_semantic_types_count != surface_count) return -1;
+
+    const feature_id = feature_id_ptr[0..feature_id_len];
+    const vertices_xyz_world = vertices_xyz_world_ptr[0 .. vertex_count * 3];
+    const surface_ring_counts = surface_ring_counts_ptr[0..surface_count];
+    const ring_vertex_counts = ring_vertex_counts_ptr[0..ring_count];
+    const boundary_indices = boundary_indices_ptr[0..boundary_index_count];
+    const surface_semantic_types = surface_semantic_types_ptr[0..surface_semantic_types_count];
+
+    var builder = FeatureBuilder.init(c_allocator, reader.transform);
+    defer builder.deinit();
+    builder.loadCurrentFromReader(reader) catch return -1;
+    builder.replaceLod22SolidPolygonal(
+        feature_id,
+        vertices_xyz_world,
+        surface_ring_counts,
+        ring_vertex_counts,
+        boundary_indices,
+        surface_semantic_types,
+    ) catch return -1;
+
+    var rewritten_feature = std.ArrayList(u8).empty;
+    defer rewritten_feature.deinit(c_allocator);
+    builder.encodeFeature(&rewritten_feature) catch return -1;
+    writer.writeFeatureRaw(rewritten_feature.items) catch return -1;
+    return 0;
+}
+
 fn openSampleReader(allocator: std.mem.Allocator) !Reader {
     const candidates = [_][]const u8{
         "../sample_data/9-444-728.fcb",
@@ -3232,11 +3339,9 @@ test "feature builder encode/decode preserves geometry semantics" {
     var path_buf: [256]u8 = undefined;
     const path = try std.fmt.bufPrint(
         &path_buf,
-        "/tmp/zfcb_semantics_roundtrip_{d}.fcb",
-        .{std.time.milliTimestamp()},
+        "/tmp/zfcb_semantics_roundtrip.fcb",
+        .{},
     );
-    defer std.fs.deleteFileAbsolute(path) catch {};
-
     var writer = try Writer.openPathNewNoIndex(path, .{}, EMPTY_COLUMNS);
     try writer.writeFeatureRaw(feature_bytes.items);
     writer.deinit();
@@ -3367,11 +3472,9 @@ test "writer open new no index patches feature count on close" {
     var path_buf: [256]u8 = undefined;
     const path = try std.fmt.bufPrint(
         &path_buf,
-        "/tmp/zfcb_new_writer_{d}.fcb",
-        .{std.time.milliTimestamp()},
+        "/tmp/zfcb_new_writer.fcb",
+        .{},
     );
-    defer std.fs.deleteFileAbsolute(path) catch {};
-
     var writer = try Writer.openPathNewNoIndex(path, .{}, EMPTY_COLUMNS);
     try writer.writeFeatureBuilt(std.testing.allocator, &builder);
     try writer.writeFeatureBuilt(std.testing.allocator, &builder);

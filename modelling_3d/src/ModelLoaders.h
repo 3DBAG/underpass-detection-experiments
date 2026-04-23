@@ -1,8 +1,10 @@
 #ifndef MODEL_LOADERS_H
 #define MODEL_LOADERS_H
 
+#include <cstdint>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "BooleanOps.h"
 #include "OGRVectorReader.h"
@@ -10,6 +12,16 @@
 // Forward declarations for opaque handles.
 typedef struct CityJSON* CityJSONHandle;
 typedef struct Reader* ZfcbReaderHandle;
+
+struct SemanticSurface {
+    std::vector<std::vector<size_t>> rings;
+    uint8_t semantic_type = 2;
+};
+
+struct LoadedSolidMesh {
+    Surface_mesh mesh;
+    std::vector<SemanticSurface> semantic_surfaces;
+};
 
 bool is_fcb_path(std::string_view path);
 bool is_cityjsonseq_path(std::string_view path);
@@ -19,10 +31,27 @@ ssize_t resolve_cityjson_object_index(CityJSONHandle cj, std::string_view featur
 bool load_cityjson_object_mesh(
     CityJSONHandle cj,
     size_t object_index,
+    LoadedSolidMesh& out,
+    double offset_x,
+    double offset_y,
+    double offset_z);
+
+bool load_cityjson_object_mesh(
+    CityJSONHandle cj,
+    size_t object_index,
     Surface_mesh& sm,
     double offset_x,
     double offset_y,
     double offset_z);
+
+bool load_fcb_feature_mesh(
+    ZfcbReaderHandle fcb,
+    std::string_view feature_id,
+    LoadedSolidMesh& out,
+    double offset_x,
+    double offset_y,
+    double offset_z,
+    std::string* out_b3_val3dity_lod22 = nullptr);
 
 bool load_fcb_feature_mesh(
     ZfcbReaderHandle fcb,

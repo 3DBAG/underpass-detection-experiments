@@ -21,6 +21,8 @@
 
 namespace {
 
+constexpr uint8_t kDefaultSemanticType = 2;
+
 struct FaceInfo {
     int nesting_level = -1;
     bool in_domain() const { return nesting_level % 2 == 1; }
@@ -228,7 +230,7 @@ bool triangulate_surface_with_holes(
     }
 }
 
-template <typename T>
+template <typename T, typename SemanticGetter>
 bool append_ringed_geometry_faces(
     const std::vector<Surface_mesh::Vertex_index>& vertex_handles,
     size_t vertex_count,
@@ -239,6 +241,8 @@ bool append_ringed_geometry_faces(
     const T* boundaries,
     size_t boundary_count,
     Surface_mesh& sm,
+    std::vector<SemanticSurface>* semantic_surfaces,
+    SemanticGetter&& get_surface_semantic_type,
     std::string_view mesh_context) {
     if (surfaces == nullptr || strings == nullptr || boundaries == nullptr) {
         std::cerr << "Skipping all surfaces for " << mesh_context
@@ -311,9 +315,18 @@ bool append_ringed_geometry_faces(
             continue;
         }
 
+        auto rings_copy = rings;
         std::string tri_failure;
         if (triangulate_surface_with_holes(std::move(rings), vertex_handles, sm, &tri_failure)) {
             added_faces = true;
+            if (semantic_surfaces != nullptr) {
+                uint8_t semantic_type = kDefaultSemanticType;
+                get_surface_semantic_type(s, semantic_type);
+                semantic_surfaces->push_back(SemanticSurface{
+                    .rings = std::move(rings_copy),
+                    .semantic_type = semantic_type,
+                });
+            }
         } else {
             std::cerr << "Skipping surface " << s << " for " << mesh_context
                       << ": " << (tri_failure.empty() ? "triangulation failed" : tri_failure) << std::endl;
@@ -364,10 +377,12 @@ ssize_t resolve_cityjson_object_index(CityJSONHandle cj, std::string_view featur
 bool load_cityjson_object_mesh(
     CityJSONHandle cj,
     size_t object_index,
-    Surface_mesh& sm,
+    LoadedSolidMesh& out,
     double offset_x,
     double offset_y,
     double offset_z) {
+    out.mesh.clear();
+    out.semantic_surfaces.clear();
     if (cj == nullptr) {
         return false;
     }
@@ -405,7 +420,7 @@ bool load_cityjson_object_mesh(
     std::vector<Surface_mesh::Vertex_index> vertex_handles;
     vertex_handles.reserve(vertex_count);
     for (size_t v = 0; v < vertex_count; ++v) {
-        vertex_handles.push_back(sm.add_vertex(K::Point_3(
+        vertex_handles.push_back(out.mesh.add_vertex(K::Point_3(
             vertices[v * 3] - offset_x,
             vertices[v * 3 + 1] - offset_y,
             vertices[v * 3 + 2] - offset_z)));
@@ -422,6 +437,12 @@ bool load_cityjson_object_mesh(
         std::string("CityJSON object_index=") + std::to_string(object_index) +
         " geometry_index=" + std::to_string(geom_idx);
 
+    auto semantic_getter = [&](size_t surface_index, uint8_t& semantic_type) {
+        semantic_type = kDefaultSemanticType;
+        (void)cityjson_get_geometry_surface_semantic_type(
+            cj, object_index, geom_idx, surface_index, &semantic_type);
+    };
+
     return append_ringed_geometry_faces(
         vertex_handles,
         vertex_count,
@@ -431,18 +452,37 @@ bool load_cityjson_object_mesh(
         string_count,
         boundaries,
         boundary_count,
-        sm,
+        out.mesh,
+        &out.semantic_surfaces,
+        semantic_getter,
         mesh_context);
+}
+
+bool load_cityjson_object_mesh(
+    CityJSONHandle cj,
+    size_t object_index,
+    Surface_mesh& sm,
+    double offset_x,
+    double offset_y,
+    double offset_z) {
+    LoadedSolidMesh loaded;
+    if (!load_cityjson_object_mesh(cj, object_index, loaded, offset_x, offset_y, offset_z)) {
+        return false;
+    }
+    sm = std::move(loaded.mesh);
+    return true;
 }
 
 bool load_fcb_feature_mesh(
     ZfcbReaderHandle fcb,
     std::string_view feature_id,
-    Surface_mesh& sm,
+    LoadedSolidMesh& out,
     double offset_x,
     double offset_y,
     double offset_z,
     std::string* out_b3_val3dity_lod22) {
+    out.mesh.clear();
+    out.semantic_surfaces.clear();
     if (out_b3_val3dity_lod22 != nullptr) {
         out_b3_val3dity_lod22->clear();
     }
@@ -456,7 +496,7 @@ bool load_fcb_feature_mesh(
     std::vector<Surface_mesh::Vertex_index> vertex_handles;
     vertex_handles.reserve(vertex_count);
     for (size_t v = 0; v < vertex_count; ++v) {
-        vertex_handles.push_back(sm.add_vertex(K::Point_3(
+        vertex_handles.push_back(out.mesh.add_vertex(K::Point_3(
             vertices[v * 3] - offset_x,
             vertices[v * 3 + 1] - offset_y,
             vertices[v * 3 + 2] - offset_z)));
@@ -544,6 +584,12 @@ bool load_fcb_feature_mesh(
         "' object_index=" + std::to_string(object_index) +
         " geometry_index=" + std::to_string(geom_idx);
 
+    auto semantic_getter = [&](size_t surface_index, uint8_t& semantic_type) {
+        semantic_type = kDefaultSemanticType;
+        (void)zfcb_current_geometry_surface_semantic_type(
+            fcb, static_cast<size_t>(object_index), geom_idx, surface_index, &semantic_type);
+    };
+
     return append_ringed_geometry_faces(
         vertex_handles,
         vertex_count,
@@ -553,8 +599,27 @@ bool load_fcb_feature_mesh(
         string_count,
         boundaries,
         boundary_count,
-        sm,
+        out.mesh,
+        &out.semantic_surfaces,
+        semantic_getter,
         mesh_context);
+}
+
+bool load_fcb_feature_mesh(
+    ZfcbReaderHandle fcb,
+    std::string_view feature_id,
+    Surface_mesh& sm,
+    double offset_x,
+    double offset_y,
+    double offset_z,
+    std::string* out_b3_val3dity_lod22) {
+    LoadedSolidMesh loaded;
+    if (!load_fcb_feature_mesh(
+            fcb, feature_id, loaded, offset_x, offset_y, offset_z, out_b3_val3dity_lod22)) {
+        return false;
+    }
+    sm = std::move(loaded.mesh);
+    return true;
 }
 
 ogr::LinearRing make_offset_polygon(
