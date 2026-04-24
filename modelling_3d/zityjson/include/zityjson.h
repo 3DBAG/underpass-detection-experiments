@@ -24,6 +24,16 @@ typedef enum {
     ZITYJSON_FACE_DOOR = 5
 } ZityJsonFaceType;
 
+#define ZITYJSON_SOURCE_ATTRIBUTE_NULL      0
+#define ZITYJSON_SOURCE_ATTRIBUTE_INTEGER   1
+#define ZITYJSON_SOURCE_ATTRIBUTE_INTEGER64 2
+#define ZITYJSON_SOURCE_ATTRIBUTE_REAL      3
+#define ZITYJSON_SOURCE_ATTRIBUTE_STRING    4
+
+#define ZITYJSON_SOURCE_ATTRIBUTE_TARGET_NONE    0
+#define ZITYJSON_SOURCE_ATTRIBUTE_TARGET_FEATURE 1
+#define ZITYJSON_SOURCE_ATTRIBUTE_TARGET_PARENT  2
+
 // Create a new CityJSON instance.
 // Returns NULL on failure.
 CityJSONHandle cityjson_create(void);
@@ -216,6 +226,30 @@ int cityjsonseq_writer_write_current_replaced_lod22(
     size_t semantic_types_count
 );
 
+// Same as cityjsonseq_writer_write_current_replaced_lod22, with optional
+// typed source attributes merged into the target object attributes.
+int cityjsonseq_writer_write_current_replaced_lod22_with_attributes(
+    CityJSONSeqReaderHandle reader_handle,
+    CityJSONSeqWriterHandle writer_handle,
+    const char* feature_id,
+    size_t feature_id_len,
+    const double* vertices_xyz_world,
+    size_t vertex_count,
+    const uint32_t* triangle_indices,
+    size_t triangle_index_count,
+    const uint8_t* semantic_types,
+    size_t semantic_types_count,
+    const char* const* source_attribute_names,
+    const size_t* source_attribute_name_lens,
+    const uint8_t* source_attribute_types,
+    const int64_t* source_attribute_integer_values,
+    const double* source_attribute_real_values,
+    const char* const* source_attribute_string_values,
+    const size_t* source_attribute_string_value_lens,
+    size_t source_attribute_count,
+    uint8_t source_attribute_target
+);
+
 // Write current feature with LoD 2.2 Solid geometry replaced by polygonal
 // surfaces with optional holes.
 // Semantics type values match zfcb semantic enum values:
@@ -241,6 +275,34 @@ int cityjsonseq_writer_write_current_replaced_lod22_polygonal(
     size_t boundary_index_count,
     const uint8_t* surface_semantic_types,
     size_t surface_semantic_types_count
+);
+
+// Same as cityjsonseq_writer_write_current_replaced_lod22_polygonal, with
+// optional typed source attributes merged into the target object attributes.
+int cityjsonseq_writer_write_current_replaced_lod22_polygonal_with_attributes(
+    CityJSONSeqReaderHandle reader_handle,
+    CityJSONSeqWriterHandle writer_handle,
+    const char* feature_id,
+    size_t feature_id_len,
+    const double* vertices_xyz_world,
+    size_t vertex_count,
+    const uint32_t* surface_ring_counts,
+    size_t surface_count,
+    const uint32_t* ring_vertex_counts,
+    size_t ring_count,
+    const uint32_t* boundary_indices,
+    size_t boundary_index_count,
+    const uint8_t* surface_semantic_types,
+    size_t surface_semantic_types_count,
+    const char* const* source_attribute_names,
+    const size_t* source_attribute_name_lens,
+    const uint8_t* source_attribute_types,
+    const int64_t* source_attribute_integer_values,
+    const double* source_attribute_real_values,
+    const char* const* source_attribute_string_values,
+    const size_t* source_attribute_string_value_lens,
+    size_t source_attribute_count,
+    uint8_t source_attribute_target
 );
 
 #ifdef __cplusplus

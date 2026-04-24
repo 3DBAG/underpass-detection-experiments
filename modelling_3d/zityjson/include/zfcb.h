@@ -10,6 +10,16 @@ extern "C" {
 
 typedef struct Reader* ZfcbReaderHandle;
 
+#define ZFCB_SOURCE_ATTRIBUTE_NULL      0
+#define ZFCB_SOURCE_ATTRIBUTE_INTEGER   1
+#define ZFCB_SOURCE_ATTRIBUTE_INTEGER64 2
+#define ZFCB_SOURCE_ATTRIBUTE_REAL      3
+#define ZFCB_SOURCE_ATTRIBUTE_STRING    4
+
+#define ZFCB_SOURCE_ATTRIBUTE_TARGET_NONE    0
+#define ZFCB_SOURCE_ATTRIBUTE_TARGET_FEATURE 1
+#define ZFCB_SOURCE_ATTRIBUTE_TARGET_PARENT  2
+
 // Object type values match FlatCityBuf schema enum order.
 typedef enum {
     ZFCB_OBJECT_BRIDGE = 0,
@@ -201,6 +211,27 @@ int zfcb_writer_write_current_replaced_lod22(
     const uint8_t* semantic_types,
     size_t semantic_types_count);
 
+int zfcb_writer_write_current_replaced_lod22_with_attributes(
+    ZfcbReaderHandle reader_handle,
+    ZfcbWriterHandle writer_handle,
+    const char* feature_id,
+    size_t feature_id_len,
+    const double* vertices_xyz_world,
+    size_t vertex_count,
+    const uint32_t* triangle_indices,
+    size_t triangle_index_count,
+    const uint8_t* semantic_types,
+    size_t semantic_types_count,
+    const char* const* source_attribute_names,
+    const size_t* source_attribute_name_lens,
+    const uint8_t* source_attribute_types,
+    const int64_t* source_attribute_integer_values,
+    const double* source_attribute_real_values,
+    const char* const* source_attribute_string_values,
+    const size_t* source_attribute_string_value_lens,
+    size_t source_attribute_count,
+    uint8_t source_attribute_target);
+
 // Write the current feature with its LoD 2.2 Solid geometry replaced by polygonal
 // surfaces with optional holes.
 // vertices_xyz_world: flat xyz array (length = vertex_count * 3) in world coordinates.
@@ -227,6 +258,31 @@ int zfcb_writer_write_current_replaced_lod22_polygonal(
     size_t boundary_index_count,
     const uint8_t* surface_semantic_types,
     size_t surface_semantic_types_count);
+
+int zfcb_writer_write_current_replaced_lod22_polygonal_with_attributes(
+    ZfcbReaderHandle reader_handle,
+    ZfcbWriterHandle writer_handle,
+    const char* feature_id,
+    size_t feature_id_len,
+    const double* vertices_xyz_world,
+    size_t vertex_count,
+    const uint32_t* surface_ring_counts,
+    size_t surface_count,
+    const uint32_t* ring_vertex_counts,
+    size_t ring_count,
+    const uint32_t* boundary_indices,
+    size_t boundary_index_count,
+    const uint8_t* surface_semantic_types,
+    size_t surface_semantic_types_count,
+    const char* const* source_attribute_names,
+    const size_t* source_attribute_name_lens,
+    const uint8_t* source_attribute_types,
+    const int64_t* source_attribute_integer_values,
+    const double* source_attribute_real_values,
+    const char* const* source_attribute_string_values,
+    const size_t* source_attribute_string_value_lens,
+    size_t source_attribute_count,
+    uint8_t source_attribute_target);
 
 #ifdef __cplusplus
 }

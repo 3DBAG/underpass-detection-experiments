@@ -142,6 +142,40 @@ pub const Attribute = struct {
     value: AttributeValue,
 };
 
+const SOURCE_ATTRIBUTE_NULL: u8 = 0;
+const SOURCE_ATTRIBUTE_INTEGER: u8 = 1;
+const SOURCE_ATTRIBUTE_INTEGER64: u8 = 2;
+const SOURCE_ATTRIBUTE_REAL: u8 = 3;
+const SOURCE_ATTRIBUTE_STRING: u8 = 4;
+
+const SOURCE_ATTRIBUTE_TARGET_FEATURE: u8 = 1;
+const SOURCE_ATTRIBUTE_TARGET_PARENT: u8 = 2;
+
+const SourceAttributes = struct {
+    names: [*c]const [*c]const u8,
+    name_lens: [*c]const usize,
+    types: [*c]const u8,
+    integer_values: [*c]const i64,
+    real_values: [*c]const f64,
+    string_values: [*c]const [*c]const u8,
+    string_value_lens: [*c]const usize,
+    count: usize,
+
+    fn name(self: SourceAttributes, index: usize) ?[]const u8 {
+        if (index >= self.count) return null;
+        const ptr = self.names[index];
+        if (ptr == null) return null;
+        return ptr[0..self.name_lens[index]];
+    }
+
+    fn stringValue(self: SourceAttributes, index: usize) ?[]const u8 {
+        if (index >= self.count) return null;
+        const ptr = self.string_values[index];
+        if (ptr == null) return null;
+        return ptr[0..self.string_value_lens[index]];
+    }
+};
+
 pub const GeometryType = enum(u8) {
     MultiPoint = 0,
     MultiLineString = 1,
@@ -841,6 +875,22 @@ fn findColumn(schema: []const ColumnSchema, index: u16) ?ColumnSchema {
     return null;
 }
 
+fn columnNameExists(schema: []const ColumnSchema, name: []const u8) bool {
+    for (schema) |column| {
+        if (std.mem.eql(u8, column.name, name)) return true;
+    }
+    return false;
+}
+
+fn sourceAttributeColumnType(attribute_type: u8) ?ColumnType {
+    return switch (attribute_type) {
+        SOURCE_ATTRIBUTE_INTEGER, SOURCE_ATTRIBUTE_INTEGER64 => .Long,
+        SOURCE_ATTRIBUTE_REAL => .Double,
+        SOURCE_ATTRIBUTE_STRING => .String,
+        else => null,
+    };
+}
+
 fn findColumnType(
     root_schema: []const ColumnSchema,
     object_schema: []const Reader.ColumnTypeByIndex,
@@ -1328,6 +1378,12 @@ fn appendI32Le(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, value: i32
     try buf.appendSlice(allocator, &tmp);
 }
 
+fn appendI64Le(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, value: i64) !void {
+    var tmp: [8]u8 = undefined;
+    std.mem.writeInt(i64, &tmp, value, .little);
+    try buf.appendSlice(allocator, &tmp);
+}
+
 fn appendU16Le(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, value: u16) !void {
     var tmp: [2]u8 = undefined;
     std.mem.writeInt(u16, &tmp, value, .little);
@@ -1342,6 +1398,11 @@ fn appendU64Le(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, value: u64
 
 fn appendF64Le(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, value: f64) !void {
     try appendU64Le(buf, allocator, @bitCast(value));
+}
+
+fn appendLengthPrefixedBytes(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, value: []const u8) !void {
+    try appendU32Le(buf, allocator, @intCast(value.len));
+    try buf.appendSlice(allocator, value);
 }
 
 fn appendString(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, value: []const u8) !usize {
@@ -1940,6 +2001,137 @@ pub const FeatureBuilder = struct {
         geom.has_semantics_objects = true;
 
         try self.compactVertices();
+    }
+
+    pub fn mergeSourceAttributes(
+        self: *FeatureBuilder,
+        root_columns: []const ColumnSchema,
+        feature_id: []const u8,
+        source_attributes: SourceAttributes,
+        source_attribute_target: u8,
+    ) !void {
+        if (source_attributes.count == 0) return;
+        if (!self.has_objects) return error.TargetObjectNotFound;
+
+        const target_id = try buildObjectId(self.allocator, feature_id);
+        defer self.allocator.free(target_id);
+
+        var target_obj: ?*FeatureObjectData = null;
+        for (self.objects) |*obj| {
+            if (std.mem.eql(u8, obj.id, target_id)) {
+                target_obj = obj;
+                break;
+            }
+        }
+        if (target_obj == null) {
+            for (self.objects) |*obj| {
+                if (std.mem.eql(u8, obj.id, feature_id)) {
+                    target_obj = obj;
+                    break;
+                }
+            }
+        }
+        const geometry_obj = target_obj orelse return error.TargetObjectNotFound;
+
+        var destination_obj: ?*FeatureObjectData = geometry_obj;
+        if (source_attribute_target == SOURCE_ATTRIBUTE_TARGET_PARENT) {
+            destination_obj = null;
+            for (self.objects) |*obj| {
+                if (std.mem.eql(u8, obj.id, feature_id)) {
+                    destination_obj = obj;
+                    break;
+                }
+            }
+            if (destination_obj == null and geometry_obj.parents.len > 0) {
+                const parent_id = geometry_obj.parents[0];
+                for (self.objects) |*obj| {
+                    if (std.mem.eql(u8, obj.id, parent_id)) {
+                        destination_obj = obj;
+                        break;
+                    }
+                }
+            }
+            if (destination_obj == null) destination_obj = geometry_obj;
+        } else if (source_attribute_target != SOURCE_ATTRIBUTE_TARGET_FEATURE) {
+            return error.InvalidSourceAttributeTarget;
+        }
+
+        const obj = destination_obj orelse return error.TargetObjectNotFound;
+        const base_columns = if (obj.has_columns) obj.columns else root_columns;
+
+        var new_column_count: usize = 0;
+        for (0..source_attributes.count) |i| {
+            if (source_attributes.types[i] == SOURCE_ATTRIBUTE_NULL) continue;
+            const name = source_attributes.name(i) orelse continue;
+            if (name.len == 0 or columnNameExists(base_columns, name)) continue;
+            var duplicate_source = false;
+            for (0..i) |prev_i| {
+                const prev_name = source_attributes.name(prev_i) orelse continue;
+                if (std.mem.eql(u8, prev_name, name)) {
+                    duplicate_source = true;
+                    break;
+                }
+            }
+            if (!duplicate_source) new_column_count = try checkedAdd(new_column_count, 1);
+        }
+
+        if (new_column_count == 0) return;
+
+        var max_index: u16 = 0;
+        for (base_columns) |column| {
+            if (column.index > max_index) max_index = column.index;
+        }
+
+        const updated_columns = try self.allocator.alloc(ColumnSchema, base_columns.len + new_column_count);
+        errdefer self.allocator.free(updated_columns);
+        @memcpy(updated_columns[0..base_columns.len], base_columns);
+
+        var attributes_raw = std.ArrayList(u8).empty;
+        errdefer attributes_raw.deinit(self.allocator);
+        try attributes_raw.appendSlice(self.allocator, obj.attributes_raw);
+
+        var column_cursor = base_columns.len;
+        for (0..source_attributes.count) |i| {
+            const attr_type = source_attributes.types[i];
+            if (attr_type == SOURCE_ATTRIBUTE_NULL) continue;
+            const name = source_attributes.name(i) orelse continue;
+            if (name.len == 0 or columnNameExists(updated_columns[0..column_cursor], name)) continue;
+
+            if (max_index == std.math.maxInt(u16)) return error.IntegerOverflow;
+            max_index += 1;
+            const column_type = sourceAttributeColumnType(attr_type) orelse return error.InvalidSourceAttributes;
+            updated_columns[column_cursor] = .{
+                .index = max_index,
+                .name = name,
+                .column_type = column_type,
+            };
+            column_cursor += 1;
+
+            try appendU16Le(&attributes_raw, self.allocator, max_index);
+            switch (attr_type) {
+                SOURCE_ATTRIBUTE_INTEGER, SOURCE_ATTRIBUTE_INTEGER64 => {
+                    try appendI64Le(&attributes_raw, self.allocator, source_attributes.integer_values[i]);
+                },
+                SOURCE_ATTRIBUTE_REAL => {
+                    try appendF64Le(&attributes_raw, self.allocator, source_attributes.real_values[i]);
+                },
+                SOURCE_ATTRIBUTE_STRING => {
+                    const value = source_attributes.stringValue(i) orelse return error.InvalidSourceAttributes;
+                    try appendLengthPrefixedBytes(&attributes_raw, self.allocator, value);
+                },
+                else => return error.InvalidSourceAttributes,
+            }
+        }
+
+        if (column_cursor != updated_columns.len) return error.InvalidSourceAttributes;
+
+        if (obj.has_columns and obj.columns.len > 0) self.allocator.free(obj.columns);
+        obj.columns = updated_columns;
+        obj.has_columns = true;
+
+        if (obj.attributes_raw.len > 0) self.allocator.free(obj.attributes_raw);
+        obj.attributes_raw = try attributes_raw.toOwnedSlice(self.allocator);
+        obj.has_attributes = true;
     }
 
     fn compactVertices(self: *FeatureBuilder) !void {
@@ -2624,6 +2816,32 @@ fn getCurrentGeometry(reader: *Reader, object_index: usize, geometry_index: usiz
     return &obj.geometries[geometry_index];
 }
 
+fn sourceAttributesFromC(
+    names: [*c]const [*c]const u8,
+    name_lens: [*c]const usize,
+    types: [*c]const u8,
+    integer_values: [*c]const i64,
+    real_values: [*c]const f64,
+    string_values: [*c]const [*c]const u8,
+    string_value_lens: [*c]const usize,
+    count: usize,
+) ?SourceAttributes {
+    if (count == 0) return null;
+    if (names == null or name_lens == null or types == null or
+        integer_values == null or real_values == null or
+        string_values == null or string_value_lens == null) return null;
+    return .{
+        .names = names,
+        .name_lens = name_lens,
+        .types = types,
+        .integer_values = integer_values,
+        .real_values = real_values,
+        .string_values = string_values,
+        .string_value_lens = string_value_lens,
+        .count = count,
+    };
+}
+
 fn fileFromFd(fd: c_int) ?File {
     if (fd < 0) return null;
     if (builtin.os.tag == .windows) return null;
@@ -3115,6 +3333,66 @@ export fn zfcb_writer_write_current_replaced_lod22(
     return 0;
 }
 
+export fn zfcb_writer_write_current_replaced_lod22_with_attributes(
+    reader_handle: ?ZfcbReaderHandle,
+    writer_handle: ?ZfcbWriterHandle,
+    feature_id_ptr: [*c]const u8,
+    feature_id_len: usize,
+    vertices_xyz_world_ptr: [*c]const f64,
+    vertex_count: usize,
+    triangle_indices_ptr: [*c]const u32,
+    triangle_index_count: usize,
+    semantic_types_ptr: [*c]const u8,
+    semantic_types_count: usize,
+    source_attribute_names: [*c]const [*c]const u8,
+    source_attribute_name_lens: [*c]const usize,
+    source_attribute_types: [*c]const u8,
+    source_attribute_integer_values: [*c]const i64,
+    source_attribute_real_values: [*c]const f64,
+    source_attribute_string_values: [*c]const [*c]const u8,
+    source_attribute_string_value_lens: [*c]const usize,
+    source_attribute_count: usize,
+    source_attribute_target: u8,
+) callconv(.c) c_int {
+    const reader = reader_handle orelse return -1;
+    const writer = writer_handle orelse return -1;
+    if (feature_id_ptr == null or feature_id_len == 0) return -1;
+    if (vertices_xyz_world_ptr == null or vertex_count == 0) return -1;
+    if (triangle_indices_ptr == null or triangle_index_count == 0 or triangle_index_count % 3 != 0) return -1;
+    if (semantic_types_ptr == null or semantic_types_count != triangle_index_count / 3) return -1;
+
+    const source_attributes = sourceAttributesFromC(
+        source_attribute_names,
+        source_attribute_name_lens,
+        source_attribute_types,
+        source_attribute_integer_values,
+        source_attribute_real_values,
+        source_attribute_string_values,
+        source_attribute_string_value_lens,
+        source_attribute_count,
+    );
+    if (source_attribute_target != 0 and source_attribute_count != 0 and source_attributes == null) return -1;
+
+    const feature_id = feature_id_ptr[0..feature_id_len];
+    const vertices_xyz_world = vertices_xyz_world_ptr[0 .. vertex_count * 3];
+    const triangle_indices = triangle_indices_ptr[0..triangle_index_count];
+    const semantic_types = semantic_types_ptr[0..semantic_types_count];
+
+    var builder = FeatureBuilder.init(c_allocator, reader.transform);
+    defer builder.deinit();
+    builder.loadCurrentFromReader(reader) catch return -1;
+    builder.replaceLod22Solid(feature_id, vertices_xyz_world, triangle_indices, semantic_types) catch return -1;
+    if (source_attributes) |attrs| {
+        builder.mergeSourceAttributes(reader.root_columns, feature_id, attrs, source_attribute_target) catch return -1;
+    }
+
+    var rewritten_feature = std.ArrayList(u8).empty;
+    defer rewritten_feature.deinit(c_allocator);
+    builder.encodeFeature(&rewritten_feature) catch return -1;
+    writer.writeFeatureRaw(rewritten_feature.items) catch return -1;
+    return 0;
+}
+
 export fn zfcb_writer_write_current_replaced_lod22_polygonal(
     reader_handle: ?ZfcbReaderHandle,
     writer_handle: ?ZfcbWriterHandle,
@@ -3158,6 +3436,81 @@ export fn zfcb_writer_write_current_replaced_lod22_polygonal(
         boundary_indices,
         surface_semantic_types,
     ) catch return -1;
+
+    var rewritten_feature = std.ArrayList(u8).empty;
+    defer rewritten_feature.deinit(c_allocator);
+    builder.encodeFeature(&rewritten_feature) catch return -1;
+    writer.writeFeatureRaw(rewritten_feature.items) catch return -1;
+    return 0;
+}
+
+export fn zfcb_writer_write_current_replaced_lod22_polygonal_with_attributes(
+    reader_handle: ?ZfcbReaderHandle,
+    writer_handle: ?ZfcbWriterHandle,
+    feature_id_ptr: [*c]const u8,
+    feature_id_len: usize,
+    vertices_xyz_world_ptr: [*c]const f64,
+    vertex_count: usize,
+    surface_ring_counts_ptr: [*c]const u32,
+    surface_count: usize,
+    ring_vertex_counts_ptr: [*c]const u32,
+    ring_count: usize,
+    boundary_indices_ptr: [*c]const u32,
+    boundary_index_count: usize,
+    surface_semantic_types_ptr: [*c]const u8,
+    surface_semantic_types_count: usize,
+    source_attribute_names: [*c]const [*c]const u8,
+    source_attribute_name_lens: [*c]const usize,
+    source_attribute_types: [*c]const u8,
+    source_attribute_integer_values: [*c]const i64,
+    source_attribute_real_values: [*c]const f64,
+    source_attribute_string_values: [*c]const [*c]const u8,
+    source_attribute_string_value_lens: [*c]const usize,
+    source_attribute_count: usize,
+    source_attribute_target: u8,
+) callconv(.c) c_int {
+    const reader = reader_handle orelse return -1;
+    const writer = writer_handle orelse return -1;
+    if (feature_id_ptr == null or feature_id_len == 0) return -1;
+    if (vertices_xyz_world_ptr == null or vertex_count == 0) return -1;
+    if (surface_ring_counts_ptr == null or surface_count == 0) return -1;
+    if (ring_vertex_counts_ptr == null or ring_count == 0) return -1;
+    if (boundary_indices_ptr == null or boundary_index_count == 0) return -1;
+    if (surface_semantic_types_ptr == null or surface_semantic_types_count != surface_count) return -1;
+
+    const source_attributes = sourceAttributesFromC(
+        source_attribute_names,
+        source_attribute_name_lens,
+        source_attribute_types,
+        source_attribute_integer_values,
+        source_attribute_real_values,
+        source_attribute_string_values,
+        source_attribute_string_value_lens,
+        source_attribute_count,
+    );
+    if (source_attribute_target != 0 and source_attribute_count != 0 and source_attributes == null) return -1;
+
+    const feature_id = feature_id_ptr[0..feature_id_len];
+    const vertices_xyz_world = vertices_xyz_world_ptr[0 .. vertex_count * 3];
+    const surface_ring_counts = surface_ring_counts_ptr[0..surface_count];
+    const ring_vertex_counts = ring_vertex_counts_ptr[0..ring_count];
+    const boundary_indices = boundary_indices_ptr[0..boundary_index_count];
+    const surface_semantic_types = surface_semantic_types_ptr[0..surface_semantic_types_count];
+
+    var builder = FeatureBuilder.init(c_allocator, reader.transform);
+    defer builder.deinit();
+    builder.loadCurrentFromReader(reader) catch return -1;
+    builder.replaceLod22SolidPolygonal(
+        feature_id,
+        vertices_xyz_world,
+        surface_ring_counts,
+        ring_vertex_counts,
+        boundary_indices,
+        surface_semantic_types,
+    ) catch return -1;
+    if (source_attributes) |attrs| {
+        builder.mergeSourceAttributes(reader.root_columns, feature_id, attrs, source_attribute_target) catch return -1;
+    }
 
     var rewritten_feature = std.ArrayList(u8).empty;
     defer rewritten_feature.deinit(c_allocator);

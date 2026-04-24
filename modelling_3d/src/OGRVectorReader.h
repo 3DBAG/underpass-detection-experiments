@@ -9,6 +9,7 @@
 #include <ogrsf_frmts.h>
 
 #include <array>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
@@ -38,9 +39,26 @@ using Extent = std::array<double, 6>;
 
 class VectorReader {
  public:
+  enum class AttributeType {
+    Null,
+    Integer,
+    Integer64,
+    Real,
+    String,
+  };
+
+  struct SourceAttribute {
+    std::string name;
+    AttributeType type = AttributeType::Null;
+    int64_t integer_value = 0;
+    double real_value = 0.0;
+    std::string string_value;
+  };
+
   struct PolygonFeature {
     LinearRing polygon;
     std::string id;
+    std::vector<SourceAttribute> source_attributes;
     double absolute_elevation = 0.0;
     bool has_absolute_elevation = false;
   };
@@ -87,6 +105,7 @@ class VectorReader {
   void read_polygon(OGRPolygon* poPolygon, std::vector<LinearRing>& polygons);
   void read_polygon_feature(OGRPolygon* poPolygon,
                             const std::string& id,
+                            const std::vector<SourceAttribute>& source_attributes,
                             double absolute_elevation,
                             bool has_absolute_elevation,
                             std::vector<PolygonFeature>& features);

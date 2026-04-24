@@ -1667,6 +1667,71 @@ export fn cityjsonseq_writer_write_current_raw(
     return 0;
 }
 
+const SOURCE_ATTRIBUTE_NULL: u8 = 0;
+const SOURCE_ATTRIBUTE_INTEGER: u8 = 1;
+const SOURCE_ATTRIBUTE_INTEGER64: u8 = 2;
+const SOURCE_ATTRIBUTE_REAL: u8 = 3;
+const SOURCE_ATTRIBUTE_STRING: u8 = 4;
+
+const SourceAttributes = struct {
+    names: [*c]const [*c]const u8,
+    name_lens: [*c]const usize,
+    types: [*c]const u8,
+    integer_values: [*c]const i64,
+    real_values: [*c]const f64,
+    string_values: [*c]const [*c]const u8,
+    string_value_lens: [*c]const usize,
+    count: usize,
+
+    fn name(self: SourceAttributes, index: usize) ?[]const u8 {
+        if (index >= self.count) return null;
+        const ptr = self.names[index];
+        if (ptr == null) return null;
+        return ptr[0..self.name_lens[index]];
+    }
+
+    fn jsonValue(self: SourceAttributes, index: usize) !std.json.Value {
+        if (index >= self.count) return error.InvalidSourceAttributes;
+        return switch (self.types[index]) {
+            SOURCE_ATTRIBUTE_NULL => .null,
+            SOURCE_ATTRIBUTE_INTEGER, SOURCE_ATTRIBUTE_INTEGER64 => .{ .integer = self.integer_values[index] },
+            SOURCE_ATTRIBUTE_REAL => .{ .float = self.real_values[index] },
+            SOURCE_ATTRIBUTE_STRING => blk: {
+                const ptr = self.string_values[index];
+                if (ptr == null) return error.InvalidSourceAttributes;
+                break :blk .{ .string = ptr[0..self.string_value_lens[index]] };
+            },
+            else => error.InvalidSourceAttributes,
+        };
+    }
+};
+
+fn sourceAttributesFromC(
+    names: [*c]const [*c]const u8,
+    name_lens: [*c]const usize,
+    types: [*c]const u8,
+    integer_values: [*c]const i64,
+    real_values: [*c]const f64,
+    string_values: [*c]const [*c]const u8,
+    string_value_lens: [*c]const usize,
+    count: usize,
+) ?SourceAttributes {
+    if (count == 0) return null;
+    if (names == null or name_lens == null or types == null or
+        integer_values == null or real_values == null or
+        string_values == null or string_value_lens == null) return null;
+    return .{
+        .names = names,
+        .name_lens = name_lens,
+        .types = types,
+        .integer_values = integer_values,
+        .real_values = real_values,
+        .string_values = string_values,
+        .string_value_lens = string_value_lens,
+        .count = count,
+    };
+}
+
 fn writeReplacedCurrentFeatureLinePolygonal(
     reader: *CityJSONSeqReader,
     writer: *CityJSONSeqWriter,
@@ -1676,6 +1741,8 @@ fn writeReplacedCurrentFeatureLinePolygonal(
     ring_vertex_counts: []const u32,
     boundary_indices: []const u32,
     surface_semantic_types: []const u8,
+    source_attributes: ?SourceAttributes,
+    source_attribute_target: u8,
 ) !void {
     if (vertices_xyz_world.len % 3 != 0) return error.InvalidVertexArray;
     if (surface_ring_counts.len == 0 or ring_vertex_counts.len == 0 or boundary_indices.len == 0) {
@@ -1716,6 +1783,17 @@ fn writeReplacedCurrentFeatureLinePolygonal(
     }
     var target_object_value = target_object orelse return error.TargetObjectNotFound;
     if (target_object_value.* != .object) return error.TargetObjectNotFound;
+
+    if (source_attribute_target != 0) {
+        try mergeSourceAttributes(
+            arena_alloc,
+            city_objects_obj,
+            target_object_value,
+            feature_id,
+            source_attributes,
+            source_attribute_target,
+        );
+    }
 
     const target_geometries_value = target_object_value.object.getPtr("geometry") orelse return error.TargetGeometryNotFound;
     if (target_geometries_value.* != .array) return error.TargetGeometryNotFound;
@@ -1899,6 +1977,51 @@ fn writeReplacedCurrentFeatureLinePolygonal(
     try writer.writeLine(out.written());
 }
 
+fn mergeSourceAttributes(
+    arena_alloc: std.mem.Allocator,
+    city_objects_obj: *std.json.ObjectMap,
+    target_object_value: *std.json.Value,
+    feature_id: []const u8,
+    source_attributes: ?SourceAttributes,
+    source_attribute_target: u8,
+) !void {
+    const attrs = source_attributes orelse return;
+    if (attrs.count == 0) return;
+
+    var destination_object = target_object_value;
+    if (source_attribute_target == 2) {
+        if (city_objects_obj.getPtr(feature_id)) |parent_object| {
+            destination_object = parent_object;
+        } else if (target_object_value.object.get("parents")) |parents_value| {
+            if (parents_value == .array and parents_value.array.items.len > 0) {
+                const first_parent = parents_value.array.items[0];
+                if (first_parent == .string) {
+                    destination_object = city_objects_obj.getPtr(first_parent.string) orelse target_object_value;
+                }
+            }
+        }
+    } else if (source_attribute_target != 1) {
+        return error.InvalidSourceAttributeTarget;
+    }
+
+    if (destination_object.* != .object) return error.TargetObjectNotFound;
+
+    var attributes_value = destination_object.object.getPtr("attributes");
+    if (attributes_value == null) {
+        const new_attributes: std.json.ObjectMap = .empty;
+        try destination_object.object.put(arena_alloc, "attributes", .{ .object = new_attributes });
+        attributes_value = destination_object.object.getPtr("attributes");
+    }
+    var attributes = attributes_value orelse return error.InvalidCityJSONSeqFeature;
+    if (attributes.* != .object) return error.InvalidCityJSONSeqFeature;
+
+    for (0..attrs.count) |i| {
+        const name = attrs.name(i) orelse continue;
+        if (name.len == 0 or attributes.object.contains(name)) continue;
+        try attributes.object.put(arena_alloc, name, try attrs.jsonValue(i));
+    }
+}
+
 fn writeReplacedCurrentFeatureLine(
     reader: *CityJSONSeqReader,
     writer: *CityJSONSeqWriter,
@@ -1906,6 +2029,8 @@ fn writeReplacedCurrentFeatureLine(
     vertices_xyz_world: []const f64,
     triangle_indices: []const u32,
     semantic_types: []const u8,
+    source_attributes: ?SourceAttributes,
+    source_attribute_target: u8,
 ) !void {
     if (triangle_indices.len % 3 != 0) return error.InvalidTriangleIndexArray;
     if (semantic_types.len != triangle_indices.len / 3) return error.InvalidSemanticTypesArray;
@@ -1927,6 +2052,8 @@ fn writeReplacedCurrentFeatureLine(
         ring_vertex_counts,
         triangle_indices,
         semantic_types,
+        source_attributes,
+        source_attribute_target,
     );
 }
 
@@ -1962,6 +2089,67 @@ export fn cityjsonseq_writer_write_current_replaced_lod22(
         vertices_xyz_world,
         triangle_indices,
         semantic_types,
+        null,
+        0,
+    ) catch return -1;
+
+    return 0;
+}
+
+export fn cityjsonseq_writer_write_current_replaced_lod22_with_attributes(
+    reader_handle: ?CityJSONSeqReaderHandle,
+    writer_handle: ?CityJSONSeqWriterHandle,
+    feature_id_ptr: [*c]const u8,
+    feature_id_len: usize,
+    vertices_xyz_world_ptr: [*c]const f64,
+    vertex_count: usize,
+    triangle_indices_ptr: [*c]const u32,
+    triangle_index_count: usize,
+    semantic_types_ptr: [*c]const u8,
+    semantic_types_count: usize,
+    source_attribute_names: [*c]const [*c]const u8,
+    source_attribute_name_lens: [*c]const usize,
+    source_attribute_types: [*c]const u8,
+    source_attribute_integer_values: [*c]const i64,
+    source_attribute_real_values: [*c]const f64,
+    source_attribute_string_values: [*c]const [*c]const u8,
+    source_attribute_string_value_lens: [*c]const usize,
+    source_attribute_count: usize,
+    source_attribute_target: u8,
+) callconv(.c) c_int {
+    const reader = reader_handle orelse return -1;
+    const writer = writer_handle orelse return -1;
+    if (feature_id_ptr == null or feature_id_len == 0) return -1;
+    if (vertices_xyz_world_ptr == null or vertex_count == 0) return -1;
+    if (triangle_indices_ptr == null or triangle_index_count == 0 or triangle_index_count % 3 != 0) return -1;
+    if (semantic_types_ptr == null or semantic_types_count != triangle_index_count / 3) return -1;
+    if (reader.current_line.len == 0) return -1;
+
+    const feature_id = feature_id_ptr[0..feature_id_len];
+    const vertices_xyz_world = vertices_xyz_world_ptr[0 .. vertex_count * 3];
+    const triangle_indices = triangle_indices_ptr[0..triangle_index_count];
+    const semantic_types = semantic_types_ptr[0..semantic_types_count];
+    const source_attributes = sourceAttributesFromC(
+        source_attribute_names,
+        source_attribute_name_lens,
+        source_attribute_types,
+        source_attribute_integer_values,
+        source_attribute_real_values,
+        source_attribute_string_values,
+        source_attribute_string_value_lens,
+        source_attribute_count,
+    );
+    if (source_attribute_target != 0 and source_attribute_count != 0 and source_attributes == null) return -1;
+
+    writeReplacedCurrentFeatureLine(
+        reader,
+        writer,
+        feature_id,
+        vertices_xyz_world,
+        triangle_indices,
+        semantic_types,
+        source_attributes,
+        source_attribute_target,
     ) catch return -1;
 
     return 0;
@@ -2009,6 +2197,77 @@ export fn cityjsonseq_writer_write_current_replaced_lod22_polygonal(
         ring_vertex_counts,
         boundary_indices,
         surface_semantic_types,
+        null,
+        0,
+    ) catch return -1;
+
+    return 0;
+}
+
+export fn cityjsonseq_writer_write_current_replaced_lod22_polygonal_with_attributes(
+    reader_handle: ?CityJSONSeqReaderHandle,
+    writer_handle: ?CityJSONSeqWriterHandle,
+    feature_id_ptr: [*c]const u8,
+    feature_id_len: usize,
+    vertices_xyz_world_ptr: [*c]const f64,
+    vertex_count: usize,
+    surface_ring_counts_ptr: [*c]const u32,
+    surface_count: usize,
+    ring_vertex_counts_ptr: [*c]const u32,
+    ring_count: usize,
+    boundary_indices_ptr: [*c]const u32,
+    boundary_index_count: usize,
+    surface_semantic_types_ptr: [*c]const u8,
+    surface_semantic_types_count: usize,
+    source_attribute_names: [*c]const [*c]const u8,
+    source_attribute_name_lens: [*c]const usize,
+    source_attribute_types: [*c]const u8,
+    source_attribute_integer_values: [*c]const i64,
+    source_attribute_real_values: [*c]const f64,
+    source_attribute_string_values: [*c]const [*c]const u8,
+    source_attribute_string_value_lens: [*c]const usize,
+    source_attribute_count: usize,
+    source_attribute_target: u8,
+) callconv(.c) c_int {
+    const reader = reader_handle orelse return -1;
+    const writer = writer_handle orelse return -1;
+    if (feature_id_ptr == null or feature_id_len == 0) return -1;
+    if (vertices_xyz_world_ptr == null or vertex_count == 0) return -1;
+    if (surface_ring_counts_ptr == null or surface_count == 0) return -1;
+    if (ring_vertex_counts_ptr == null or ring_count == 0) return -1;
+    if (boundary_indices_ptr == null or boundary_index_count == 0) return -1;
+    if (surface_semantic_types_ptr == null or surface_semantic_types_count != surface_count) return -1;
+    if (reader.current_line.len == 0) return -1;
+
+    const feature_id = feature_id_ptr[0..feature_id_len];
+    const vertices_xyz_world = vertices_xyz_world_ptr[0 .. vertex_count * 3];
+    const surface_ring_counts = surface_ring_counts_ptr[0..surface_count];
+    const ring_vertex_counts = ring_vertex_counts_ptr[0..ring_count];
+    const boundary_indices = boundary_indices_ptr[0..boundary_index_count];
+    const surface_semantic_types = surface_semantic_types_ptr[0..surface_semantic_types_count];
+    const source_attributes = sourceAttributesFromC(
+        source_attribute_names,
+        source_attribute_name_lens,
+        source_attribute_types,
+        source_attribute_integer_values,
+        source_attribute_real_values,
+        source_attribute_string_values,
+        source_attribute_string_value_lens,
+        source_attribute_count,
+    );
+    if (source_attribute_target != 0 and source_attribute_count != 0 and source_attributes == null) return -1;
+
+    writeReplacedCurrentFeatureLinePolygonal(
+        reader,
+        writer,
+        feature_id,
+        vertices_xyz_world,
+        surface_ring_counts,
+        ring_vertex_counts,
+        boundary_indices,
+        surface_semantic_types,
+        source_attributes,
+        source_attribute_target,
     ) catch return -1;
 
     return 0;

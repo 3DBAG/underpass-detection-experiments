@@ -231,6 +231,7 @@ void VectorReader::read_polygon(OGRPolygon* poPolygon,
 void VectorReader::read_polygon_feature(
     OGRPolygon* poPolygon,
     const std::string& id,
+    const std::vector<SourceAttribute>& source_attributes,
     double absolute_elevation,
     bool has_absolute_elevation,
     std::vector<PolygonFeature>& features) {
@@ -276,6 +277,7 @@ void VectorReader::read_polygon_feature(
   PolygonFeature feature;
   feature.polygon = std::move(polygon);
   feature.id = id;
+  feature.source_attributes = source_attributes;
   feature.absolute_elevation = absolute_elevation;
   feature.has_absolute_elevation = has_absolute_elevation;
   features.push_back(std::move(feature));
@@ -367,14 +369,67 @@ std::vector<VectorReader::PolygonFeature> VectorReader::read_polygon_features(
       has_absolute_elevation = true;
     }
 
+    std::vector<SourceAttribute> source_attributes;
+    if (const OGRFeatureDefn* defn = poFeature->GetDefnRef()) {
+      source_attributes.reserve(static_cast<size_t>(defn->GetFieldCount()));
+      for (int i = 0; i < defn->GetFieldCount(); ++i) {
+        const OGRFieldDefn* field_defn = defn->GetFieldDefn(i);
+        if (field_defn == nullptr || field_defn->GetNameRef() == nullptr) {
+          continue;
+        }
+
+        SourceAttribute attribute;
+        attribute.name = field_defn->GetNameRef();
+        if (!poFeature->IsFieldSetAndNotNull(i)) {
+          attribute.type = AttributeType::Null;
+        } else {
+          switch (field_defn->GetType()) {
+            case OFTInteger:
+              attribute.type = AttributeType::Integer;
+              attribute.integer_value = poFeature->GetFieldAsInteger(i);
+              break;
+            case OFTInteger64:
+              attribute.type = AttributeType::Integer64;
+              attribute.integer_value = poFeature->GetFieldAsInteger64(i);
+              break;
+            case OFTReal:
+              attribute.type = AttributeType::Real;
+              attribute.real_value = poFeature->GetFieldAsDouble(i);
+              break;
+            case OFTString:
+            case OFTDate:
+            case OFTTime:
+            case OFTDateTime:
+            default:
+              attribute.type = AttributeType::String;
+              attribute.string_value = poFeature->GetFieldAsString(i);
+              break;
+          }
+        }
+        source_attributes.push_back(std::move(attribute));
+      }
+    }
+
     if (wkbFlatten(poGeometry->getGeometryType()) == wkbPolygon) {
       OGRPolygon* poPolygon = poGeometry->toPolygon();
-      read_polygon_feature(poPolygon, id, absolute_elevation, has_absolute_elevation, features);
+      read_polygon_feature(
+          poPolygon,
+          id,
+          source_attributes,
+          absolute_elevation,
+          has_absolute_elevation,
+          features);
     } else if (wkbFlatten(poGeometry->getGeometryType()) == wkbMultiPolygon) {
       OGRMultiPolygon* poMultiPolygon = poGeometry->toMultiPolygon();
       for (auto poly_it = poMultiPolygon->begin();
            poly_it != poMultiPolygon->end(); ++poly_it) {
-        read_polygon_feature(*poly_it, id, absolute_elevation, has_absolute_elevation, features);
+        read_polygon_feature(
+            *poly_it,
+            id,
+            source_attributes,
+            absolute_elevation,
+            has_absolute_elevation,
+            features);
       }
     }
 

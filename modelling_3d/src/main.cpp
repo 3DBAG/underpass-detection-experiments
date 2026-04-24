@@ -6,6 +6,7 @@
 #include <limits>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <cstdio>
 #if defined(_WIN32)
@@ -51,6 +52,50 @@ namespace SemanticSurfaceType {
     constexpr uint8_t GroundSurface = 1;
     constexpr uint8_t WallSurface = 2;
     constexpr uint8_t OuterCeilingSurface = 4;
+}
+
+enum class SourceAttributeTarget : uint8_t {
+    None = 0,
+    Feature = 1,
+    Parent = 2,
+};
+
+struct SourceAttributeBuffers {
+    std::vector<const char*> names;
+    std::vector<size_t> name_lens;
+    std::vector<uint8_t> types;
+    std::vector<int64_t> integer_values;
+    std::vector<double> real_values;
+    std::vector<const char*> string_values;
+    std::vector<size_t> string_value_lens;
+
+    size_t size() const { return names.size(); }
+};
+
+static SourceAttributeBuffers source_attribute_buffers(
+    const std::vector<ogr::VectorReader::PolygonFeature>& polygon_features,
+    const std::vector<size_t>& matched_indices) {
+    SourceAttributeBuffers out;
+    std::unordered_set<std::string> emitted;
+    for (size_t feature_idx : matched_indices) {
+        if (feature_idx >= polygon_features.size()) {
+            continue;
+        }
+        for (const auto& attribute : polygon_features[feature_idx].source_attributes) {
+            if (attribute.name.empty() || emitted.contains(attribute.name)) {
+                continue;
+            }
+            emitted.insert(attribute.name);
+            out.names.push_back(attribute.name.c_str());
+            out.name_lens.push_back(attribute.name.size());
+            out.types.push_back(static_cast<uint8_t>(attribute.type));
+            out.integer_values.push_back(attribute.integer_value);
+            out.real_values.push_back(attribute.real_value);
+            out.string_values.push_back(attribute.string_value.c_str());
+            out.string_value_lens.push_back(attribute.string_value.size());
+        }
+    }
+    return out;
 }
 
 // Classify each triangle by face normal orientation and Z-position.
@@ -284,6 +329,7 @@ struct StreamProcessingContext {
     std::unordered_map<std::string_view, std::vector<size_t>>& features_by_exact_id;
     std::vector<bool>& seen_feature;
     BooleanMethod method;
+    SourceAttributeTarget source_attribute_target;
     bool ignore_holes;
     bool& global_offset_set;
     double& global_offset_x;
@@ -355,7 +401,26 @@ struct FcbStreamBackend {
         const uint32_t* triangle_indices,
         size_t triangle_index_count,
         const uint8_t* semantic_types,
-        size_t semantic_types_count) {
+        size_t semantic_types_count,
+        const SourceAttributeBuffers& source_attributes,
+        SourceAttributeTarget source_attribute_target) {
+        if (source_attribute_target != SourceAttributeTarget::None) {
+            return zfcb_writer_write_current_replaced_lod22_with_attributes(
+                reader, writer,
+                feature_id_ptr, feature_id_len,
+                vertices_xyz_world, vertex_count,
+                triangle_indices, triangle_index_count,
+                semantic_types, semantic_types_count,
+                source_attributes.names.data(),
+                source_attributes.name_lens.data(),
+                source_attributes.types.data(),
+                source_attributes.integer_values.data(),
+                source_attributes.real_values.data(),
+                source_attributes.string_values.data(),
+                source_attributes.string_value_lens.data(),
+                source_attributes.size(),
+                static_cast<uint8_t>(source_attribute_target));
+        }
         return zfcb_writer_write_current_replaced_lod22(
             reader, writer,
             feature_id_ptr, feature_id_len,
@@ -376,7 +441,28 @@ struct FcbStreamBackend {
         const uint32_t* boundary_indices,
         size_t boundary_index_count,
         const uint8_t* surface_semantic_types,
-        size_t surface_semantic_types_count) {
+        size_t surface_semantic_types_count,
+        const SourceAttributeBuffers& source_attributes,
+        SourceAttributeTarget source_attribute_target) {
+        if (source_attribute_target != SourceAttributeTarget::None) {
+            return zfcb_writer_write_current_replaced_lod22_polygonal_with_attributes(
+                reader, writer,
+                feature_id_ptr, feature_id_len,
+                vertices_xyz_world, vertex_count,
+                surface_ring_counts, surface_count,
+                ring_vertex_counts, ring_count,
+                boundary_indices, boundary_index_count,
+                surface_semantic_types, surface_semantic_types_count,
+                source_attributes.names.data(),
+                source_attributes.name_lens.data(),
+                source_attributes.types.data(),
+                source_attributes.integer_values.data(),
+                source_attributes.real_values.data(),
+                source_attributes.string_values.data(),
+                source_attributes.string_value_lens.data(),
+                source_attributes.size(),
+                static_cast<uint8_t>(source_attribute_target));
+        }
         return zfcb_writer_write_current_replaced_lod22_polygonal(
             reader, writer,
             feature_id_ptr, feature_id_len,
@@ -496,13 +582,32 @@ struct CjseqStreamBackend {
         const uint32_t* triangle_indices,
         size_t triangle_index_count,
         const uint8_t* semantic_types,
-        size_t semantic_types_count) {
-        return cityjsonseq_writer_write_current_replaced_lod22(
+        size_t semantic_types_count,
+        const SourceAttributeBuffers& source_attributes,
+        SourceAttributeTarget source_attribute_target) {
+        if (source_attribute_target == SourceAttributeTarget::None) {
+            return cityjsonseq_writer_write_current_replaced_lod22(
+                reader, writer,
+                feature_id_ptr, feature_id_len,
+                vertices_xyz_world, vertex_count,
+                triangle_indices, triangle_index_count,
+                semantic_types, semantic_types_count);
+        }
+        return cityjsonseq_writer_write_current_replaced_lod22_with_attributes(
             reader, writer,
             feature_id_ptr, feature_id_len,
             vertices_xyz_world, vertex_count,
             triangle_indices, triangle_index_count,
-            semantic_types, semantic_types_count);
+            semantic_types, semantic_types_count,
+            source_attributes.names.data(),
+            source_attributes.name_lens.data(),
+            source_attributes.types.data(),
+            source_attributes.integer_values.data(),
+            source_attributes.real_values.data(),
+            source_attributes.string_values.data(),
+            source_attributes.string_value_lens.data(),
+            source_attributes.size(),
+            static_cast<uint8_t>(source_attribute_target));
     }
 
     int write_current_replaced_lod22_polygonal(
@@ -517,15 +622,36 @@ struct CjseqStreamBackend {
         const uint32_t* boundary_indices,
         size_t boundary_index_count,
         const uint8_t* surface_semantic_types,
-        size_t surface_semantic_types_count) {
-        return cityjsonseq_writer_write_current_replaced_lod22_polygonal(
+        size_t surface_semantic_types_count,
+        const SourceAttributeBuffers& source_attributes,
+        SourceAttributeTarget source_attribute_target) {
+        if (source_attribute_target == SourceAttributeTarget::None) {
+            return cityjsonseq_writer_write_current_replaced_lod22_polygonal(
+                reader, writer,
+                feature_id_ptr, feature_id_len,
+                vertices_xyz_world, vertex_count,
+                surface_ring_counts, surface_count,
+                ring_vertex_counts, ring_count,
+                boundary_indices, boundary_index_count,
+                surface_semantic_types, surface_semantic_types_count);
+        }
+        return cityjsonseq_writer_write_current_replaced_lod22_polygonal_with_attributes(
             reader, writer,
             feature_id_ptr, feature_id_len,
             vertices_xyz_world, vertex_count,
             surface_ring_counts, surface_count,
             ring_vertex_counts, ring_count,
             boundary_indices, boundary_index_count,
-            surface_semantic_types, surface_semantic_types_count);
+            surface_semantic_types, surface_semantic_types_count,
+            source_attributes.names.data(),
+            source_attributes.name_lens.data(),
+            source_attributes.types.data(),
+            source_attributes.integer_values.data(),
+            source_attributes.real_values.data(),
+            source_attributes.string_values.data(),
+            source_attributes.string_value_lens.data(),
+            source_attributes.size(),
+            static_cast<uint8_t>(source_attribute_target));
     }
 
     bool prepare_current_feature(
@@ -730,6 +856,10 @@ static bool process_stream_features(Backend& backend, StreamProcessingContext& c
 
         if (carve_result.any_succeeded) {
             std::string feature_id_str(next_id);
+            SourceAttributeBuffers source_attributes =
+                ctx.source_attribute_target == SourceAttributeTarget::None
+                    ? SourceAttributeBuffers{}
+                    : source_attribute_buffers(ctx.polygon_features, matched_indices);
             auto t_output_write_start_local = Clock::now();
             int write_result = -1;
             if (ctx.method == BooleanMethod::Manifold && carve_result.result_meshgl.NumTri() > 0) {
@@ -749,7 +879,9 @@ static bool process_stream_features(Backend& backend, StreamProcessingContext& c
                         polygonal_output.surface_ring_counts.data(), polygonal_output.surface_ring_counts.size(),
                         polygonal_output.ring_vertex_counts.data(), polygonal_output.ring_vertex_counts.size(),
                         polygonal_output.boundary_indices.data(), polygonal_output.boundary_indices.size(),
-                        polygonal_output.surface_semantic_types.data(), polygonal_output.surface_semantic_types.size());
+                        polygonal_output.surface_semantic_types.data(), polygonal_output.surface_semantic_types.size(),
+                        source_attributes,
+                        ctx.source_attribute_target);
                 }
             } else if (carve_result.has_polygonal_result) {
                 PolygonalOutput polygonal_output;
@@ -768,7 +900,9 @@ static bool process_stream_features(Backend& backend, StreamProcessingContext& c
                         polygonal_output.surface_ring_counts.data(), polygonal_output.surface_ring_counts.size(),
                         polygonal_output.ring_vertex_counts.data(), polygonal_output.ring_vertex_counts.size(),
                         polygonal_output.boundary_indices.data(), polygonal_output.boundary_indices.size(),
-                        polygonal_output.surface_semantic_types.data(), polygonal_output.surface_semantic_types.size());
+                        polygonal_output.surface_semantic_types.data(), polygonal_output.surface_semantic_types.size(),
+                        source_attributes,
+                        ctx.source_attribute_target);
                 }
 
                 if (write_result < 0) {
@@ -790,7 +924,9 @@ static bool process_stream_features(Backend& backend, StreamProcessingContext& c
                     feature_id_str.c_str(), feature_id_str.size(),
                     world_verts.data(), world_verts.size() / 3,
                     carve_result.result_meshgl.triVerts.data(), carve_result.result_meshgl.triVerts.size(),
-                    semantics.data(), semantics.size());
+                    semantics.data(), semantics.size(),
+                    source_attributes,
+                    ctx.source_attribute_target);
             }
             auto t_output_write_end_local = Clock::now();
             auto d_output_write = t_output_write_end_local - t_output_write_start_local;
@@ -829,7 +965,7 @@ int main(int argc, char* argv[]) {
 
     if (argc < 5) {
         std::cerr << "Usage: " << argv[0]
-                  << " <ogr_source> <model_input> <model_output> <absolute_underpass_elevation_attribute> [id_attribute] [method]" << std::endl;
+                  << " <ogr_source> <model_input> <model_output> <absolute_underpass_elevation_attribute> [id_attribute] [method] [copy_source_attributes]" << std::endl;
         std::cerr << "  model formats: .fcb (FlatCityBuf) or .jsonl (CityJSONSeq)" << std::endl;
         std::cerr << "  id_attribute default: identificatie" << std::endl;
         std::cerr << "  missing absolute underpass elevation falls back to 2.5 m above the local ground reference" << std::endl;
@@ -838,6 +974,7 @@ int main(int argc, char* argv[]) {
                   << ", geogram"
 #endif
                   << std::endl;
+        std::cerr << "  copy_source_attributes: none (default), feature, parent" << std::endl;
         std::cerr << "  use '-' as input to read FCB from stdin" << std::endl;
         std::cerr << "  use '-' as output to write FCB to stdout" << std::endl;
         std::cerr << "  CityJSONSeq stdin/stdout piping is not supported yet" << std::endl;
@@ -850,6 +987,7 @@ int main(int argc, char* argv[]) {
     std::string height_attribute = argv[4];
     std::string id_attribute = argc > 5 ? argv[5] : "identificatie";
     std::string method_str = argc > 6 ? argv[6] : "pmp";
+    std::string copy_source_attributes_str = argc > 7 ? argv[7] : "none";
     const bool model_from_stdin = std::string_view(model_path) == "-";
     const bool output_to_stdout = std::string_view(output_path) == "-";
     std::ostream& log_out = output_to_stdout ? static_cast<std::ostream&>(std::cerr) : static_cast<std::ostream&>(std::cout);
@@ -869,6 +1007,17 @@ int main(int argc, char* argv[]) {
                   << ", geogram"
 #endif
                   << ")" << std::endl;
+        return 1;
+    }
+
+    SourceAttributeTarget source_attribute_target = SourceAttributeTarget::None;
+    if (copy_source_attributes_str == "feature") {
+        source_attribute_target = SourceAttributeTarget::Feature;
+    } else if (copy_source_attributes_str == "parent") {
+        source_attribute_target = SourceAttributeTarget::Parent;
+    } else if (copy_source_attributes_str != "none") {
+        std::cerr << "Unknown copy_source_attributes: " << copy_source_attributes_str
+                  << " (use none, feature, parent)" << std::endl;
         return 1;
     }
 
@@ -994,6 +1143,7 @@ int main(int argc, char* argv[]) {
         .features_by_exact_id = features_by_exact_id,
         .seen_feature = seen_feature,
         .method = method,
+        .source_attribute_target = source_attribute_target,
         .ignore_holes = ignore_holes,
         .global_offset_set = global_offset_set,
         .global_offset_x = global_offset_x,
