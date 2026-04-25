@@ -209,6 +209,24 @@ int cityjsonseq_writer_write_current_raw(
     CityJSONSeqWriterHandle writer_handle
 );
 
+// Write current feature unchanged except for typed attributes merged into the
+// target object attributes.
+int cityjsonseq_writer_write_current_with_attributes(
+    CityJSONSeqReaderHandle reader_handle,
+    CityJSONSeqWriterHandle writer_handle,
+    const char* feature_id,
+    size_t feature_id_len,
+    const char* const* source_attribute_names,
+    const size_t* source_attribute_name_lens,
+    const uint8_t* source_attribute_types,
+    const int64_t* source_attribute_integer_values,
+    const double* source_attribute_real_values,
+    const char* const* source_attribute_string_values,
+    const size_t* source_attribute_string_value_lens,
+    size_t source_attribute_count,
+    uint8_t source_attribute_target
+);
+
 // Write current feature with LoD 2.2 Solid geometry replaced by a triangle mesh.
 // Semantics type values match zfcb semantic enum values:
 //   0=RoofSurface, 1=GroundSurface, 2=WallSurface, 4=OuterCeilingSurface.

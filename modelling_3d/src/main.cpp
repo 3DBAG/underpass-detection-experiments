@@ -105,16 +105,38 @@ static void append_string_source_attribute(
     out.string_value_lens.push_back(value.size());
 }
 
+static void append_integer_source_attribute(
+    SourceAttributeBuffers& out,
+    std::unordered_set<std::string>& emitted,
+    std::string_view name,
+    int64_t value) {
+    if (name.empty() || emitted.contains(std::string(name))) {
+        return;
+    }
+
+    emitted.insert(std::string(name));
+    out.names.push_back(name.data());
+    out.name_lens.push_back(name.size());
+    out.types.push_back(static_cast<uint8_t>(ogr::VectorReader::AttributeType::Integer64));
+    out.integer_values.push_back(value);
+    out.real_values.push_back(0.0);
+    out.string_values.push_back("");
+    out.string_value_lens.push_back(0);
+}
+
 static SourceAttributeBuffers source_attribute_buffers(
     const std::vector<ogr::VectorReader::PolygonFeature>& polygon_features,
     const std::vector<size_t>& matched_indices,
     bool include_source_attributes,
-    std::string_view feature_source_filename) {
+    std::string_view feature_source_filename,
+    bool add_underpass_success) {
     SourceAttributeBuffers out;
     std::unordered_set<std::string> emitted;
 
     static constexpr std::string_view kFeatureSourceAttributeName = "featuresource";
+    static constexpr std::string_view kAddUnderpassSuccessAttributeName = "add_underpass_success";
     append_string_source_attribute(out, emitted, kFeatureSourceAttributeName, feature_source_filename);
+    append_integer_source_attribute(out, emitted, kAddUnderpassSuccessAttributeName, add_underpass_success ? 1 : 0);
 
     if (!include_source_attributes) {
         return out;
@@ -437,6 +459,28 @@ struct FcbStreamBackend {
         return zfcb_writer_write_current_raw(reader, writer);
     }
 
+    int write_current_with_attributes(
+        const char* feature_id_ptr,
+        size_t feature_id_len,
+        const SourceAttributeBuffers& source_attributes,
+        SourceAttributeTarget source_attribute_target) {
+        if (source_attribute_target == SourceAttributeTarget::None) {
+            return write_current_raw();
+        }
+        return zfcb_writer_write_current_with_attributes(
+            reader, writer,
+            feature_id_ptr, feature_id_len,
+            source_attributes.names.data(),
+            source_attributes.name_lens.data(),
+            source_attributes.types.data(),
+            source_attributes.integer_values.data(),
+            source_attributes.real_values.data(),
+            source_attributes.string_values.data(),
+            source_attributes.string_value_lens.data(),
+            source_attributes.size(),
+            static_cast<uint8_t>(source_attribute_target));
+    }
+
     int write_current_replaced_lod22(
         const char* feature_id_ptr,
         size_t feature_id_len,
@@ -528,7 +572,9 @@ struct FcbStreamBackend {
         double& global_offset_y,
         double& global_offset_z,
         std::chrono::duration<double, std::milli>& output_write_ms,
-        std::chrono::duration<double, std::milli>& output_write_passthrough_ms) {
+        std::chrono::duration<double, std::milli>& output_write_passthrough_ms,
+        const SourceAttributeBuffers& aborted_attributes,
+        SourceAttributeTarget output_attribute_target) {
         (void)next_id;
         if (global_offset_set) {
             return true;
@@ -544,7 +590,10 @@ struct FcbStreamBackend {
                 ++skipped_count;
             }
             auto t_output_write_start_local = Clock::now();
-            zfcb_writer_write_current_raw(reader, writer);
+            if (write_current_with_attributes(
+                    next_id.data(), next_id.size(), aborted_attributes, output_attribute_target) < 0) {
+                write_current_raw();
+            }
             auto t_output_write_end_local = Clock::now();
             auto d_output_write = t_output_write_end_local - t_output_write_start_local;
             output_write_ms += d_output_write;
@@ -616,6 +665,28 @@ struct CjseqStreamBackend {
 
     int write_current_raw() {
         return cityjsonseq_writer_write_current_raw(reader, writer);
+    }
+
+    int write_current_with_attributes(
+        const char* feature_id_ptr,
+        size_t feature_id_len,
+        const SourceAttributeBuffers& source_attributes,
+        SourceAttributeTarget source_attribute_target) {
+        if (source_attribute_target == SourceAttributeTarget::None) {
+            return write_current_raw();
+        }
+        return cityjsonseq_writer_write_current_with_attributes(
+            reader, writer,
+            feature_id_ptr, feature_id_len,
+            source_attributes.names.data(),
+            source_attributes.name_lens.data(),
+            source_attributes.types.data(),
+            source_attributes.integer_values.data(),
+            source_attributes.real_values.data(),
+            source_attributes.string_values.data(),
+            source_attributes.string_value_lens.data(),
+            source_attributes.size(),
+            static_cast<uint8_t>(source_attribute_target));
     }
 
     int write_current_replaced_lod22(
@@ -709,7 +780,9 @@ struct CjseqStreamBackend {
         double& global_offset_y,
         double& global_offset_z,
         std::chrono::duration<double, std::milli>& output_write_ms,
-        std::chrono::duration<double, std::milli>& output_write_passthrough_ms) {
+        std::chrono::duration<double, std::milli>& output_write_passthrough_ms,
+        const SourceAttributeBuffers& aborted_attributes,
+        SourceAttributeTarget output_attribute_target) {
         (void)next_id;
         (void)matched_indices;
         (void)polygon_features;
@@ -717,6 +790,8 @@ struct CjseqStreamBackend {
         (void)skipped_count;
         (void)output_write_ms;
         (void)output_write_passthrough_ms;
+        (void)aborted_attributes;
+        (void)output_attribute_target;
         global_offset_set = true;
         global_offset_x = 0.0;
         global_offset_y = 0.0;
@@ -820,6 +895,16 @@ static bool process_stream_features(Backend& backend, StreamProcessingContext& c
         }
 
         const auto& matched_indices = exact_hint_it->second;
+        SourceAttributeTarget output_attribute_target =
+            ctx.source_attribute_target == SourceAttributeTarget::None
+                ? SourceAttributeTarget::Feature
+                : ctx.source_attribute_target;
+        SourceAttributeBuffers aborted_attributes = source_attribute_buffers(
+            ctx.polygon_features,
+            matched_indices,
+            ctx.source_attribute_target != SourceAttributeTarget::None,
+            ctx.feature_source_filename,
+            false);
         if (!backend.prepare_current_feature(
                 next_id,
                 matched_indices,
@@ -831,7 +916,9 @@ static bool process_stream_features(Backend& backend, StreamProcessingContext& c
                 ctx.global_offset_y,
                 ctx.global_offset_z,
                 ctx.output_write_ms,
-                ctx.output_write_passthrough_ms)) {
+                ctx.output_write_passthrough_ms,
+                aborted_attributes,
+                output_attribute_target)) {
             continue;
         }
 
@@ -871,7 +958,10 @@ static bool process_stream_features(Backend& backend, StreamProcessingContext& c
                 ++ctx.skipped_count;
             }
             auto t_output_write_start_local = Clock::now();
-            backend.write_current_raw();
+            if (backend.write_current_with_attributes(
+                    next_id.data(), next_id.size(), aborted_attributes, output_attribute_target) < 0) {
+                backend.write_current_raw();
+            }
             auto t_output_write_end_local = Clock::now();
             auto d_output_write = t_output_write_end_local - t_output_write_start_local;
             ctx.output_write_ms += d_output_write;
@@ -904,11 +994,8 @@ static bool process_stream_features(Backend& backend, StreamProcessingContext& c
                 ctx.polygon_features,
                 matched_indices,
                 ctx.source_attribute_target != SourceAttributeTarget::None,
-                ctx.feature_source_filename);
-            SourceAttributeTarget output_attribute_target =
-                ctx.source_attribute_target == SourceAttributeTarget::None
-                    ? SourceAttributeTarget::Feature
-                    : ctx.source_attribute_target;
+                ctx.feature_source_filename,
+                true);
             auto t_output_write_start_local = Clock::now();
             int write_result = -1;
             if (ctx.method == BooleanMethod::Manifold && carve_result.result_meshgl.NumTri() > 0) {
@@ -985,7 +1072,10 @@ static bool process_stream_features(Backend& backend, StreamProcessingContext& c
                 std::cerr << std::format("Warning: failed to write modified feature '{}' to {}, writing raw instead",
                                          feature_id_str, backend.output_label()) << std::endl;
                 auto t_fallback_write_start = Clock::now();
-                backend.write_current_raw();
+                if (backend.write_current_with_attributes(
+                        feature_id_str.c_str(), feature_id_str.size(), aborted_attributes, output_attribute_target) < 0) {
+                    backend.write_current_raw();
+                }
                 auto t_fallback_write_end = Clock::now();
                 auto d_output_write_fallback = t_fallback_write_end - t_fallback_write_start;
                 ctx.output_write_ms += d_output_write_fallback;
@@ -993,7 +1083,10 @@ static bool process_stream_features(Backend& backend, StreamProcessingContext& c
             }
         } else {
             auto t_output_write_start_local = Clock::now();
-            backend.write_current_raw();
+            if (backend.write_current_with_attributes(
+                    next_id.data(), next_id.size(), aborted_attributes, output_attribute_target) < 0) {
+                backend.write_current_raw();
+            }
             auto t_output_write_end_local = Clock::now();
             auto d_output_write = t_output_write_end_local - t_output_write_start_local;
             ctx.output_write_ms += d_output_write;
@@ -1258,8 +1351,7 @@ int main(int argc, char* argv[]) {
     log_out << std::format("Processed underpasses: {}, skipped: {}", processed_count, skipped_count) << std::endl;
 
     if (processed_count == 0) {
-        std::cerr << std::format("Warning: no features were modified; output {} is a copy of input.",
-                                 model_is_fcb ? "FCB" : "CityJSONSeq") << std::endl;
+        std::cerr << "Warning: no underpasses were successfully added." << std::endl;
     }
 
     auto ogr_read_ms = std::chrono::duration<double, std::milli>(t_ogr_read_end - t_ogr_read_start).count();

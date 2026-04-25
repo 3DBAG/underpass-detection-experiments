@@ -183,6 +183,23 @@ int zfcb_writer_write_pending_raw(ZfcbReaderHandle reader_handle, ZfcbWriterHand
 // Write the current (decoded) feature's raw bytes. Returns 0/-1.
 int zfcb_writer_write_current_raw(ZfcbReaderHandle reader_handle, ZfcbWriterHandle writer_handle);
 
+// Write the current feature unchanged except for typed attributes merged into
+// the target object attributes.
+int zfcb_writer_write_current_with_attributes(
+    ZfcbReaderHandle reader_handle,
+    ZfcbWriterHandle writer_handle,
+    const char* feature_id,
+    size_t feature_id_len,
+    const char* const* source_attribute_names,
+    const size_t* source_attribute_name_lens,
+    const uint8_t* source_attribute_types,
+    const int64_t* source_attribute_integer_values,
+    const double* source_attribute_real_values,
+    const char* const* source_attribute_string_values,
+    const size_t* source_attribute_string_value_lens,
+    size_t source_attribute_count,
+    uint8_t source_attribute_target);
+
 // Write a full size-prefixed feature payload (4-byte length prefix + feature bytes).
 // Returns 0 on success, -1 on error.
 int zfcb_writer_write_feature_raw_bytes(

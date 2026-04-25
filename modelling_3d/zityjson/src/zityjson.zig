@@ -1667,6 +1667,98 @@ export fn cityjsonseq_writer_write_current_raw(
     return 0;
 }
 
+fn writeCurrentFeatureLineWithAttributes(
+    reader: *CityJSONSeqReader,
+    writer: *CityJSONSeqWriter,
+    feature_id: []const u8,
+    source_attributes: ?SourceAttributes,
+    source_attribute_target: u8,
+) !void {
+    if (reader.current_line.len == 0) return error.InvalidCityJSONSeqFeature;
+    if (source_attribute_target == 0) {
+        try writer.writeLine(reader.current_line);
+        return;
+    }
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, reader.allocator, reader.current_line, .{});
+    defer parsed.deinit();
+    const arena_alloc = parsed.arena.allocator();
+
+    if (parsed.value != .object) return error.InvalidCityJSONSeqFeature;
+    var root_obj = &parsed.value.object;
+
+    const city_objects_value = root_obj.getPtr("CityObjects") orelse return error.InvalidCityJSONSeqFeature;
+    if (city_objects_value.* != .object) return error.InvalidCityJSONSeqFeature;
+    var city_objects_obj = &city_objects_value.object;
+
+    var target_obj_id = try std.fmt.allocPrint(arena_alloc, "{s}-0", .{feature_id});
+    var target_object = city_objects_obj.getPtr(target_obj_id);
+    if (target_object == null) {
+        target_obj_id = try arena_alloc.dupe(u8, feature_id);
+        target_object = city_objects_obj.getPtr(target_obj_id);
+    }
+    const target_object_value = target_object orelse return error.TargetObjectNotFound;
+    if (target_object_value.* != .object) return error.TargetObjectNotFound;
+
+    try mergeSourceAttributes(
+        arena_alloc,
+        city_objects_obj,
+        target_object_value,
+        feature_id,
+        source_attributes,
+        source_attribute_target,
+    );
+
+    var out: std.Io.Writer.Allocating = .init(reader.allocator);
+    defer out.deinit();
+    try std.json.Stringify.value(parsed.value, .{ .whitespace = .minified }, &out.writer);
+    try writer.writeLine(out.written());
+}
+
+export fn cityjsonseq_writer_write_current_with_attributes(
+    reader_handle: ?CityJSONSeqReaderHandle,
+    writer_handle: ?CityJSONSeqWriterHandle,
+    feature_id_ptr: [*c]const u8,
+    feature_id_len: usize,
+    source_attribute_names: [*c]const [*c]const u8,
+    source_attribute_name_lens: [*c]const usize,
+    source_attribute_types: [*c]const u8,
+    source_attribute_integer_values: [*c]const i64,
+    source_attribute_real_values: [*c]const f64,
+    source_attribute_string_values: [*c]const [*c]const u8,
+    source_attribute_string_value_lens: [*c]const usize,
+    source_attribute_count: usize,
+    source_attribute_target: u8,
+) callconv(.c) c_int {
+    const reader = reader_handle orelse return -1;
+    const writer = writer_handle orelse return -1;
+    if (feature_id_ptr == null or feature_id_len == 0) return -1;
+    if (reader.current_line.len == 0) return -1;
+
+    const source_attributes = sourceAttributesFromC(
+        source_attribute_names,
+        source_attribute_name_lens,
+        source_attribute_types,
+        source_attribute_integer_values,
+        source_attribute_real_values,
+        source_attribute_string_values,
+        source_attribute_string_value_lens,
+        source_attribute_count,
+    );
+    if (source_attribute_target != 0 and source_attribute_count != 0 and source_attributes == null) return -1;
+
+    const feature_id = feature_id_ptr[0..feature_id_len];
+    writeCurrentFeatureLineWithAttributes(
+        reader,
+        writer,
+        feature_id,
+        source_attributes,
+        source_attribute_target,
+    ) catch return -1;
+
+    return 0;
+}
+
 const SOURCE_ATTRIBUTE_NULL: u8 = 0;
 const SOURCE_ATTRIBUTE_INTEGER: u8 = 1;
 const SOURCE_ATTRIBUTE_INTEGER64: u8 = 2;

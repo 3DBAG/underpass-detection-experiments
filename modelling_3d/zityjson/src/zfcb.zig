@@ -3279,6 +3279,54 @@ export fn zfcb_writer_write_current_raw(
     return 0;
 }
 
+export fn zfcb_writer_write_current_with_attributes(
+    reader_handle: ?ZfcbReaderHandle,
+    writer_handle: ?ZfcbWriterHandle,
+    feature_id_ptr: [*c]const u8,
+    feature_id_len: usize,
+    source_attribute_names: [*c]const [*c]const u8,
+    source_attribute_name_lens: [*c]const usize,
+    source_attribute_types: [*c]const u8,
+    source_attribute_integer_values: [*c]const i64,
+    source_attribute_real_values: [*c]const f64,
+    source_attribute_string_values: [*c]const [*c]const u8,
+    source_attribute_string_value_lens: [*c]const usize,
+    source_attribute_count: usize,
+    source_attribute_target: u8,
+) callconv(.c) c_int {
+    const reader = reader_handle orelse return -1;
+    const writer = writer_handle orelse return -1;
+    if (feature_id_ptr == null or feature_id_len == 0) return -1;
+    if (reader.feature_buf.items.len < 4) return -1;
+
+    const source_attributes = sourceAttributesFromC(
+        source_attribute_names,
+        source_attribute_name_lens,
+        source_attribute_types,
+        source_attribute_integer_values,
+        source_attribute_real_values,
+        source_attribute_string_values,
+        source_attribute_string_value_lens,
+        source_attribute_count,
+    );
+    if (source_attribute_target != 0 and source_attribute_count != 0 and source_attributes == null) return -1;
+
+    const feature_id = feature_id_ptr[0..feature_id_len];
+
+    var builder = FeatureBuilder.init(c_allocator, reader.transform);
+    defer builder.deinit();
+    builder.loadCurrentFromReader(reader) catch return -1;
+    if (source_attributes) |attrs| {
+        builder.mergeSourceAttributes(reader.root_columns, feature_id, attrs, source_attribute_target) catch return -1;
+    }
+
+    var rewritten_feature = std.ArrayList(u8).empty;
+    defer rewritten_feature.deinit(c_allocator);
+    builder.encodeFeature(&rewritten_feature) catch return -1;
+    writer.writeFeatureRaw(rewritten_feature.items) catch return -1;
+    return 0;
+}
+
 // Writes a complete size-prefixed feature payload (4-byte length + feature bytes).
 // Returns 0 on success, -1 on error.
 export fn zfcb_writer_write_feature_raw_bytes(
