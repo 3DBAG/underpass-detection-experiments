@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-INPUT_DIR="${INPUT_DIR:-/fastssd/data/3DBAG/bouwlagen_features_seq}"
-OUTPUT_DIR="${OUTPUT_DIR:-/fastssd/data/3DBAG/bouwlagen_features_seq_underpass}"
-LOG_DIR="${LOG_DIR:-/fastssd/data/3DBAG/logs_add_underpass}"
+INPUT_DIR="${INPUT_DIR:-/fastssd/data/3DBAG_old/bouwlagen_features_seq}"
+OUTPUT_DIR="${OUTPUT_DIR:-/fastssd/data/3DBAG_old/bouwlagen_features_seq_underpass}"
+LOG_DIR="${LOG_DIR:-/fastssd/data/3DBAG_old/logs_add_underpass}"
 JOBS="${JOBS:-32}"
 ADD_UNDERPASS="${ADD_UNDERPASS:-$(command -v add_underpass || true)}"
 CLEAN="${CLEAN:-1}"
