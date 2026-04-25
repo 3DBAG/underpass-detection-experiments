@@ -4,6 +4,7 @@
 #include <chrono>
 #include <exception>
 #include <limits>
+#include <string>
 #include <string_view>
 #include <unordered_map>
 #include <unordered_set>
@@ -72,11 +73,53 @@ struct SourceAttributeBuffers {
     size_t size() const { return names.size(); }
 };
 
+static std::string source_filename_from_path(std::string_view path) {
+    if (path == "-") {
+        return "stdin";
+    }
+    const size_t end = path.find_last_not_of("/\\");
+    if (end == std::string_view::npos) {
+        return std::string(path);
+    }
+    const size_t slash = path.find_last_of("/\\", end);
+    const size_t start = slash == std::string_view::npos ? 0 : slash + 1;
+    return std::string(path.substr(start, end - start + 1));
+}
+
+static void append_string_source_attribute(
+    SourceAttributeBuffers& out,
+    std::unordered_set<std::string>& emitted,
+    std::string_view name,
+    std::string_view value) {
+    if (name.empty() || emitted.contains(std::string(name))) {
+        return;
+    }
+
+    emitted.insert(std::string(name));
+    out.names.push_back(name.data());
+    out.name_lens.push_back(name.size());
+    out.types.push_back(static_cast<uint8_t>(ogr::VectorReader::AttributeType::String));
+    out.integer_values.push_back(0);
+    out.real_values.push_back(0.0);
+    out.string_values.push_back(value.data());
+    out.string_value_lens.push_back(value.size());
+}
+
 static SourceAttributeBuffers source_attribute_buffers(
     const std::vector<ogr::VectorReader::PolygonFeature>& polygon_features,
-    const std::vector<size_t>& matched_indices) {
+    const std::vector<size_t>& matched_indices,
+    bool include_source_attributes,
+    std::string_view feature_source_filename) {
     SourceAttributeBuffers out;
     std::unordered_set<std::string> emitted;
+
+    static constexpr std::string_view kFeatureSourceAttributeName = "featuresource";
+    append_string_source_attribute(out, emitted, kFeatureSourceAttributeName, feature_source_filename);
+
+    if (!include_source_attributes) {
+        return out;
+    }
+
     for (size_t feature_idx : matched_indices) {
         if (feature_idx >= polygon_features.size()) {
             continue;
@@ -328,6 +371,7 @@ struct StreamProcessingContext {
     const std::vector<ogr::VectorReader::PolygonFeature>& polygon_features;
     std::unordered_map<std::string_view, std::vector<size_t>>& features_by_exact_id;
     std::vector<bool>& seen_feature;
+    const std::string& feature_source_filename;
     BooleanMethod method;
     SourceAttributeTarget source_attribute_target;
     bool ignore_holes;
@@ -856,10 +900,15 @@ static bool process_stream_features(Backend& backend, StreamProcessingContext& c
 
         if (carve_result.any_succeeded) {
             std::string feature_id_str(next_id);
-            SourceAttributeBuffers source_attributes =
+            SourceAttributeBuffers source_attributes = source_attribute_buffers(
+                ctx.polygon_features,
+                matched_indices,
+                ctx.source_attribute_target != SourceAttributeTarget::None,
+                ctx.feature_source_filename);
+            SourceAttributeTarget output_attribute_target =
                 ctx.source_attribute_target == SourceAttributeTarget::None
-                    ? SourceAttributeBuffers{}
-                    : source_attribute_buffers(ctx.polygon_features, matched_indices);
+                    ? SourceAttributeTarget::Feature
+                    : ctx.source_attribute_target;
             auto t_output_write_start_local = Clock::now();
             int write_result = -1;
             if (ctx.method == BooleanMethod::Manifold && carve_result.result_meshgl.NumTri() > 0) {
@@ -881,7 +930,7 @@ static bool process_stream_features(Backend& backend, StreamProcessingContext& c
                         polygonal_output.boundary_indices.data(), polygonal_output.boundary_indices.size(),
                         polygonal_output.surface_semantic_types.data(), polygonal_output.surface_semantic_types.size(),
                         source_attributes,
-                        ctx.source_attribute_target);
+                        output_attribute_target);
                 }
             } else if (carve_result.has_polygonal_result) {
                 PolygonalOutput polygonal_output;
@@ -902,7 +951,7 @@ static bool process_stream_features(Backend& backend, StreamProcessingContext& c
                         polygonal_output.boundary_indices.data(), polygonal_output.boundary_indices.size(),
                         polygonal_output.surface_semantic_types.data(), polygonal_output.surface_semantic_types.size(),
                         source_attributes,
-                        ctx.source_attribute_target);
+                        output_attribute_target);
                 }
 
                 if (write_result < 0) {
@@ -926,7 +975,7 @@ static bool process_stream_features(Backend& backend, StreamProcessingContext& c
                     carve_result.result_meshgl.triVerts.data(), carve_result.result_meshgl.triVerts.size(),
                     semantics.data(), semantics.size(),
                     source_attributes,
-                    ctx.source_attribute_target);
+                    output_attribute_target);
             }
             auto t_output_write_end_local = Clock::now();
             auto d_output_write = t_output_write_end_local - t_output_write_start_local;
@@ -1122,6 +1171,7 @@ int main(int argc, char* argv[]) {
     std::chrono::duration<double, std::milli> output_write_changed_ms{0.0};
     std::chrono::duration<double, std::milli> output_write_passthrough_ms{0.0};
     std::chrono::duration<double, std::milli> model_stream_read_ms{0.0};
+    std::string feature_source_filename = source_filename_from_path(model_path);
 
     std::unordered_map<std::string_view, std::vector<size_t>> features_by_exact_id;
     std::vector<size_t> valid_feature_indices;
@@ -1142,6 +1192,7 @@ int main(int argc, char* argv[]) {
         .polygon_features = polygon_features,
         .features_by_exact_id = features_by_exact_id,
         .seen_feature = seen_feature,
+        .feature_source_filename = feature_source_filename,
         .method = method,
         .source_attribute_target = source_attribute_target,
         .ignore_holes = ignore_holes,

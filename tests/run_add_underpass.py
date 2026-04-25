@@ -146,6 +146,7 @@ def build_command(executable: Path, input_file: Path, output_file: Path) -> list
         HEIGHT_ATTR,
         ID_ATTR,
         METHOD,
+        "feature"
     ]
 
 
