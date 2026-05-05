@@ -242,8 +242,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Thread workers for point-in-polygon selection within each sequentially read LAZ chunk.",
     )
     parser.add_argument("--resolution", type=int, default=64)
-    parser.add_argument("--min-points", type=int, default=100)
-    parser.add_argument("--max-points-per-underpass", type=int, default=10_000_000)
+    parser.add_argument("--min-points", type=int, default=40)
+    parser.add_argument("--max-points-per-underpass", type=int, default=100_000_000)
     parser.add_argument(
         "--only-status",
         action="append",
