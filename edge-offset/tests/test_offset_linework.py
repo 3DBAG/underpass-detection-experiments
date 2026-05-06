@@ -7,8 +7,11 @@ from shapely.geometry import Polygon
 import edge_offset.offset_linework as offset_linework
 from edge_offset.geojson import read_feature_collection
 from edge_offset.linework import load_polygon_from_edge_geojson
+from edge_offset.offset_linework import GeometryOffsetError
+from edge_offset.offset_linework import InvalidInputPolygonError
 from edge_offset.offset_linework import offset_polygon_from_classified_polygon
 from edge_offset.offset_linework import offset_polygon_from_edge_geojson
+from edge_offset.rings import ClassifiedPolygon
 from edge_offset.rings import classify_polygon_from_edge_sets
 
 
@@ -86,7 +89,7 @@ def test_offset_polygon_from_edge_geojson_writes_output() -> None:
     assert written_features[0].properties["strategy"] == "boolean_patch"
 
 
-def test_offset_polygon_falls_back_to_original_polygon_when_result_is_invalid(
+def test_offset_polygon_raises_when_result_is_invalid(
     monkeypatch,
 ) -> None:
     movable_edges = MultiLineString(
@@ -105,7 +108,6 @@ def test_offset_polygon_falls_back_to_original_polygon_when_result_is_invalid(
         movable_edges=movable_edges,
         fixed_edges=fixed_edges,
     )
-    original_polygon = classified.polygon
 
     def invalid_offset(
         classified_polygon,
@@ -120,12 +122,37 @@ def test_offset_polygon_falls_back_to_original_polygon_when_result_is_invalid(
         offset_linework, "_offset_polygon_with_boolean_patches", invalid_offset
     )
 
-    updated = offset_polygon_from_classified_polygon(
-        classified,
-        distance=1.0,
-    )
+    with pytest.raises(GeometryOffsetError, match="invalid polygon"):
+        offset_polygon_from_classified_polygon(
+            classified,
+            distance=1.0,
+        )
 
-    assert updated.equals(original_polygon)
+
+def test_offset_polygon_raises_when_input_polygon_is_invalid() -> None:
+    movable_edges = MultiLineString(
+        [
+            [(4.0, 0.0), (4.0, 4.0)],
+            [(4.0, 4.0), (0.0, 4.0)],
+        ]
+    )
+    fixed_edges = MultiLineString(
+        [
+            [(0.0, 4.0), (0.0, 0.0)],
+            [(0.0, 0.0), (4.0, 0.0)],
+        ]
+    )
+    classified = classify_polygon_from_edge_sets(
+        movable_edges=movable_edges,
+        fixed_edges=fixed_edges,
+    )
+    invalid_polygon = Polygon([(0.0, 0.0), (4.0, 4.0), (4.0, 0.0), (0.0, 4.0)])
+
+    with pytest.raises(InvalidInputPolygonError, match="invalid"):
+        offset_polygon_from_classified_polygon(
+            ClassifiedPolygon(polygon=invalid_polygon, rings=classified.rings),
+            distance=1.0,
+        )
 
 
 @pytest.mark.parametrize(
@@ -154,7 +181,9 @@ def test_offset_polygon_from_edge_geojson_limits_near_parallel_miters(
     movable_edges_path = (
         data_dir / f"pand_0363100012165490_poly_{underpass_id}_movable.geojson"
     )
-    fixed_edges_path = data_dir / f"pand_0363100012165490_poly_{underpass_id}_fixed.geojson"
+    fixed_edges_path = (
+        data_dir / f"pand_0363100012165490_poly_{underpass_id}_fixed.geojson"
+    )
 
     original = load_polygon_from_edge_geojson(
         movable_edges_path=movable_edges_path,
