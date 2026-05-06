@@ -6,3 +6,4 @@ __pycache__/
 **.qmd
 tests/output/*
 !tests/output/.gitkeep
+/tests/data/regression/output/

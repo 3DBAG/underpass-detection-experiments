@@ -5,6 +5,8 @@ from edge_offset.linework import coerce_multiline_geometry
 from edge_offset.linework import load_polygon_from_edge_geojson
 from edge_offset.linework import merge_multiline_geometries
 from edge_offset.linework import write_polygon_from_edge_geojson
+from edge_offset.offset_linework import GeometryOffsetError
+from edge_offset.offset_linework import InvalidInputPolygonError
 from edge_offset.offset_linework import offset_polygon_from_classified_polygon
 from edge_offset.offset_linework import offset_polygon_from_edge_geojson
 from edge_offset.postgis import load_edge_records_from_db
@@ -18,6 +20,8 @@ __all__ = [
     "classify_polygon_from_edge_geojson",
     "classify_polygon_from_edge_sets",
     "coerce_multiline_geometry",
+    "GeometryOffsetError",
+    "InvalidInputPolygonError",
     "load_polygon_from_edge_geojson",
     "load_edge_records_from_db",
     "merge_multiline_geometries",

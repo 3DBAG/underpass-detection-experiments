@@ -3,7 +3,6 @@ from pathlib import Path
 from psycopg.sql import Identifier
 from shapely import to_wkb
 from shapely.geometry import LineString
-from shapely.geometry import MultiLineString
 from shapely.geometry import Polygon
 
 from edge_offset.geojson import read_feature_collection

@@ -41,7 +41,11 @@ class _ChainPatch:
     sample_point: Point
 
 
-class _GeometryOffsetError(ValueError):
+class InvalidInputPolygonError(ValueError):
+    """Raised when assembled input linework does not form a valid polygon."""
+
+
+class GeometryOffsetError(ValueError):
     """Raised when a requested partial offset cannot be resolved safely."""
 
 
@@ -91,31 +95,36 @@ def offset_polygon_from_classified_polygon(
     if tolerance <= 0:
         raise ValueError("Offset tolerance must be greater than zero.")
 
-    original_polygon = classified_polygon.polygon
-    if original_polygon.is_empty or isclose(distance, 0.0, abs_tol=tolerance):
+    original_polygon = _validate_input_polygon(
+        classified_polygon.polygon,
+        tolerance=tolerance,
+    )
+    if isclose(distance, 0.0, abs_tol=tolerance):
         return original_polygon
 
     if strategy == "boolean_patch":
-        try:
-            updated = _offset_polygon_with_boolean_patches(
-                classified_polygon,
-                distance=distance,
-                tolerance=tolerance,
-            )
-            return _normalize_polygon_result(updated, tolerance=tolerance)
-        except _GeometryOffsetError:
-            return original_polygon
+        updated = _offset_polygon_with_boolean_patches(
+            classified_polygon,
+            distance=distance,
+            tolerance=tolerance,
+        )
+        return _normalize_offset_polygon_result(
+            updated,
+            original_polygon=original_polygon,
+            tolerance=tolerance,
+        )
 
     if strategy == "linework":
-        try:
-            updated = _offset_polygon_with_linework(
-                classified_polygon,
-                distance=distance,
-                tolerance=tolerance,
-            )
-            return _normalize_polygon_result(updated, tolerance=tolerance)
-        except _GeometryOffsetError:
-            return original_polygon
+        updated = _offset_polygon_with_linework(
+            classified_polygon,
+            distance=distance,
+            tolerance=tolerance,
+        )
+        return _normalize_offset_polygon_result(
+            updated,
+            original_polygon=original_polygon,
+            tolerance=tolerance,
+        )
 
     raise ValueError("Unknown offset strategy. Expected 'boolean_patch' or 'linework'.")
 
@@ -184,9 +193,7 @@ def _offset_ring_with_support_lines(
     tolerance: float,
 ) -> list[Point]:
     if len(ring.vertices) < 3:
-        raise _GeometryOffsetError(
-            "Polygon rings must contain at least three vertices."
-        )
+        raise GeometryOffsetError("Polygon rings must contain at least three vertices.")
 
     lines = [
         _build_offset_line(
@@ -203,7 +210,8 @@ def _offset_ring_with_support_lines(
         previous_index = index - 1
         effective_distance = (
             distance
-            if ring.segments[previous_index].is_movable or ring.segments[index].is_movable
+            if ring.segments[previous_index].is_movable
+            or ring.segments[index].is_movable
             else 0.0
         )
         _extend_unique_points(
@@ -229,7 +237,7 @@ def _offset_ring_with_support_lines(
         )
 
     if len(rebuilt_vertices) < 3:
-        raise _GeometryOffsetError("Offset ring collapsed below three vertices.")
+        raise GeometryOffsetError("Offset ring collapsed below three vertices.")
 
     return rebuilt_vertices
 
@@ -293,7 +301,7 @@ def _build_chain_patch(
         or chain.previous_segment_index is None
         or chain.next_segment_index is None
     ):
-        raise _GeometryOffsetError(
+        raise GeometryOffsetError(
             "Boolean patching requires fixed edges on both sides of a movable chain."
         )
 
@@ -339,7 +347,7 @@ def _build_chain_patch(
     if patch.is_empty or patch.area <= tolerance:
         return None
     if not patch.is_valid:
-        raise _GeometryOffsetError("Patch polygon is invalid.")
+        patch = _normalize_polygon_result(patch.buffer(0), tolerance=tolerance)
 
     sample_point = _build_patch_sample_point(
         segment=movable_segments[0],
@@ -360,7 +368,7 @@ def _build_replacement_vertices(
     tolerance: float,
 ) -> tuple[Point, ...]:
     if not shifted_lines:
-        raise _GeometryOffsetError("Movable chains must contain at least one segment.")
+        raise GeometryOffsetError("Movable chains must contain at least one segment.")
 
     replacement_vertices: list[Point] = []
     _extend_unique_points(
@@ -417,7 +425,7 @@ def _build_replacement_vertices(
     )
 
     if len(replacement_vertices) < 2:
-        raise _GeometryOffsetError("Replacement chain collapsed below two vertices.")
+        raise GeometryOffsetError("Replacement chain collapsed below two vertices.")
 
     return tuple(replacement_vertices)
 
@@ -448,7 +456,7 @@ def _build_offset_line(
     direction = (end[0] - start[0], end[1] - start[1])
     length = sqrt((direction[0] ** 2) + (direction[1] ** 2))
     if isclose(length, 0.0):
-        raise _GeometryOffsetError("Polygon contains a zero-length edge.")
+        raise GeometryOffsetError("Polygon contains a zero-length edge.")
 
     unit_direction = (direction[0] / length, direction[1] / length)
     outward_normal = _build_outward_normal(
@@ -487,7 +495,7 @@ def _resolve_vertex(
     if not _parallel_lines_are_compatible(
         previous_line, current_line, tolerance=tolerance
     ):
-        raise _GeometryOffsetError(
+        raise GeometryOffsetError(
             "Adjacent offset edges are parallel and cannot be reconnected."
         )
 
@@ -519,29 +527,61 @@ def _resolve_join_vertices(
     return fallback_points
 
 
+def _validate_input_polygon(
+    geometry: BaseGeometry,
+    *,
+    tolerance: float,
+) -> Polygon:
+    if geometry.is_empty:
+        raise InvalidInputPolygonError("Input polygon is empty.")
+    if not isinstance(geometry, Polygon):
+        raise InvalidInputPolygonError("Input geometry is not a polygon.")
+
+    polygon = orient(geometry, sign=1.0)
+    if not polygon.is_valid:
+        raise InvalidInputPolygonError("Input polygon is invalid.")
+    if polygon.area <= tolerance:
+        raise InvalidInputPolygonError(
+            "Input polygon collapsed below the minimum area."
+        )
+    return polygon
+
+
+def _normalize_offset_polygon_result(
+    geometry: BaseGeometry,
+    *,
+    original_polygon: Polygon,
+    tolerance: float,
+) -> Polygon:
+    polygon = _normalize_polygon_result(geometry, tolerance=tolerance)
+    if polygon.equals(original_polygon):
+        raise GeometryOffsetError("Nonzero offset produced the original polygon.")
+    return polygon
+
+
 def _normalize_polygon_result(
     geometry: BaseGeometry,
     *,
     tolerance: float = 1e-6,
 ) -> Polygon:
     if geometry.is_empty:
-        raise _GeometryOffsetError("Offset produced an empty geometry.")
+        raise GeometryOffsetError("Offset produced an empty geometry.")
 
     if isinstance(geometry, Polygon):
         polygon = geometry
     elif geometry.geom_type == "MultiPolygon" and len(geometry.geoms) == 1:
         candidate = geometry.geoms[0]
         if not isinstance(candidate, Polygon):
-            raise _GeometryOffsetError("Offset produced a non-polygon geometry.")
+            raise GeometryOffsetError("Offset produced a non-polygon geometry.")
         polygon = candidate
     else:
-        raise _GeometryOffsetError("Offset produced multiple polygon parts.")
+        raise GeometryOffsetError("Offset produced multiple polygon parts.")
 
     normalized_polygon = orient(polygon, sign=1.0)
     if not normalized_polygon.is_valid:
-        raise _GeometryOffsetError("Offset produced an invalid polygon.")
+        raise GeometryOffsetError("Offset produced an invalid polygon.")
     if normalized_polygon.area <= tolerance:
-        raise _GeometryOffsetError("Offset polygon collapsed below the minimum area.")
+        raise GeometryOffsetError("Offset polygon collapsed below the minimum area.")
     return normalized_polygon
 
 
@@ -560,7 +600,7 @@ def _build_patch_sample_point(
     direction = (end[0] - start[0], end[1] - start[1])
     length = sqrt((direction[0] ** 2) + (direction[1] ** 2))
     if isclose(length, 0.0):
-        raise _GeometryOffsetError("Polygon contains a zero-length edge.")
+        raise GeometryOffsetError("Polygon contains a zero-length edge.")
 
     unit_direction = (direction[0] / length, direction[1] / length)
     outward_normal = _build_outward_normal(
@@ -607,9 +647,8 @@ def _is_within_miter_limit(
     if isclose(offset_distance, 0.0, abs_tol=tolerance):
         return True
 
-    return (
-        _distance_between_points(original_vertex, resolved_vertex)
-        <= max(offset_distance * _DEFAULT_MITER_LIMIT, tolerance)
+    return _distance_between_points(original_vertex, resolved_vertex) <= max(
+        offset_distance * _DEFAULT_MITER_LIMIT, tolerance
     )
 
 

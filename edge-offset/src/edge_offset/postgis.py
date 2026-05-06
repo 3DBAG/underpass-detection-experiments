@@ -44,32 +44,40 @@ def load_edge_records_from_db(
 
     # Group edges by identificatie and underpass_id
     edge_groups: dict[tuple[str, int], dict[str, list[bytes]]] = {}
-    
+
     with connection.cursor() as cursor:
         cursor.execute(query)
         for row in cursor.fetchall():
             identificatie, underpass_id, edge_type, edge_wkb = row
             key = (str(identificatie), int(underpass_id))
-            
+
             if key not in edge_groups:
-                edge_groups[key] = {'exterior': [], 'shared': [], 'interior': []}
-            
+                edge_groups[key] = {"exterior": [], "shared": [], "interior": []}
+
             if edge_type in edge_groups[key] and edge_wkb is not None:
                 edge_groups[key][edge_type].append(edge_wkb)
 
     # Build EdgeRecord objects
     records: list[EdgeRecord] = []
-    
+
     for (identificatie, underpass_id), edge_types in edge_groups.items():
         # Convert exterior edges to movable_edges MultiLineString
-        exterior_geometries = [_load_geometry_from_wkb(wkb) for wkb in edge_types['exterior']]
+        exterior_geometries = [
+            _load_geometry_from_wkb(wkb) for wkb in edge_types["exterior"]
+        ]
         movable_edges = merge_multiline_geometries(*exterior_geometries)
-        
-        # Convert shared and interior edges to fixed_edges MultiLineString  
-        shared_geometries = [_load_geometry_from_wkb(wkb) for wkb in edge_types['shared']]
-        interior_geometries = [_load_geometry_from_wkb(wkb) for wkb in edge_types['interior']]
-        fixed_edges = merge_multiline_geometries(*(shared_geometries + interior_geometries))
-        
+
+        # Convert shared and interior edges to fixed_edges MultiLineString
+        shared_geometries = [
+            _load_geometry_from_wkb(wkb) for wkb in edge_types["shared"]
+        ]
+        interior_geometries = [
+            _load_geometry_from_wkb(wkb) for wkb in edge_types["interior"]
+        ]
+        fixed_edges = merge_multiline_geometries(
+            *(shared_geometries + interior_geometries)
+        )
+
         records.append(
             EdgeRecord(
                 identificatie=identificatie,
@@ -97,7 +105,7 @@ def offset_polygon_features_from_db(
 
     features: list[Feature] = []
     for record in records:
-        #print(f"Processing underpass {record.identificatie} (ID: {record.underpass_id}) with {len(record.movable_edges.geoms)} movable edges and {len(record.fixed_edges.geoms)} fixed edges.")
+        # print(f"Processing underpass {record.identificatie} (ID: {record.underpass_id}) with {len(record.movable_edges.geoms)} movable edges and {len(record.fixed_edges.geoms)} fixed edges.")
         classified_polygon = classify_polygon_from_edge_sets(
             movable_edges=record.movable_edges,
             fixed_edges=record.fixed_edges,
