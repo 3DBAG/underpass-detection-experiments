@@ -53,7 +53,7 @@ from height_estimation import gpkg_blob_to_geometry, estimate_underpass_height_f
 
 DEFAULT_INDEX_PATH = Path("/data2/rypeters/amsterdam_data/2025/pointcloud/ams_index.gpkg")
 DEFAULT_POINTCLOUD_ROOT = Path("/data2/rypeters/amsterdam_data/2025/pointcloud")
-DEFAULT_SOURCE_TABLE = "underpasses.extended_geometries_2"
+DEFAULT_SOURCE_TABLE = "underpasses.extended_geometries"
 DEFAULT_DB_HOST = "localhost"
 DEFAULT_DB_PORT = 5432
 DEFAULT_DB_NAME = "baseregisters"
