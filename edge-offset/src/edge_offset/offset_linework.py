@@ -479,7 +479,7 @@ def _resolve_vertex(
     previous_line: _OffsetLine,
     current_line: _OffsetLine,
     tolerance: float,
-) -> Point:
+) -> tuple[Point, ...]:
     denominator = _cross(previous_line.direction, current_line.direction)
     if not isclose(denominator, 0.0, abs_tol=tolerance):
         delta = (
@@ -487,19 +487,21 @@ def _resolve_vertex(
             current_line.point[1] - previous_line.point[1],
         )
         distance = _cross(delta, current_line.direction) / denominator
-        return (
+        intersection = (
             previous_line.point[0] + (distance * previous_line.direction[0]),
             previous_line.point[1] + (distance * previous_line.direction[1]),
         )
+        return (intersection,)
 
     if not _parallel_lines_are_compatible(
         previous_line, current_line, tolerance=tolerance
     ):
-        raise GeometryOffsetError(
-            "Adjacent offset edges are parallel and cannot be reconnected."
-        )
+        # Create perpendicular connector between incompatible parallel lines
+        point_on_previous = _project_point_onto_line(original_vertex, previous_line)
+        point_on_current = _project_point_onto_line(original_vertex, current_line)
+        return (point_on_previous, point_on_current)
 
-    return _project_point_onto_line(original_vertex, previous_line)
+    return (_project_point_onto_line(original_vertex, previous_line),)
 
 
 def _resolve_join_vertices(
@@ -511,12 +513,18 @@ def _resolve_join_vertices(
     distance: float,
     tolerance: float,
 ) -> tuple[Point, ...]:
-    resolved_vertex = _resolve_vertex(
+    resolved_vertices = _resolve_vertex(
         original_vertex=original_vertex,
         previous_line=previous_line,
         current_line=current_line,
         tolerance=tolerance,
     )
+    # If multiple vertices returned (perpendicular connector case), use them directly
+    if len(resolved_vertices) > 1:
+        return resolved_vertices
+    
+    # Single vertex - check miter limit
+    resolved_vertex = resolved_vertices[0]
     if _is_within_miter_limit(
         original_vertex=original_vertex,
         resolved_vertex=resolved_vertex,
