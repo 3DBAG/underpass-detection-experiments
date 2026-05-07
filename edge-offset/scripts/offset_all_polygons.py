@@ -17,8 +17,8 @@ from edge_offset.postgis import EdgeRecord
 from edge_offset.rings import classify_polygon_from_edge_sets
 
 
-OUTPUT_TABLE = "underpasses.extended_geometries_2"
-SKIPPED_TABLE = "underpasses.skipped_underpasses_2"
+OUTPUT_TABLE = "underpasses.extended_geometries"
+SKIPPED_TABLE = "underpasses.skipped_underpasses"
 EDGES_TABLE = "underpasses.edges"
 ENV_PATH = Path(".env")
 CHUNK_SIZE = 1000  # Process 1000 underpasses at a time
