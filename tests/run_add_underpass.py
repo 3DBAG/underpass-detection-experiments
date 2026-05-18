@@ -55,7 +55,7 @@ DB_HOST: str = os.environ.get("UNDERPASS_DB_HOST", "localhost")
 DB_PORT: str = os.environ.get("UNDERPASS_DB_PORT", "5432")
 DB_NAME: str = os.environ.get("UNDERPASS_DB_NAME", "baseregisters")
 DB_USER: str = os.environ.get("UNDERPASS_DB_USER", "rypeters")
-DB_TABLE: str = os.environ.get("UNDERPASS_POLYGON_TABLE", "underpasses.extended_geometries_2")
+DB_TABLE: str = os.environ.get("UNDERPASS_POLYGON_TABLE", "underpasses.extended_geometries")
 CITY_JSONL_SUFFIX: str = ".city.jsonl"
 
 CSV_FIELDNAMES: list[str] = [
