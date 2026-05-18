@@ -27,6 +27,7 @@
               pkgs.python312
               py.laspy
               py.lazrs
+              py.matplotlib
               py.numpy
               py.psycopg
               py.shapely

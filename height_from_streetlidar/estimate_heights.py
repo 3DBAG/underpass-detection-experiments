@@ -1,4 +1,5 @@
 import csv
+import json
 
 from cases import CASES
 from height_estimation import estimate_underpass_height
@@ -11,10 +12,21 @@ def write_metrics_csv(rows, output_path):
     with open(output_path, "w", newline="") as csv_file:
         writer = csv.DictWriter(
             csv_file,
-            fieldnames=["identificatie", "underpass_z_min", "underpass_z_max", "underpass_h"],
+            fieldnames=[
+                "identificatie",
+                "underpass_z_min",
+                "underpass_z_max",
+                "underpass_h",
+                "underpass_candidate_peaks",
+            ],
         )
         writer.writeheader()
-        writer.writerows(rows)
+        for row in rows:
+            output_row = dict(row)
+            output_row["underpass_candidate_peaks"] = json.dumps(
+                output_row["underpass_candidate_peaks"]
+            )
+            writer.writerow(output_row)
 
 
 def main():

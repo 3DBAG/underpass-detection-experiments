@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import json
 import math
 import os
 import sqlite3
@@ -31,6 +32,7 @@ import laspy
 import numpy as np
 import psycopg
 from psycopg import sql
+from psycopg.types.json import Jsonb
 from shapely import wkb
 from shapely.strtree import STRtree
 
@@ -70,6 +72,7 @@ RESULT_COLUMNS = {
     "h_underpass_status": "text",
     "h_underpass_z_min": "double precision",
     "h_underpass_z_max": "double precision",
+    "h_underpass_candidate_peaks": "jsonb",
     "h_underpass_point_count": "integer",
     "h_underpass_laz_count": "integer",
     "h_underpass_error": "text",
@@ -144,6 +147,7 @@ class HeightResult:
     h_underpass: float | None = None
     z_min: float | None = None
     z_max: float | None = None
+    candidate_peaks: list[dict[str, object]] | None = None
     error: str | None = None
 
 
@@ -159,6 +163,8 @@ class HeightEstimationTask:
     point_count: int
     laz_count: int
     error_text: str | None
+    plot_dir: Path | None
+    plot_rerun: bool
 
 
 @dataclasses.dataclass
@@ -265,7 +271,29 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--only-underpass-id", type=int, action="append", default=[])
+    parser.add_argument(
+        "--only-identificatie",
+        "--only-building-id",
+        dest="only_identificatie",
+        action="append",
+        default=[],
+        help="Only process rows with this identificatie/BAG building id. Can be passed multiple times.",
+    )
     parser.add_argument("--all", action="store_true", help="Process rows even when h_underpass is already filled.")
+    parser.add_argument(
+        "--plot-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Write diagnostic peak-grid PNG plots, selected-point LAS files, "
+            "and candidate-peak JSON files to this directory."
+        ),
+    )
+    parser.add_argument(
+        "--plot-rerun",
+        action="store_true",
+        help="Also write/send the optional Rerun visualization when --plot-dir is used.",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Run the pipeline without updating PostGIS.")
     parser.add_argument("--skip-db-setup", action="store_true", help="Do not add missing result columns.")
     return parser.parse_args(argv)
@@ -341,6 +369,10 @@ def fetch_pending_records(conn: psycopg.Connection, args: argparse.Namespace) ->
     if args.only_underpass_id:
         conditions.append(sql.SQL("underpass_id = ANY(%s)"))
         params.append(args.only_underpass_id)
+
+    if args.only_identificatie:
+        conditions.append(sql.SQL("identificatie::text = ANY(%s::text[])"))
+        params.append(args.only_identificatie)
 
     if args.bbox:
         minx, miny, maxx, maxy = args.bbox
@@ -472,8 +504,42 @@ def null_result_values(
         h_underpass=None,
         point_count=point_count,
         laz_count=laz_count,
+        candidate_peaks=None,
         error=error,
     )
+
+
+def write_pointcloud(path: Path, x: np.ndarray, y: np.ndarray, z: np.ndarray) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    header = laspy.LasHeader(point_format=3, version="1.2")
+    header.scales = np.array([0.001, 0.001, 0.001])
+    header.offsets = np.array([float(np.min(x)), float(np.min(y)), float(np.min(z))])
+
+    las = laspy.LasData(header)
+    las.x = x
+    las.y = y
+    las.z = z
+    try:
+        las.write(path)
+        return path
+    except Exception:
+        if path.suffix.lower() == ".laz":
+            las_path = path.with_suffix(".las")
+            try:
+                las.write(las_path)
+                return las_path
+            except Exception:
+                pass
+
+        csv_path = path.with_suffix(".csv")
+        np.savetxt(
+            csv_path,
+            np.column_stack((x, y, z)),
+            delimiter=",",
+            header="x,y,z",
+            comments="",
+        )
+        return csv_path
 
 
 def run_height_estimation_task(task: HeightEstimationTask) -> HeightResult:
@@ -487,6 +553,53 @@ def run_height_estimation_task(task: HeightEstimationTask) -> HeightResult:
             verbose=False,
         )
         metrics = estimate["underpass_metrics"]
+        result_error = task.error_text
+        if task.plot_dir is not None:
+            candidate_peaks_path = task.plot_dir / f"{task.key}_candidate_peaks.json"
+            try:
+                task.plot_dir.mkdir(parents=True, exist_ok=True)
+                with candidate_peaks_path.open("w", encoding="utf-8") as peaks_file:
+                    json.dump(metrics["underpass_candidate_peaks"], peaks_file, indent=2)
+                    peaks_file.write("\n")
+                print(f"Saved candidate peaks to {candidate_peaks_path}", flush=True)
+            except Exception as exc:
+                peaks_error = f"Candidate-peak export failed: {short_error(exc)}"
+                print(f"{task.key}: {peaks_error}", flush=True)
+                result_error = (
+                    f"{result_error}; {peaks_error}"
+                    if result_error
+                    else peaks_error
+                )
+
+            pointcloud_path = task.plot_dir / f"{task.key}_points.las"
+            try:
+                written_path = write_pointcloud(pointcloud_path, task.x, task.y, task.z)
+                print(f"Saved point cloud to {written_path}", flush=True)
+            except Exception as exc:
+                pointcloud_error = f"Point-cloud export failed: {short_error(exc)}"
+                print(f"{task.key}: {pointcloud_error}", flush=True)
+                result_error = (
+                    f"{result_error}; {pointcloud_error}"
+                    if result_error
+                    else pointcloud_error
+                )
+
+            try:
+                from plot_z_histogram import plot_height_estimation_result
+
+                plot_height_estimation_result(
+                    estimate,
+                    output_dir=task.plot_dir,
+                    write_rerun=task.plot_rerun,
+                )
+            except Exception as exc:
+                plot_error = f"Plot generation failed: {short_error(exc)}"
+                print(f"{task.key}: {plot_error}", flush=True)
+                result_error = (
+                    f"{result_error}; {plot_error}"
+                    if result_error
+                    else plot_error
+                )
         return HeightResult(
             identificatie=task.identificatie,
             underpass_id=task.underpass_id,
@@ -494,9 +607,10 @@ def run_height_estimation_task(task: HeightEstimationTask) -> HeightResult:
             h_underpass=float(metrics["underpass_h"]),
             z_min=float(metrics["underpass_z_min"]),
             z_max=float(metrics["underpass_z_max"]),
+            candidate_peaks=metrics["underpass_candidate_peaks"],
             point_count=task.point_count,
             laz_count=task.laz_count,
-            error=task.error_text,
+            error=result_error,
         )
     except Exception as exc:
         return null_result_values(
@@ -559,6 +673,7 @@ def update_results(conn: psycopg.Connection, table_name: str, results: Iterable[
             result.status,
             result.z_min,
             result.z_max,
+            Jsonb(result.candidate_peaks) if result.candidate_peaks is not None else None,
             result.point_count,
             result.laz_count,
             result.error,
@@ -578,6 +693,7 @@ def update_results(conn: psycopg.Connection, table_name: str, results: Iterable[
             h_underpass_status = %s,
             h_underpass_z_min = %s,
             h_underpass_z_max = %s,
+            h_underpass_candidate_peaks = %s,
             h_underpass_point_count = %s,
             h_underpass_laz_count = %s,
             h_underpass_error = %s,
@@ -898,6 +1014,8 @@ def estimate_batch_results(
     min_points: int,
     max_points_per_underpass: int | None,
     height_workers: int,
+    plot_dir: Path | None,
+    plot_rerun: bool,
 ) -> list[HeightResult]:
     results: list[HeightResult] = []
     tasks: list[HeightEstimationTask] = []
@@ -960,6 +1078,8 @@ def estimate_batch_results(
                 point_count=accumulator.point_count,
                 laz_count=existing_laz_count,
                 error_text="; ".join(record_errors)[:1000] if record_errors else None,
+                plot_dir=plot_dir,
+                plot_rerun=plot_rerun,
             )
         )
 
@@ -1013,6 +1133,8 @@ def process_batch(
             args.min_points,
             args.max_points_per_underpass,
             args.height_workers,
+            args.plot_dir,
+            args.plot_rerun,
         )
         timing.height_estimation_s += time.perf_counter() - t0
     finally:
@@ -1130,6 +1252,11 @@ def print_batch_summary(
         f"feature_tests={timing.feature_tests:,}, "
         f"component_tests={timing.component_tests:,}"
     )
+    failed_results = [result for result in results if result.status == "failed" and result.error]
+    for result in failed_results[:3]:
+        print(f"  failure {result.underpass_id} {result.identificatie}: {result.error}")
+    if len(failed_results) > 3:
+        print(f"  ... {len(failed_results) - 3} more failures")
 
 
 def main(argv: list[str] | None = None) -> int:
