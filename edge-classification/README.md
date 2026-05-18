@@ -44,7 +44,7 @@ EDGE_CLASSIFICATION_DB_PASSWORD=your_password
 
 # Processing settings
 EDGE_CLASSIFICATION_MAX_WORKERS=4                      # Number of parallel workers
-EDGE_CLASSIFICATION_GRID_PRECISION=0.01
+EDGE_CLASSIFICATION_GRID_PRECISION=0.001
 EDGE_CLASSIFICATION_SNAP_TOLERANCE=0.03      # Tolerance for snapping adjacent buildings (ST_Snap)```
 
 ## Usage
@@ -82,7 +82,7 @@ with connect(**db_params) as conn:
     edges = classify_edges_from_db(
         connection=conn,
         underpass_id=123,
-        grid_size=0.01,
+        grid_size=0.001,
         snap_tolerance=0.1,
     )
     

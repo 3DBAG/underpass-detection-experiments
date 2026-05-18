@@ -30,8 +30,8 @@ class TestSafeDifference:
         # The difference should be approximately from 0 to 5
         coords = list(result.geoms[0].coords) if len(result.geoms) > 0 else []
         assert len(coords) >= 2
-        assert coords[0] == pytest.approx((0, 0), abs=0.01)
-        assert coords[-1] == pytest.approx((5, 0), abs=0.01)
+        assert coords[0] == pytest.approx((0, 0), abs=0.001)
+        assert coords[-1] == pytest.approx((5, 0), abs=0.001)
 
     
     def test_no_overlap_returns_original(self):
@@ -44,7 +44,7 @@ class TestSafeDifference:
         assert isinstance(result, MultiLineString)
         assert not result.is_empty
         # Should return the original line
-        assert result.length == pytest.approx(line1.length, abs=0.01)
+        assert result.length == pytest.approx(line1.length, abs=0.001)
         assert list(result.geoms[0].coords) == list(line1.coords)
     
     def test_complete_overlap_returns_empty(self):
@@ -55,7 +55,7 @@ class TestSafeDifference:
         result = safe_difference(line1, line2)
         
         assert isinstance(result, MultiLineString)
-        assert result.is_empty or result.length == pytest.approx(0, abs=0.01)
+        assert result.is_empty or result.length == pytest.approx(0, abs=0.001)
     
     def test_multilinestring_input(self):
         """Test with MultiLineString input."""
@@ -69,8 +69,8 @@ class TestSafeDifference:
         
         assert isinstance(result, MultiLineString)
         assert not result.is_empty
-        assert result.geoms[0].coords[0] == pytest.approx((0, 0), abs=0.01)
-        assert result.geoms[0].coords[-1] == pytest.approx((5, 0), abs=0.01)
+        assert result.geoms[0].coords[0] == pytest.approx((0, 0), abs=0.001)
+        assert result.geoms[0].coords[-1] == pytest.approx((5, 0), abs=0.001)
     
     def test_empty_geom1_returns_empty(self):
         """Test that empty first geometry returns empty."""
@@ -91,7 +91,7 @@ class TestSafeDifference:
         
         assert isinstance(result, MultiLineString)
         assert not result.is_empty
-        assert result.length == pytest.approx(line1.length, abs=0.01)
+        assert result.length == pytest.approx(line1.length, abs=0.001)
         assert list(result.geoms[0].coords) == list(line1.coords)
     
     def test_none_geom1_returns_empty(self):
@@ -118,11 +118,11 @@ class TestSafeDifference:
         line1 = LineString([(0.0001, 0.0001), (10.0002, 0.0003)])
         line2 = LineString([(5.0001, 0.0002), (15.0003, 0.0001)])
         
-        result = safe_difference(line1, line2, grid_size=0.01)
+        result = safe_difference(line1, line2, grid_size=0.001)
         
         assert isinstance(result, MultiLineString)
-        assert result.geoms[0].coords[0] == pytest.approx((0, 0), abs=0.01)
-        assert result.geoms[0].coords[-1] == pytest.approx((5, 0), abs=0.01)
+        assert result.geoms[0].coords[0] == pytest.approx((0, 0), abs=0.001)
+        assert result.geoms[0].coords[-1] == pytest.approx((5, 0), abs=0.001)
     
     def test_real_geometry_difference(self):
         """Test with real-world underpass geometry that shares edges."""
@@ -147,7 +147,7 @@ class TestSafeDifference:
             (252893.163, 593760.773)
         ])
         
-        result = safe_difference(geom_a, geom_b, grid_size=0.01)
+        result = safe_difference(geom_a, geom_b, grid_size=0.001)
         
         # Result should be a MultiLineString
         assert isinstance(result, MultiLineString)
@@ -155,7 +155,7 @@ class TestSafeDifference:
         assert not result.is_empty
         # The result should have positive length
         assert result.length > 0
-        assert result.geoms[0].coords[0] == pytest.approx((252884.41, 593755.54), abs=0.01)
+        assert result.geoms[0].coords[0] == pytest.approx((252884.41, 593755.54), abs=0.001)
 
 
 class TestSafeIntersection:
@@ -174,8 +174,8 @@ class TestSafeIntersection:
         # Intersection should be from (5,0) to (10,0)
         assert result.length == pytest.approx(5.0, abs=0.1)
 
-        assert result.geoms[0].coords[0] == pytest.approx((5, 0), abs=0.01)
-        assert result.geoms[0].coords[-1] == pytest.approx((10, 0), abs=0.01)
+        assert result.geoms[0].coords[0] == pytest.approx((5, 0), abs=0.001)
+        assert result.geoms[0].coords[-1] == pytest.approx((10, 0), abs=0.001)
     
     def test_no_intersection_returns_empty(self):
         """Test that non-intersecting geometries return empty."""
@@ -196,9 +196,9 @@ class TestSafeIntersection:
         
         assert isinstance(result, MultiLineString)
         assert not result.is_empty
-        assert result.length == pytest.approx(10.0, abs=0.1)
-        assert result.geoms[0].coords[0] == pytest.approx((0, 0), abs=0.01)
-        assert result.geoms[0].coords[-1] == pytest.approx((10, 0), abs=0.01)
+        assert result.length == pytest.approx(10.0, abs=0.001)
+        assert result.geoms[0].coords[0] == pytest.approx((0, 0), abs=0.001)
+        assert result.geoms[0].coords[-1] == pytest.approx((10, 0), abs=0.001)
 
 
     def test_multiline_line_intersection(self):
@@ -214,10 +214,10 @@ class TestSafeIntersection:
         assert isinstance(result, MultiLineString)
         assert not result.is_empty
         assert len(result.geoms) == 2
-        assert result.geoms[0].coords[0] == pytest.approx((0, 5), abs=0.01)
-        assert result.geoms[0].coords[-1] == pytest.approx((0, 10), abs=0.01)
-        assert result.geoms[1].coords[0] == pytest.approx((0, 20), abs=0.01)
-        assert result.geoms[1].coords[-1] == pytest.approx((0, 30), abs=0.01)
+        assert result.geoms[0].coords[0] == pytest.approx((0, 5), abs=0.001)
+        assert result.geoms[0].coords[-1] == pytest.approx((0, 10), abs=0.001)
+        assert result.geoms[1].coords[0] == pytest.approx((0, 20), abs=0.001)
+        assert result.geoms[1].coords[-1] == pytest.approx((0, 30), abs=0.001)
     
     def test_intersection_with_grid_snapping(self):
         """Test that grid snapping brings nearly-touching geometries together."""
@@ -226,7 +226,7 @@ class TestSafeIntersection:
         line2 = LineString([(5, 0.0001), (15, 0.0001)])
         
         # With snap tolerance of 0.1, these should snap together
-        result = safe_intersection(line1, line2, grid_size=0.01)
+        result = safe_intersection(line1, line2, grid_size=0.001)
         
         assert isinstance(result, MultiLineString)
         assert not result.is_empty
@@ -293,7 +293,7 @@ class TestSafeIntersection:
             (252893.163, 593760.773)
         ])
         
-        result = safe_intersection(geom_a, geom_b, grid_size=0.01)
+        result = safe_intersection(geom_a, geom_b, grid_size=0.001)
         
         # Result should be a MultiLineString
         assert isinstance(result, MultiLineString)
@@ -301,7 +301,7 @@ class TestSafeIntersection:
         assert not result.is_empty
         # The result should have positive length
         assert result.length > 0
-        assert result.geoms[0].coords[0] == pytest.approx((252884.68, 593761.18), abs=0.01)
+        assert result.geoms[0].coords[0] == pytest.approx((252884.68, 593761.18), abs=0.001)
 
 
 class TestExtractExteriorRings:

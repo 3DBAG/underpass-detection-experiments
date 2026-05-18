@@ -13,7 +13,7 @@ from shapely.ops import linemerge, snap, unary_union
 
 
 def snap_to_grid(geom: Union[Polygon, LineString, MultiLineString, MultiPolygon], 
-                 grid_size: float = 0.01) -> Union[Polygon, LineString, MultiLineString, MultiPolygon]:
+                 grid_size: float = 0.001) -> Union[Polygon, LineString, MultiLineString, MultiPolygon]:
     """
     Snap geometry coordinates to a grid with the given grid size.
     
@@ -21,7 +21,7 @@ def snap_to_grid(geom: Union[Polygon, LineString, MultiLineString, MultiPolygon]
     
     Args:
         geom: Input geometry
-        grid_size: Grid size for snapping (default: 0.01)
+        grid_size: Grid size for snapping (default: 0.001)
         
     Returns:
         Snapped geometry
@@ -66,7 +66,7 @@ def extract_exterior_rings(geom: Union[Polygon, MultiPolygon],
 
 def safe_difference(geom1: Union[LineString, MultiLineString], 
                    geom2: Union[LineString, MultiLineString],
-                   grid_size: float = 0.01) -> MultiLineString:
+                   grid_size: float = 0.001) -> MultiLineString:
     """
     Compute the geometric difference: parts of geom1 that do NOT overlap with geom2.
     
@@ -79,7 +79,7 @@ def safe_difference(geom1: Union[LineString, MultiLineString],
     Args:
         geom1: Base geometry (line or multiline)
         geom2: Geometry to subtract (line or multiline)
-        grid_size: Grid size for coordinate snapping (default: 0.01m)
+        grid_size: Grid size for coordinate snapping (default: 0.001m)
         
     Returns:
         Parts of geom1 NOT in geom2, as MultiLineString. Empty if geom1 is empty.
@@ -119,7 +119,7 @@ def safe_difference(geom1: Union[LineString, MultiLineString],
 
 def safe_intersection(geom1: Union[LineString, MultiLineString], 
                      geom2: Union[LineString, MultiLineString],
-                     grid_size: float = 0.01) -> MultiLineString:
+                     grid_size: float = 0.001) -> MultiLineString:
     """
     Compute the geometric intersection: parts where geom1 and geom2 overlap.
     
@@ -134,7 +134,7 @@ def safe_intersection(geom1: Union[LineString, MultiLineString],
     Args:
         geom1: First geometry (line or multiline) - the reference geometry
         geom2: Second geometry (line, or multiline) - snapped to geom1
-        grid_size: Grid size for coordinate snapping (default: 0.01m)
+        grid_size: Grid size for coordinate snapping (default: 0.001m)
         
     Returns:
         Parts where geom1 and geom2 overlap, as MultiLineString. Empty if no intersection.

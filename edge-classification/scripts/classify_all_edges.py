@@ -234,7 +234,7 @@ def main() -> int:
     _load_dotenv(ENV_PATH)
     
     # Get configuration
-    grid_size = float(environ.get("EDGE_CLASSIFICATION_GRID_PRECISION", "0.01"))
+    grid_size = float(environ.get("EDGE_CLASSIFICATION_GRID_PRECISION", "0.001"))
     snap_tolerance = float(environ.get("EDGE_CLASSIFICATION_SNAP_TOLERANCE", "0.03"))
     max_workers = int(environ.get("EDGE_CLASSIFICATION_MAX_WORKERS", "4"))
     edges_table = environ.get("EDGE_CLASSIFICATION_EDGES_TABLE", "underpasses.edges")

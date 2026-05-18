@@ -32,7 +32,7 @@ def classify_edges_for_underpass(
     underpass_geom: Polygon,
     bgt_geom: Polygon,
     adjacent_geoms: List[Polygon],
-    grid_size: float = 0.01,
+    grid_size: float = 0.001,
     snap_tolerance: float = 0.1,
 ) -> ClassifiedEdges:
     """
@@ -100,9 +100,11 @@ def classify_edges_for_underpass(
                 continue
             
             # Compute intersection (safe_intersection will snap adjacent_geom to exterior_edges_geom)
+
+            adjacent_snapped = snap(adjacent_geom, exterior_edges_geom, snap_tolerance)
             intersection = safe_intersection(
                 exterior_edges_geom, 
-                adjacent_geom,
+                adjacent_snapped,
                 grid_size=grid_size
             )
             
