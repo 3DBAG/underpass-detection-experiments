@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling>=1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "edge-classification"
+version = "0.1.0"
+description = "Classify building polygon edges as interior, exterior, or shared for underpass detection."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "psycopg[binary]>=3.2.6",
+  "shapely>=2.1.1",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=8.3.5",
+  "ruff>=0.11.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/edge_classification"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,4 +1,4 @@
-DROP TABLE IF EXISTS underpasses.edges;
+DROP TABLE IF EXISTS underpasses.edges CASCADE;
 
 CREATE TABLE underpasses.edges AS
 with adjacent_geometries AS (
@@ -12,37 +12,64 @@ with adjacent_geometries AS (
     WHERE NOT ST_IsEmpty(bag.geometrie)
 ),
 
--- Find interior and exterior edges of underpasses by intersecting with the BGT polygons
-primary_edges AS (
+-- Extract all rings (exterior and interior) from underpass polygons
+all_rings AS (
     SELECT
         un.underpass_id,
         un.identificatie,
-                st_linemerge(ST_Intersection(
-                    ST_ExteriorRing(un.geom),
-                    CASE 
-                        WHEN ST_GeometryType(ST_Snap(bbj.bgt_geometrie, un.geom, 0.03)) = 'ST_MultiPolygon' 
-                        THEN ST_Union(ARRAY(
-                            SELECT ST_ExteriorRing((ST_Dump(ST_Snap(bbj.bgt_geometrie, un.geom, 0.03))).geom)
-                        ))
-                        ELSE ST_ExteriorRing(ST_Snap(bbj.bgt_geometrie, un.geom, 0.03))
-                    END
-            )
-        ) AS interior_edges,
-                st_linemerge(ST_Difference(
-                    ST_ExteriorRing(un.geom),
-                    CASE 
-                        WHEN ST_GeometryType(ST_Snap(bbj.bgt_geometrie, un.geom, 0.03)) = 'ST_MultiPolygon' 
-                        THEN ST_Union(ARRAY(
-                            SELECT ST_ExteriorRing((ST_Dump(ST_Snap(bbj.bgt_geometrie, un.geom, 0.03))).geom)
-                        ))
-                        ELSE ST_ExteriorRing(ST_Snap(bbj.bgt_geometrie, un.geom, 0.03))
-                    END
-            )
-        ) AS exterior_edges
+        un.geom AS original_geom,
+        bbj.bgt_geometrie,
+        0 AS ring_index,
+        ST_ExteriorRing(un.geom) AS ring_geom
     FROM underpasses.geometries un
     JOIN underpasses.bag_bgt_join bbj
         ON un.identificatie = bbj.identificatie
     WHERE NOT ST_IsEmpty(un.geom)
+    
+    UNION ALL
+    
+    SELECT
+        un.underpass_id,
+        un.identificatie,
+        un.geom AS original_geom,
+        bbj.bgt_geometrie,
+        generate_series(1, ST_NumInteriorRings(un.geom)) AS ring_index,
+        ST_InteriorRingN(un.geom, generate_series(1, ST_NumInteriorRings(un.geom))) AS ring_geom
+    FROM underpasses.geometries un
+    JOIN underpasses.bag_bgt_join bbj
+        ON un.identificatie = bbj.identificatie
+    WHERE NOT ST_IsEmpty(un.geom)
+        AND ST_NumInteriorRings(un.geom) > 0
+),
+
+-- Find interior and exterior edges of underpasses by intersecting with the BGT polygons
+primary_edges AS (
+    SELECT
+        ar.underpass_id,
+        ar.identificatie,
+                st_linemerge(ST_Intersection(
+                    ar.ring_geom,
+                    CASE 
+                        WHEN ST_GeometryType(ST_Snap(ar.bgt_geometrie, ar.original_geom, 0.03)) = 'ST_MultiPolygon' 
+                        THEN ST_Union(ARRAY(
+                            SELECT ST_ExteriorRing((ST_Dump(ST_Snap(ar.bgt_geometrie, ar.original_geom, 0.03))).geom)
+                        ))
+                        ELSE ST_ExteriorRing(ST_Snap(ar.bgt_geometrie, ar.original_geom, 0.03))
+                    END
+            )
+        ) AS interior_edges,
+                st_linemerge(ST_Difference(
+                    ar.ring_geom,
+                    CASE 
+                        WHEN ST_GeometryType(ST_Snap(ar.bgt_geometrie, ar.original_geom, 0.03)) = 'ST_MultiPolygon' 
+                        THEN ST_Union(ARRAY(
+                            SELECT ST_ExteriorRing((ST_Dump(ST_Snap(ar.bgt_geometrie, ar.original_geom, 0.03))).geom)
+                        ))
+                        ELSE ST_ExteriorRing(ST_Snap(ar.bgt_geometrie, ar.original_geom, 0.03))
+                    END
+            )
+        ) AS exterior_edges
+    FROM all_rings ar
 ),
 
 -- Find intersections between exterior edges and adjacent building geometries to identify shared edges
