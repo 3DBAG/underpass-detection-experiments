@@ -16,19 +16,24 @@ from typing import Dict, List
 from psycopg import connect
 
 from edge_classification.postgis import (
-    classify_edges_from_db,
+    classify_edges_for_underpass,
+    create_adjacency_cache_table,
+    create_geometries_cache_table,
+    drop_adjacency_cache_table,
+    drop_geometries_cache_table,
+    EdgeClassificationResult,
     get_unprocessed_underpass_ids,
+    load_all_underpass_data_for_chunk,
     write_edges_to_db,
 )
 
 
 ENV_PATH = Path(".env")
-EDGES_TABLE = "underpasses.edges"
 GEOMETRIES_TABLE = "underpasses.geometries"
 BAG_BGT_JOIN_TABLE = "underpasses.bag_bgt_join"
 BAG_ADJACENCY_TABLE = "building_types.bag_adjacency_4"
 BAG_TABLE = "lvbag.pandactueelbestaand"
-CHUNK_SIZE = 100  # Process 100 underpasses per chunk
+CHUNK_SIZE = 1000  # Process 100 underpasses per chunk
 
 
 def _load_dotenv(path: Path) -> None:
@@ -52,33 +57,40 @@ def _require_env(key: str) -> str:
     return value
 
 
-def setup_edges_table(db_params: Dict[str, str]) -> None:
+def setup_edges_table(db_params: Dict[str, str], edges_table: str) -> None:
     """Create the edges table if it doesn't exist."""
+    # Parse schema and table name from edges_table
+    if '.' in edges_table:
+        schema, table = edges_table.split('.', 1)
+    else:
+        schema = 'public'
+        table = edges_table
+    
     with connect(**db_params) as conn:
         # Check if table exists
         with conn.cursor() as cursor:
             cursor.execute("""
                 SELECT EXISTS (
                     SELECT FROM information_schema.tables 
-                    WHERE table_schema = 'underpasses' 
-                    AND table_name = 'edges'
+                    WHERE table_schema = %s
+                    AND table_name = %s
                 )
-            """)
+            """, (schema, table))
             table_exists = cursor.fetchone()[0]
         
         if not table_exists:
-            print("Creating edges table...")
-            write_edges_to_db(conn, [], edges_table=EDGES_TABLE, create_table=True)
+            print(f"Creating edges table {edges_table}...")
+            write_edges_to_db(conn, [], edges_table=edges_table, create_table=True)
             print("✓ Table created")
 
 
-def get_underpass_chunks(db_params: Dict[str, str]) -> List[List[int]]:
+def get_underpass_chunks(db_params: Dict[str, str], edges_table: str) -> List[List[int]]:
     """Get chunks of unprocessed underpass IDs."""
     with connect(**db_params) as conn:
         underpass_ids = get_unprocessed_underpass_ids(
             conn,
             geometries_table=GEOMETRIES_TABLE,
-            edges_table=EDGES_TABLE,
+            edges_table=edges_table,
         )
     
     if not underpass_ids:
@@ -97,7 +109,10 @@ def process_chunk(
     chunk_num: int,
     grid_size: float,
     snap_tolerance: float,
+    edges_table: str,
     db_params: Dict[str, str],
+    adjacency_cache_table: str | None = None,
+    geometries_cache_table: str | None = None,
 ) -> Dict[str, int]:
     """
     Process a chunk of underpasses.
@@ -107,7 +122,10 @@ def process_chunk(
         chunk_num: Chunk number for logging
         grid_size: Grid size for snapping
         snap_tolerance: Tolerance for snapping adjacent geometries
+        edges_table: Name of the edges output table
         db_params: Database connection parameters
+        adjacency_cache_table: Name of pre-created adjacency cache table (optional)
+        geometries_cache_table: Name of pre-created geometries cache table (optional)
         
     Returns:
         Dictionary with processing statistics
@@ -116,30 +134,93 @@ def process_chunk(
     failed = 0
     failed_ids = []
     
+    print(f"🔄 Chunk {chunk_num}: Starting {len(chunk)} underpasses")
+    
     with connect(**db_params) as conn:
+        # 1. Batch-load ALL data for this chunk
+        t_load_start = time.time()
+        underpass_data = load_all_underpass_data_for_chunk(
+            connection=conn,
+            underpass_ids=chunk,  
+            geometries_table=geometries_cache_table,  
+            adjacency_table=adjacency_cache_table,
+        )
+        t_load = time.time() - t_load_start
+        print(f"📥 Chunk {chunk_num}: Loaded data for {len(underpass_data)} underpasses in {t_load:.2f}s")
+        
+        # 2. Process each underpass in-memory (no more DB calls)
+        t_process_start = time.time()
+        all_edges = []
+        
         for underpass_id in chunk:
+            if underpass_id not in underpass_data:
+                failed += 1
+                failed_ids.append(underpass_id)
+                print(f"  ✗ Chunk {chunk_num}: No data for underpass {underpass_id}")
+                continue
+            
             try:
+                identificatie, underpass_geom, bgt_geom, adjacent_geoms = underpass_data[underpass_id]
+                
                 # Classify edges for this underpass
-                edges = classify_edges_from_db(
-                    connection=conn,
+                classified = classify_edges_for_underpass(
                     underpass_id=underpass_id,
+                    identificatie=identificatie,
+                    underpass_geom=underpass_geom,
+                    bgt_geom=bgt_geom,
+                    adjacent_geoms=adjacent_geoms,
                     grid_size=grid_size,
                     snap_tolerance=snap_tolerance,
-                    geometries_table=GEOMETRIES_TABLE,
-                    bag_bgt_join_table=BAG_BGT_JOIN_TABLE,
-                    bag_adjacency_table=BAG_ADJACENCY_TABLE,
-                    bag_table=BAG_TABLE,
                 )
                 
-                # Write to database
-                write_edges_to_db(conn, edges, edges_table=EDGES_TABLE)
+                # Convert to result format
+                for edge in classified.interior_edges:
+                    all_edges.append(EdgeClassificationResult(
+                        underpass_id=underpass_id,
+                        identificatie=identificatie,
+                        edge_type='interior',
+                        geom=edge,
+                    ))
+                
+                for edge in classified.exterior_edges:
+                    all_edges.append(EdgeClassificationResult(
+                        underpass_id=underpass_id,
+                        identificatie=identificatie,
+                        edge_type='exterior',
+                        geom=edge,
+                    ))
+                
+                for edge in classified.shared_edges:
+                    all_edges.append(EdgeClassificationResult(
+                        underpass_id=underpass_id,
+                        identificatie=identificatie,
+                        edge_type='shared',
+                        geom=edge,
+                    ))
                 
                 successful += 1
+                if successful % 10 == 0:  # Log every 10 underpasses
+                    print(f"  ✓ Chunk {chunk_num}: Processed {successful}/{len(chunk)} underpasses...")
                 
             except Exception as e:
                 failed += 1
                 failed_ids.append(underpass_id)
                 print(f"  ✗ Chunk {chunk_num}: Failed underpass {underpass_id}: {e}")
+        
+        t_process = time.time() - t_process_start
+        print(f"⚙️  Chunk {chunk_num}: Processed {successful} underpasses in {t_process:.2f}s ({t_process/len(chunk):.3f}s per underpass)")
+        
+        # 3. Batch write all edges at once
+        t_write = 0
+        if all_edges:
+            t_write_start = time.time()
+            print(f"💾 Chunk {chunk_num}: Writing {len(all_edges)} edges to database...")
+            write_edges_to_db(conn, all_edges, edges_table=edges_table)
+            conn.commit()
+            t_write = time.time() - t_write_start
+        
+        print(f"✓ Chunk {chunk_num}: Complete - {successful} successful, {failed} failed")
+        print(f"⏱️  Chunk {chunk_num} timing: Load {t_load:.2f}s | Process {t_process:.2f}s | Write {t_write:.2f}s | Total {t_load+t_process+t_write:.2f}s")
     
     return {
         'successful': successful,
@@ -153,9 +234,10 @@ def main() -> int:
     _load_dotenv(ENV_PATH)
     
     # Get configuration
-    grid_size = float(environ.get("EDGE_CLASSIFICATION_SNAP_TOLERANCE", "0.001"))
-    snap_tolerance = float(environ.get("EDGE_CLASSIFICATION_SNAP_ADJACENT_TOLERANCE", "0.1"))
+    grid_size = float(environ.get("EDGE_CLASSIFICATION_GRID_PRECISION", "0.01"))
+    snap_tolerance = float(environ.get("EDGE_CLASSIFICATION_SNAP_TOLERANCE", "0.03"))
     max_workers = int(environ.get("EDGE_CLASSIFICATION_MAX_WORKERS", "4"))
+    edges_table = environ.get("EDGE_CLASSIFICATION_EDGES_TABLE", "underpasses.edges")
     
     # Database connection parameters
     db_params = {
@@ -169,21 +251,51 @@ def main() -> int:
     print("=" * 80)
     print("Edge Classification for Underpass Detection")
     print("=" * 80)
-    print(f"Grid size (snap tolerance): {grid_size}")
-    print(f"Adjacent snap tolerance: {snap_tolerance}")
+    print(f"Grid size (precision): {grid_size}")
+    print(f"Snap tolerance: {snap_tolerance}")
     print(f"Max workers: {max_workers}")
+    print()
+    print("Setting up database...")
     print()
     
     # Setup database
-    setup_edges_table(db_params)
+    setup_edges_table(db_params, edges_table)
+    print(f"Output table: {edges_table}")
+    
+    # Create cache tables (one-time expensive JOINs)
+    adjacency_cache_table = None
+    geometries_cache_table = None
+    
+    with connect(**db_params) as conn:
+        # Create geometries cache (underpass + BGT JOIN)
+        geometries_cache_table = create_geometries_cache_table(
+            conn,
+            geometries_table=GEOMETRIES_TABLE,
+            bag_bgt_join_table=BAG_BGT_JOIN_TABLE,
+            cache_table_name="underpasses.geometries_cache",
+        )
+        print()
+        
+        # Create adjacency cache (adjacency + BAG JOIN)
+        adjacency_cache_table = create_adjacency_cache_table(
+            conn,
+            bag_adjacency_table=BAG_ADJACENCY_TABLE,
+            bag_table=BAG_TABLE,
+            cache_table_name="underpasses.adjacency_cache",
+        )
+    
+    print("✓ Cache tables created")
+    print("✓ Database setup complete")
+    print()
     
     # Get chunks to process
-    underpass_chunks = get_underpass_chunks(db_params)
+    underpass_chunks = get_underpass_chunks(db_params, edges_table)
     
     if not underpass_chunks:
         print("✓ All underpasses have been processed!")
         return 0
-    
+    print(f"✓ Retrieved {len(underpass_chunks)} chunks of underpasses to process")
+
     total_underpasses = sum(len(chunk) for chunk in underpass_chunks)
     print(f"Found {total_underpasses} unprocessed underpasses in {len(underpass_chunks)} chunks")
     print(f"Using {max_workers} parallel workers")
@@ -204,7 +316,10 @@ def main() -> int:
                 chunk_num + 1,
                 grid_size,
                 snap_tolerance,
+                edges_table,
                 db_params,
+                adjacency_cache_table,
+                geometries_cache_table,
             ): (chunk, chunk_num + 1)
             for chunk_num, chunk in enumerate(underpass_chunks)
         }
@@ -249,6 +364,14 @@ def main() -> int:
         print(f"Failed underpass IDs: {all_failed_ids[:20]}")
         if len(all_failed_ids) > 20:
             print(f"... and {len(all_failed_ids) - 20} more")
+    
+    # Cleanup: drop the cache tables
+    print()
+    with connect(**db_params) as conn:
+        if geometries_cache_table:
+            drop_geometries_cache_table(conn, geometries_cache_table)
+        if adjacency_cache_table:
+            drop_adjacency_cache_table(conn, adjacency_cache_table)
     
     return 0 if total_failed == 0 else 1
 

@@ -13,7 +13,7 @@ from shapely.ops import linemerge, snap, unary_union
 
 
 def snap_to_grid(geom: Union[Polygon, LineString, MultiLineString, MultiPolygon], 
-                 grid_size: float = 0.001) -> Union[Polygon, LineString, MultiLineString, MultiPolygon]:
+                 grid_size: float = 0.01) -> Union[Polygon, LineString, MultiLineString, MultiPolygon]:
     """
     Snap geometry coordinates to a grid with the given grid size.
     
@@ -21,7 +21,7 @@ def snap_to_grid(geom: Union[Polygon, LineString, MultiLineString, MultiPolygon]
     
     Args:
         geom: Input geometry
-        grid_size: Grid size for snapping (default: 0.001)
+        grid_size: Grid size for snapping (default: 0.01)
         
     Returns:
         Snapped geometry
@@ -33,44 +33,56 @@ def snap_to_grid(geom: Union[Polygon, LineString, MultiLineString, MultiPolygon]
 
 
 def extract_exterior_rings(geom: Union[Polygon, MultiPolygon], 
-                          grid_size: float = 0.001) -> MultiLineString:
+                          union_rings: bool = True) -> Union[LineString, MultiLineString]:
     """
     Extract exterior rings from a polygon or multipolygon.
     
+    Matches SQL logic:
+    - For Polygon: returns the exterior ring
+    - For MultiPolygon: extracts all exterior rings and unions them (ST_Union)
+    
     Args:
         geom: Input polygon or multipolygon
-        grid_size: Grid size for snapping (default: 0.001)
+        union_rings: Whether to union rings for MultiPolygon (default: True, matches SQL ST_Union)
         
     Returns:
-        MultiLineString of exterior rings
+        LineString or MultiLineString of exterior rings
     """
     if geom is None or geom.is_empty:
         return MultiLineString([])
     
-    snapped = snap_to_grid(geom, grid_size)
-    
-    if isinstance(snapped, Polygon):
-        return MultiLineString([snapped.exterior])
-    elif isinstance(snapped, MultiPolygon):
-        rings = [poly.exterior for poly in snapped.geoms]
-        return MultiLineString(rings)
+    if isinstance(geom, Polygon):
+        return geom.exterior
+    elif isinstance(geom, MultiPolygon):
+        rings = [poly.exterior for poly in geom.geoms]
+        if union_rings and len(rings) > 1:
+            # Union the rings (matches SQL ST_Union behavior)
+            return unary_union(rings)
+        else:
+            return MultiLineString(rings)
     else:
         return MultiLineString([])
 
 
 def safe_difference(geom1: Union[LineString, MultiLineString], 
                    geom2: Union[LineString, MultiLineString],
-                   grid_size: float = 0.001) -> MultiLineString:
+                   grid_size: float = 0.01) -> MultiLineString:
     """
-    Compute the difference between two line geometries with line merging.
+    Compute the geometric difference: parts of geom1 that do NOT overlap with geom2.
+    
+    Process:
+    1. Snap both geometries to grid using set_precision()
+    2. Compute geom1.difference(geom2) - removes overlapping parts
+    3. Merge connected line segments with linemerge()
+    4. Return as MultiLineString
     
     Args:
-        geom1: First geometry
-        geom2: Second geometry
-        grid_size: Grid size for precision (default: 0.001)
+        geom1: Base geometry (line or multiline)
+        geom2: Geometry to subtract (line or multiline)
+        grid_size: Grid size for coordinate snapping (default: 0.01m)
         
     Returns:
-        Difference as MultiLineString
+        Parts of geom1 NOT in geom2, as MultiLineString. Empty if geom1 is empty.
     """
     if geom1 is None or geom1.is_empty:
         return MultiLineString([])
@@ -82,62 +94,81 @@ def safe_difference(geom1: Union[LineString, MultiLineString],
         diff = set_precision(geom1, grid_size=grid_size).difference(
             set_precision(geom2, grid_size=grid_size)
         )
-        merged = linemerge(diff)
-        
-        if isinstance(merged, LineString):
-            return MultiLineString([merged])
-        elif isinstance(merged, MultiLineString):
-            return merged
+
+        # Check for None result
+        if diff is None or diff.is_empty:
+            return MultiLineString([])
+        # Handle result based on type
+        elif isinstance(diff, LineString):
+            # Already a single line, just wrap it
+            return MultiLineString([diff])
+        elif isinstance(diff, MultiLineString):
+            # Merge connected segments, then return
+            merged = linemerge(diff)
+            if isinstance(merged, LineString):
+                return MultiLineString([merged])
+            else:
+                return merged
         else:
             # Handle empty or other geometry types
             return MultiLineString([])
-    except Exception:Polygon, MultiPolygon, LineString, MultiLineString],
-                     snap_tolerance: float = 0.1,
-                     grid_size: float = 0.001) -> MultiLineString:
+    except Exception as e:
+        print(f"  ✗ Geometry difference failed: {e}, returning empty MultiLineString.")
+        return MultiLineString([])
+
+
+def safe_intersection(geom1: Union[LineString, MultiLineString], 
+                     geom2: Union[LineString, MultiLineString],
+                     grid_size: float = 0.01) -> MultiLineString:
     """
-    Compute the intersection between line geometries with snapping and line merging.
+    Compute the geometric intersection: parts where geom1 and geom2 overlap.
     
-    Mimics PostGIS ST_Snap behavior: snaps geom2 to geom1, then computes intersection.
+    Process:
+    1. Snap geom2 TO geom1 (aligns vertices within snap_tolerance)
+    2. If geom2 is a polygon/multipolygon, extract and union exterior rings
+    3. Snap both geometries to grid using set_precision()
+    4. Compute geom1.intersection(geom2) - find overlapping parts
+    5. Merge connected line segments with linemerge()
+    6. Return as MultiLineString
     
     Args:
-        geom1: First geometry (typically exterior edges)
-        geom2: Second geometry (typically adjacent building geometry or exterior rings)
-        snap_tolerance: Tolerance for snapping geom2 to geom1 (default: 0.1)
-        grid_size: Grid size for precision (default: 0.001)
+        geom1: First geometry (line or multiline) - the reference geometry
+        geom2: Second geometry (line, or multiline) - snapped to geom1
+        grid_size: Grid size for coordinate snapping (default: 0.01m)
         
     Returns:
-        Intersection as MultiLineString
+        Parts where geom1 and geom2 overlap, as MultiLineString. Empty if no intersection.
     """
-    if geom1 is None or geom1.is_empty or geom2 is None or geom2.is_empty:
+    if geom1 is None or geom1.is_empty or geom2 is None or geom2.is_empty:  
         return MultiLineString([])
     
     try:
-        # Snap geom2 to geom1 (mimics ST_Snap in PostGIS)
-        snapped_geom2 = snap(geom2, geom1, snap_tolerance)
-        
-        # Extract exterior rings if it's a polygon
-        if isinstance(snapped_geom2, (Polygon, MultiPolygon)):
-            snapped_geom2 = extract_exterior_rings(snapped_geom2, grid_size)
-        
+
         # Compute intersection with precision
         g1_precision = set_precision(geom1, grid_size=grid_size)
-        g2_precision = set_precision(snapped_geom2, grid_size=grid_size)
+        g2_precision = set_precision(geom2, grid_size=grid_size)
         
-        intersection = g1_precision.intersection(g2_precision
-    try:
-        # Snap geom2 to geom1 to ensure touching edges intersect
-        snapped_geom2 = geom2.buffer(snap_tolerance).intersection(geom1.buffer(snap_tolerance))
+        intersection = g1_precision.intersection(g2_precision)
         
-        intersection = geom1.intersection(snapped_geom2)
-        merged = linemerge(intersection)
-        
-        if isinstance(merged, LineString):
-            return MultiLineString([merged])
-        elif isinstance(merged, MultiLineString):
-            return merged
-        else:
+        # Check for None result
+        if intersection is None or intersection.is_empty:
             return MultiLineString([])
-    except Exception:
+        # Handle result based on type
+        elif isinstance(intersection, LineString):
+            # Already a single line, just wrap it
+            return MultiLineString([intersection])
+        elif isinstance(intersection, MultiLineString):
+            # Merge connected segments, then return
+            merged = linemerge(intersection)
+            if isinstance(merged, LineString):
+                return MultiLineString([merged])
+            else:
+                return merged
+        else:
+            # Handle empty or other geometry types
+            return MultiLineString([])
+    except Exception as e:
+        print(f"  ✗ Geometry intersection failed: {e}, returning empty MultiLineString.")
         return MultiLineString([])
 
 
@@ -158,13 +189,20 @@ def union_geometries(geoms: List[Union[LineString, MultiLineString]]) -> Union[M
     
     try:
         unioned = unary_union(valid_geoms)
-        merged = linemerge(unioned)
         
-        if isinstance(merged, LineString):
-            return MultiLineString([merged])
-        elif isinstance(merged, MultiLineString):
-            return merged
+        # Handle result based on type
+        if isinstance(unioned, LineString):
+            # Already a single line, just wrap it
+            return MultiLineString([unioned])
+        elif isinstance(unioned, MultiLineString):
+            # Merge connected segments, then return
+            merged = linemerge(unioned)
+            if isinstance(merged, LineString):
+                return MultiLineString([merged])
+            else:
+                return merged
         else:
+            # Handle empty or other geometry types
             return None
     except Exception:
         return None

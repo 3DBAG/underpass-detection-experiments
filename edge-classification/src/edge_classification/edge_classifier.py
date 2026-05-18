@@ -4,13 +4,13 @@ from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
 from shapely.geometry import LineString, MultiLineString, Polygon
+from shapely.ops import snap
 
 from edge_classification.geometry_ops import (
     dump_multilinestring,
     extract_exterior_rings,
     safe_difference,
     safe_intersection,
-    snap_to_grid,
     union_geometries,
 )
 
@@ -32,14 +32,14 @@ def classify_edges_for_underpass(
     underpass_geom: Polygon,
     bgt_geom: Polygon,
     adjacent_geoms: List[Polygon],
-    grid_size: float = 0.001,
+    grid_size: float = 0.01,
     snap_tolerance: float = 0.1,
 ) -> ClassifiedEdges:
     """
     Classify edges of an underpass polygon into interior, exterior, and shared edges.
     
     This implements the SQL logic from edges.sql:
-    1. Snap geometries to grid
+    1. Snap underpass geom to bgt geom to ensure they are aligned for edge classification
     2. Compute exterior edges (parts of ring NOT intersecting with BGT)
     3. Derive interior edges as everything that's NOT exterior (full ring - exterior edges)
     4. Add interior rings as interior edges
@@ -58,15 +58,15 @@ def classify_edges_for_underpass(
     Returns:
         ClassifiedEdges object containing the classified edge lists
     """
-    # Step 1: Snap underpass and BGT geometries to grid
-    snapped_underpass = snap_to_grid(underpass_geom, grid_size)
-    snapped_bgt = snap_to_grid(bgt_geom, grid_size)
+    # Step 1: Snap BGT to underpass 
+    snapped_bgt = snap(bgt_geom, underpass_geom, snap_tolerance)
     
-    # Step 2: Get the full exterior ring
-    full_ring = LineString(snapped_underpass.exterior.coords)
+    # Step 2: Get the full exterior ring from original underpass
+    full_ring = LineString(underpass_geom.exterior.coords)
     
-    # Step 3: Get BGT exterior rings (handles both Polygon and MultiPolygon)
-    bgt_exterior = extract_exterior_rings(snapped_bgt, grid_size)
+    # Step 3: Get BGT exterior rings from SNAPPED BGT and union them
+
+    bgt_exterior = extract_exterior_rings(snapped_bgt, union_rings=True)
     
     # Step 4: Compute exterior edges (parts NOT intersecting with BGT)
     exterior_edges_geom = safe_difference(full_ring, bgt_exterior, grid_size)
@@ -80,7 +80,7 @@ def classify_edges_for_underpass(
     
     # Step 6: Add interior rings as interior edges
     interior_edges_from_rings = []
-    for interior_ring in snapped_underpass.interiors:
+    for interior_ring in underpass_geom.interiors:
         interior_edges_from_rings.append(LineString(interior_ring.coords))
     
     # Combine all interior edges
@@ -91,7 +91,7 @@ def classify_edges_for_underpass(
     combined_interior = union_geometries(all_interior_geoms)
     
     # Step 7: Find shared edges (intersection with adjacent building exteriors)
-    # This follows the SQL: snap adjacent_geom to exterior_edges, then extract exterior ring, then intersect
+    # snap() will align adjacent geometry vertices to exterior edges within snap_tolerance
     shared_edge_parts = []
     
     if not exterior_edges_geom.is_empty and adjacent_geoms:
@@ -99,14 +99,10 @@ def classify_edges_for_underpass(
             if adjacent_geom is None or adjacent_geom.is_empty:
                 continue
             
-            # Snap adjacent geometry to grid first
-            snapped_adjacent = snap_to_grid(adjacent_geom, grid_size)
-            
-            # Compute intersection (this handles the snap operation internally)
+            # Compute intersection (safe_intersection will snap adjacent_geom to exterior_edges_geom)
             intersection = safe_intersection(
                 exterior_edges_geom, 
-                snapped_adjacent,
-                snap_tolerance=snap_tolerance,
+                adjacent_geom,
                 grid_size=grid_size
             )
             
@@ -134,42 +130,3 @@ def classify_edges_for_underpass(
         exterior_edges=exterior_list,
         shared_edges=shared_list,
     )
-
-
-def classify_edges_for_underpass_batch(
-    underpass_data: List[Tuple[int, str, Polygon, Polygon, List[Polygon]]],
-    grid_size: float = 0.001,
-    snap_tolerance: float = 0.1,
-) -> List[ClassifiedEdges]:
-    """
-    Classify edges for multiple underpasses.
-    
-    Args:
-        underpass_data: List of tuples (underpass_id, identificatie, underpass_geom, 
-                        bgt_geom, adjacent_geoms)
-        grid_size: Grid size for snapping (default: 0.001)
-        snap_tolerance: Tolerance for snapping adjacent geometries (default: 0.1)
-        
-    Returns:
-        List of ClassifiedEdges objects
-    """
-    results = []
-    
-    for underpass_id, identificatie, underpass_geom, bgt_geom, adjacent_geoms in underpass_data:
-        try:
-            classified = classify_edges_for_underpass(
-                underpass_id=underpass_id,
-                identificatie=identificatie,
-                underpass_geom=underpass_geom,
-                bgt_geom=bgt_geom,
-                adjacent_geoms=adjacent_geoms,
-                grid_size=grid_size,
-                snap_tolerance=snap_tolerance,
-            )
-            results.append(classified)
-        except Exception as e:
-            # Log error but continue processing
-            print(f"Error processing underpass {underpass_id} ({identificatie}): {e}")
-            continue
-    
-    return results
