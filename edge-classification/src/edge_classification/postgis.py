@@ -347,7 +347,7 @@ def classify_edges_from_db(
     connection: Connection[Any],
     underpass_id: int,
     grid_size: float = 0.001,
-    snap_tolerance: float = 0.1,
+    snap_tolerance: float = 0.03,
     geometries_table: str = "underpasses.geometries",
     bag_bgt_join_table: str = "underpasses.bag_bgt_join",
     bag_adjacency_table: str = "building_types.bag_adjacency_4",
@@ -360,7 +360,7 @@ def classify_edges_from_db(
         connection: Database connection
         underpass_id: ID of the underpass to process
         grid_size: Grid size for snapping (default: 0.001)
-        snap_tolerance: Tolerance for snapping adjacent geometries (default: 0.1)
+        snap_tolerance: Tolerance for snapping adjacent geometries (default: 0.03)
         geometries_table: Name of the geometries table
         bag_bgt_join_table: Name of the BAG-BGT join table
         bag_adjacency_table: Name of the adjacency table

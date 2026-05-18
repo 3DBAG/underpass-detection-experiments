@@ -33,7 +33,7 @@ def classify_edges_for_underpass(
     bgt_geom: Polygon,
     adjacent_geoms: List[Polygon],
     grid_size: float = 0.001,
-    snap_tolerance: float = 0.1,
+    snap_tolerance: float = 0.03,
 ) -> ClassifiedEdges:
     """
     Classify edges of an underpass polygon into interior, exterior, and shared edges.
@@ -53,7 +53,7 @@ def classify_edges_for_underpass(
         bgt_geom: The BGT geometry for this building
         adjacent_geoms: List of adjacent building geometries
         grid_size: Grid size for snapping (default: 0.001)
-        snap_tolerance: Tolerance for snapping adjacent geometries (default: 0.1)
+        snap_tolerance: Tolerance for snapping adjacent geometries (default: 0.03)
         
     Returns:
         ClassifiedEdges object containing the classified edge lists

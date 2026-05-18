@@ -83,7 +83,7 @@ with connect(**db_params) as conn:
         connection=conn,
         underpass_id=123,
         grid_size=0.001,
-        snap_tolerance=0.1,
+        snap_tolerance=0.03,
     )
     
     # Process results
