@@ -82,7 +82,7 @@ def create_geometries_cache_table(
 def create_adjacency_cache_table(
     connection: Connection[Any],
     bag_adjacency_table: str = "building_types.bag_adjacency_4",
-    bag_table: str = "lvbag.pandactueelbestaand",
+    bag_bgt_table: str = "underpasses.bag_bgt_join",
     cache_table_name: str = "underpasses.adjacency_cache",
 ) -> str:
     """
@@ -112,18 +112,18 @@ def create_adjacency_cache_table(
         SELECT 
             ba.identificatie,
             ba.adjacent_identificatie,
-            bag.geometrie
+            bag.bag_geometrie AS geometrie
         FROM {bag_adjacency_table} ba
-        JOIN {bag_table} bag
+        JOIN {bag_bgt_table} bag
             ON bag.identificatie = ba.adjacent_identificatie
-        WHERE NOT ST_IsEmpty(bag.geometrie);
-        
+        WHERE NOT ST_IsEmpty(bag.bag_geometrie);
+                        
         CREATE INDEX idx_adjacency_cache_id ON {cache_table} (identificatie);
         CREATE INDEX idx_adjacency_cache_spatial ON {cache_table} USING GIST (geometrie);
     """).format(
         cache_table=Identifier(schema, table),
         bag_adjacency_table=Identifier(*bag_adjacency_table.split('.')),
-        bag_table=Identifier(*bag_table.split('.')),
+        bag_bgt_table=Identifier(*bag_bgt_table.split('.')),
     )
     
     with connection.cursor() as cursor:
@@ -277,7 +277,7 @@ def load_underpass_data_from_db(
     geometries_table: str = "underpasses.geometries",
     bag_bgt_join_table: str = "underpasses.bag_bgt_join",
     bag_adjacency_table: str = "building_types.bag_adjacency_4",
-    bag_table: str = "lvbag.pandactueelbestaand",
+    bag_bgt_table: str = "underpasses.bag_bgt_join",
 ) -> Tuple[str, Polygon, Polygon, List[Polygon]]:
     """
     Load underpass data from the database for a single underpass.
@@ -288,7 +288,7 @@ def load_underpass_data_from_db(
         geometries_table: Name of the geometries table
         bag_bgt_join_table: Name of the BAG-BGT join table
         bag_adjacency_table: Name of the adjacency table
-        bag_table: Name of the BAG building table
+        bag_bgt_table: Table with BAG-BGT joined geometries
         
     Returns:
         Tuple of (identificatie, underpass_geom, bgt_geom, adjacent_geoms)
@@ -325,13 +325,13 @@ def load_underpass_data_from_db(
         SELECT DISTINCT
             ST_AsBinary(bag.geometrie) AS adjacent_wkb
         FROM {bag_adjacency_table} ba
-        JOIN {bag_table} bag
+        JOIN {bag_bgt_table} bag
             ON bag.identificatie = ba.adjacent_identificatie
         WHERE ba.identificatie = %s
             AND NOT ST_IsEmpty(bag.geometrie)
     """).format(
         bag_adjacency_table=Identifier(*bag_adjacency_table.split('.')),
-        bag_table=Identifier(*bag_table.split('.')),
+        bag_bgt_table=Identifier(*bag_bgt_table.split('.')),
     )
     
     adjacent_geoms = []
@@ -351,7 +351,7 @@ def classify_edges_from_db(
     geometries_table: str = "underpasses.geometries",
     bag_bgt_join_table: str = "underpasses.bag_bgt_join",
     bag_adjacency_table: str = "building_types.bag_adjacency_4",
-    bag_table: str = "lvbag.pandactueelbestaand",
+    bag_bgt_table: str = "underpasses.bag_bgt_join",
 ) -> List[EdgeClassificationResult]:
     """
     Classify edges for a single underpass by loading data from the database.
@@ -364,7 +364,7 @@ def classify_edges_from_db(
         geometries_table: Name of the geometries table
         bag_bgt_join_table: Name of the BAG-BGT join table
         bag_adjacency_table: Name of the adjacency table
-        bag_table: Name of the BAG building table
+        bag_bgt_table: Table with BAG-BGT joined geometries
         
     Returns:
         List of EdgeClassificationResult objects
@@ -376,7 +376,7 @@ def classify_edges_from_db(
         geometries_table=geometries_table,
         bag_bgt_join_table=bag_bgt_join_table,
         bag_adjacency_table=bag_adjacency_table,
-        bag_table=bag_table,
+        bag_bgt_table=bag_bgt_table,
     )
     
     # Classify edges

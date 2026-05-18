@@ -32,7 +32,6 @@ ENV_PATH = Path(".env")
 GEOMETRIES_TABLE = "underpasses.geometries"
 BAG_BGT_JOIN_TABLE = "underpasses.bag_bgt_join"
 BAG_ADJACENCY_TABLE = "building_types.bag_adjacency_4"
-BAG_TABLE = "lvbag.pandactueelbestaand"
 CHUNK_SIZE = 1000  # Process 100 underpasses per chunk
 
 
@@ -280,7 +279,7 @@ def main() -> int:
         adjacency_cache_table = create_adjacency_cache_table(
             conn,
             bag_adjacency_table=BAG_ADJACENCY_TABLE,
-            bag_table=BAG_TABLE,
+            bag_bgt_table=BAG_BGT_JOIN_TABLE,
             cache_table_name="underpasses.adjacency_cache",
         )
     
