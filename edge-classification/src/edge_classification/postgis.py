@@ -112,11 +112,11 @@ def create_adjacency_cache_table(
         SELECT 
             ba.identificatie,
             ba.adjacent_identificatie,
-            bag.bag_geometrie AS geometrie
+            bag.bgt_geometrie AS geometrie
         FROM {bag_adjacency_table} ba
         JOIN {bag_bgt_table} bag
             ON bag.identificatie = ba.adjacent_identificatie
-        WHERE NOT ST_IsEmpty(bag.bag_geometrie);
+        WHERE NOT ST_IsEmpty(bag.bgt_geometrie);
                         
         CREATE INDEX idx_adjacency_cache_id ON {cache_table} (identificatie);
         CREATE INDEX idx_adjacency_cache_spatial ON {cache_table} USING GIST (geometrie);
