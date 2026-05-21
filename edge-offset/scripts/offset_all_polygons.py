@@ -269,6 +269,15 @@ def process_chunk(
                 continue
 
             for record in records:
+                if record.movable_edges.is_empty:
+                    print(
+                        f"⚠️ Skipping underpass {underpass_id} - no movable edges found"
+                    )
+                    skipped_inserts.append(
+                        (record.identificatie, underpass_id, "no_movable_edges")
+                    )
+                    failed += 1
+                    continue
                 try:
                     classified = classify_polygon_from_edge_sets(
                         movable_edges=record.movable_edges,
