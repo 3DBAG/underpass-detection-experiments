@@ -1,4 +1,7 @@
 import csv
+import json
+from pathlib import Path
+
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.colors import LinearSegmentedColormap
@@ -159,10 +162,11 @@ def write_rerun_visualization(
         print(f"Saved Rerun visualization to {output_path}")
 
 
-def process_case(las_path, gpkg_path):
-    result = estimate_underpass_height(las_path, gpkg_path, verbose=True)
+def plot_height_estimation_result(result, output_dir=".", write_rerun=True):
     bag_id = result["bag_id"]
-    output_path = f"{bag_id}_peak_grids_overlay.png"
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / f"{bag_id}_peak_grids_overlay.png"
     x = result["x"]
     y = result["y"]
     z = result["z"]
@@ -400,28 +404,45 @@ def process_case(las_path, gpkg_path):
     print(f"Saved overlay figure to {output_path}")
     plt.close(fig)
 
-    write_rerun_visualization(
-        bag_id,
-        x,
-        y,
-        z,
-        min_x,
-        min_y,
-        max_x,
-        max_y,
-        display_peak_layers,
-    )
+    if write_rerun:
+        write_rerun_visualization(
+            bag_id,
+            x,
+            y,
+            z,
+            min_x,
+            min_y,
+            max_x,
+            max_y,
+            display_peak_layers,
+        )
     return underpass_metrics
+
+
+def process_case(las_path, gpkg_path):
+    result = estimate_underpass_height(las_path, gpkg_path, verbose=True)
+    return plot_height_estimation_result(result)
 
 
 def write_metrics_csv(rows, output_path):
     with open(output_path, "w", newline="") as csv_file:
         writer = csv.DictWriter(
             csv_file,
-            fieldnames=["identificatie", "underpass_z_min", "underpass_z_max", "underpass_h"],
+            fieldnames=[
+                "identificatie",
+                "underpass_z_min",
+                "underpass_z_max",
+                "underpass_h",
+                "underpass_candidate_peaks",
+            ],
         )
         writer.writeheader()
-        writer.writerows(rows)
+        for row in rows:
+            output_row = dict(row)
+            output_row["underpass_candidate_peaks"] = json.dumps(
+                output_row["underpass_candidate_peaks"]
+            )
+            writer.writerow(output_row)
 
 
 def main():

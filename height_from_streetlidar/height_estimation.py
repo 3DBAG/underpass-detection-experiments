@@ -428,6 +428,23 @@ def select_underpass_peak_indices(candidate_layers, area_key="largest_component_
     return [layer["peak_idx"] for layer in selected_layers]
 
 
+def candidate_peak_summary(layer, display_order_by_peak_idx, selected_peak_indices):
+    display_order = display_order_by_peak_idx.get(layer["peak_idx"])
+    return {
+        "peak_idx": int(layer["peak_idx"]),
+        "display_order": None if display_order is None else int(display_order),
+        "selected": bool(layer["peak_idx"] in selected_peak_indices),
+        "elevation": float(layer["peak_center"]),
+        "z_min": float(layer["z_min"]),
+        "z_max": float(layer["z_max"]),
+        "point_count": int(layer["point_count"]),
+        "area_m2": float(layer["area"]),
+        "largest_contiguous_area_m2": float(layer["largest_component_area"]),
+        "raw_count": int(layer["raw_count"]),
+        "smoothed_count": float(layer["smoothed_count"]),
+    }
+
+
 def estimate_underpass_height_from_points(identifier, x, y, z, geometries, verbose=True):
     bag_id = str(identifier)
 
@@ -661,6 +678,15 @@ def estimate_underpass_height_from_points(identifier, x, y, z, geometries, verbo
         layer for layer in display_peak_layers
         if layer["peak_idx"] in peak_indices
     ]
+    display_order_by_peak_idx = {
+        layer["peak_idx"]: display_order
+        for display_order, layer in enumerate(display_peak_layers, start=1)
+    }
+    selected_peak_indices = set(peak_indices)
+    candidate_peak_summaries = [
+        candidate_peak_summary(layer, display_order_by_peak_idx, selected_peak_indices)
+        for layer in candidate_layers_by_height
+    ]
 
     if verbose:
         for i, layer in enumerate(display_peak_layers, start=1):
@@ -683,6 +709,7 @@ def estimate_underpass_height_from_points(identifier, x, y, z, geometries, verbo
         "underpass_z_min": selected_peak_layers[0]["z_min"],
         "underpass_z_max": selected_peak_layers[-1]["z_max"],
         "underpass_h": underpass_attributes["underpass_dh"],
+        "underpass_candidate_peaks": candidate_peak_summaries,
     }
 
     return {
