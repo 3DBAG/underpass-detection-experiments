@@ -37,13 +37,12 @@ def compute_bag_minus_bgt(
     if diff_poly.is_empty:
         return Polygon()
 
-    filtered = double_buffer_filter(diff_poly, buffer_distance)
-    if filtered.is_empty:
+    if double_buffer_filter(diff_poly, buffer_distance).is_empty:
         return Polygon()
 
-    if isinstance(filtered, Polygon):
-        return MultiPolygon([filtered])
-    return filtered
+    if isinstance(diff_poly, Polygon):
+        return MultiPolygon([diff_poly])
+    return diff_poly
 
 
 def compute_snapped_differences(

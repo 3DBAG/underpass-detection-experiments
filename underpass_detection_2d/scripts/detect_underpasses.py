@@ -250,11 +250,9 @@ def _process_step4_chunk(
         if geom is None or geom.is_empty:
             continue
         for poly in dump_multi_to_polygons(geom):
-            filtered = double_buffer_filter(poly, buffer_distance)
-            if filtered.is_empty:
+            if double_buffer_filter(poly, buffer_distance).is_empty:
                 continue
-            for single in dump_multi_to_polygons(filtered):
-                polygons.append((identificatie, single))
+            polygons.append((identificatie, poly))
 
     print(f"  Chunk {chunk_num}/{total_chunks}: "
           f"{len(polygons)} polygons from {len(rows)} records")
