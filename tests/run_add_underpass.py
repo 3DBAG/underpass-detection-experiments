@@ -50,12 +50,12 @@ psutil.cpu_percent(interval=None)
 
 HEIGHT_ATTR: str = "h_underpass_z_max"
 ID_ATTR: str = "identificatie"
-METHOD: str = "pmp"
+METHOD: str = "manifold"
 DB_HOST: str = os.environ.get("UNDERPASS_DB_HOST", "localhost")
 DB_PORT: str = os.environ.get("UNDERPASS_DB_PORT", "5432")
 DB_NAME: str = os.environ.get("UNDERPASS_DB_NAME", "baseregisters")
 DB_USER: str = os.environ.get("UNDERPASS_DB_USER", "rypeters")
-DB_TABLE: str = os.environ.get("UNDERPASS_POLYGON_TABLE", "underpasses.extended_geometries")
+DB_TABLE: str = os.environ.get("UNDERPASS_POLYGON_TABLE", "underpasses.extended_geometries_july")
 CITY_JSONL_SUFFIX: str = ".city.jsonl"
 
 CSV_FIELDNAMES: list[str] = [

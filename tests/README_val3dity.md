@@ -95,3 +95,26 @@ error occurrences: 178060
       307        29161       1402      0.86%             10.45%  POLYGON_WRONG_ORIENTATION
       405            2          1      0.00%              0.01%  WRONG_ORIENTATION_SHELL
 ```
+
+after normal orientation fix:
+> ./val3dity_tools.py summarise /data2/rypeters/ams-run-07-07-rf/seq_underpasses_pmp/
+reports: 210
+objects: 163538
+objects with errors: 12075 (7.38%)
+error occurrences: 166895
+
+  code  occurrences    objects  objects_% of_error_objects_%  description
+------ ------------ ---------- ---------- ------------------  -----------
+   102       164312      11624      7.11%             96.27%  CONSECUTIVE_POINTS_SAME
+   104         1779       1410      0.86%             11.68%  RING_SELF_INTERSECTION
+   201            4          4      0.00%              0.03%  INTERSECTION_RINGS
+   203          254        202      0.12%              1.67%  NON_PLANAR_POLYGON_DISTANCE_PLANE
+   204          345        307      0.19%              2.54%  NON_PLANAR_POLYGON_NORMALS_DEVIATION
+   208            1          1      0.00%              0.01%  ORIENTATION_RINGS_SAME
+   301            3          3      0.00%              0.02%  TOO_FEW_POLYGONS
+   302           30         14      0.01%              0.12%  SHELL_NOT_CLOSED
+   303           90         26      0.02%              0.22%  NON_MANIFOLD_CASE
+   305            5          5      0.00%              0.04%  MULTIPLE_CONNECTED_COMPONENTS
+   306           67          7      0.00%              0.06%  SHELL_SELF_INTERSECTION
+   307            3          3      0.00%              0.02%  POLYGON_WRONG_ORIENTATION
+   405            2          1      0.00%              0.01%  WRONG_ORIENTATION_SHELL
