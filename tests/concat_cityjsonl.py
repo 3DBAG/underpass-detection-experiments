@@ -8,9 +8,10 @@ The output file is named after the source directory and placed in the output
 directory. The first line is the contents of metadata.json from the input root
 (parent of the source directory), serialized as a single JSON line.
 
-Intended to be called once per source subdirectory, parallelized with GNU parallel:
+Intended to be called once per source subdirectory, parallelized with GNU parallel.
+For the reconstruction layout, emit only tile directories:
 
-    find input_dir -mindepth 1 -type d \\
+    find input_dir/reconstruction -mindepth 3 -maxdepth 3 -type d \\
         | parallel python concat_cityjsonl.py input_dir {} /path/to/output_dir
 
 A source directory at input_dir/x/y/z produces output_dir/x-y-z.city.jsonl.

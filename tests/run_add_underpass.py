@@ -50,7 +50,7 @@ psutil.cpu_percent(interval=None)
 
 HEIGHT_ATTR: str = "h_underpass_z_max"
 ID_ATTR: str = "identificatie"
-METHOD: str = "manifold"
+METHOD: str = "pmp"
 DB_HOST: str = os.environ.get("UNDERPASS_DB_HOST", "localhost")
 DB_PORT: str = os.environ.get("UNDERPASS_DB_PORT", "5432")
 DB_NAME: str = os.environ.get("UNDERPASS_DB_NAME", "baseregisters")
