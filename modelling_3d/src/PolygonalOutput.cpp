@@ -124,6 +124,18 @@ double signed_area_2d(const std::vector<Vec2>& ring) {
     return 0.5 * area;
 }
 
+bool outer_ring_wants_positive_projected_area(const K::Vector_3& normal) {
+    switch (choose_drop_axis(normal)) {
+        case 0:
+            return normal.x() >= 0.0;
+        case 1:
+            // Projection to (x, z) reverses handedness relative to the Y axis.
+            return normal.y() <= 0.0;
+        default:
+            return normal.z() >= 0.0;
+    }
+}
+
 bool point_in_ring(const Vec2& p, const std::vector<Vec2>& ring) {
     if (ring.size() < 3) {
         return false;
@@ -497,6 +509,7 @@ std::vector<std::vector<std::vector<uint32_t>>> group_cycles_into_surfaces(
         }
     }
 
+    const bool outer_wants_positive_area = outer_ring_wants_positive_projected_area(normal);
     std::unordered_map<size_t, size_t> surface_index_by_outer;
     for (size_t i = 0; i < infos.size(); ++i) {
         const bool is_outer = (infos[i].nesting_depth % 2) == 0;
@@ -504,7 +517,10 @@ std::vector<std::vector<std::vector<uint32_t>>> group_cycles_into_surfaces(
             continue;
         }
 
-        orient_cycle_for_area_sign(cycles[infos[i].cycle_index], infos[i].signed_area, true);
+        orient_cycle_for_area_sign(
+            cycles[infos[i].cycle_index],
+            infos[i].signed_area,
+            outer_wants_positive_area);
         surface_index_by_outer.emplace(i, surfaces.size());
         surfaces.push_back({cycles[infos[i].cycle_index]});
     }
@@ -529,7 +545,10 @@ std::vector<std::vector<std::vector<uint32_t>>> group_cycles_into_surfaces(
             continue;
         }
 
-        orient_cycle_for_area_sign(cycles[infos[i].cycle_index], infos[i].signed_area, false);
+        orient_cycle_for_area_sign(
+            cycles[infos[i].cycle_index],
+            infos[i].signed_area,
+            !outer_wants_positive_area);
         surfaces[surface_it->second].push_back(cycles[infos[i].cycle_index]);
     }
 
