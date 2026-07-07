@@ -24,7 +24,7 @@ import sqlite3
 import sys
 import time
 from collections import Counter, defaultdict
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import Iterable
 
@@ -45,17 +45,22 @@ for import_path in (CROP_SCRIPT_DIR, HEIGHT_DIR):
         sys.path.insert(0, str(import_path))
 
 from crop_las_by_polygons import (  # noqa: E402
+    LasWriterSink,
     POLYGON_BUFFER_DISTANCE,
     TimingStats,
     buffer_outer_rings,
+    las_open_options as crop_las_open_options,
     polygonal_geometry,
     prepare_feature,
+    sanitize_filename,
+    stream_points_for_features,
 )
 from height_estimation import gpkg_blob_to_geometry, estimate_underpass_height_from_points  # noqa: E402
 
 DEFAULT_INDEX_PATH = Path("/data2/rypeters/amsterdam_data/2025/pointcloud/ams_index.gpkg")
 DEFAULT_POINTCLOUD_ROOT = Path("/data2/rypeters/amsterdam_data/2025/pointcloud")
-DEFAULT_SOURCE_TABLE = "underpasses.extended_geometries"
+DEFAULT_CROP_POINTCLOUD_OUTPUT_DIR = Path("/data2/rypeters/amsterdam_data/2025/cropped")
+DEFAULT_SOURCE_TABLE = "underpasses.extended_geometries_july"
 DEFAULT_DB_HOST = "localhost"
 DEFAULT_DB_PORT = 5432
 DEFAULT_DB_NAME = "baseregisters"
@@ -135,6 +140,40 @@ class PointAccumulator:
             np.concatenate(self.y_parts),
             np.concatenate(self.z_parts),
         )
+
+
+class HeightCropSink:
+    def __init__(
+        self,
+        accumulators: list[PointAccumulator],
+        max_points_per_underpass: int | None,
+        writer_sink: LasWriterSink | None,
+    ) -> None:
+        self.accumulators = accumulators
+        self.max_points_per_underpass = max_points_per_underpass
+        self.writer_sink = writer_sink
+
+    def add(
+        self,
+        feature_idx: int,
+        chunk,
+        xs: np.ndarray,
+        ys: np.ndarray,
+        zs: np.ndarray | None,
+        selected_idx: np.ndarray,
+        source_header: laspy.LasHeader,
+    ) -> None:
+        if zs is None:
+            raise RuntimeError("Height estimation requires z coordinates")
+        self.accumulators[feature_idx].add(
+            xs,
+            ys,
+            zs,
+            selected_idx,
+            self.max_points_per_underpass,
+        )
+        if self.writer_sink is not None:
+            self.writer_sink.add(feature_idx, chunk, xs, ys, zs, selected_idx, source_header)
 
 
 @dataclasses.dataclass
@@ -240,6 +279,25 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=DEFAULT_DECOMPRESSION,
         help="LAZ dimensions to decompress. xyz skips unused attributes.",
     )
+    parser.add_argument(
+        "--crop-output-dir",
+        type=Path,
+        default=DEFAULT_CROP_POINTCLOUD_OUTPUT_DIR,
+        help="Directory for reusable cropped LAZ/LAS files, one per underpass.",
+    )
+    parser.add_argument("--crop-output-extension", default=".laz", help="Suffix for cropped point clouds.")
+    parser.add_argument(
+        "--reuse-cropped",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="When --crop-output-dir is set, read existing cropped point clouds instead of rescanning source tiles.",
+    )
+    parser.add_argument(
+        "--write-cropped",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="When --crop-output-dir is set, write missing cropped point clouds while streaming source tiles.",
+    )
     parser.add_argument("--height-workers", type=int, default=DEFAULT_HEIGHT_WORKERS)
     parser.add_argument(
         "--pip-workers",
@@ -319,24 +377,8 @@ def connect_db(args: argparse.Namespace) -> psycopg.Connection:
     )
 
 
-def laz_open_options(args: argparse.Namespace) -> dict[str, object]:
-    options: dict[str, object] = {}
-
-    backend_by_name = {
-        "lazrs-parallel": laspy.LazBackend.LazrsParallel,
-        "lazrs": laspy.LazBackend.Lazrs,
-        "laszip": laspy.LazBackend.Laszip,
-    }
-    if args.laz_backend != "auto":
-        options["laz_backend"] = backend_by_name[args.laz_backend]
-
-    if args.decompression == "xyz":
-        options["decompression_selection"] = (
-            laspy.DecompressionSelection.XY_RETURNS_CHANNEL
-            | laspy.DecompressionSelection.Z
-        )
-
-    return options
+def laz_open_options(args: argparse.Namespace, decompression: str | None = None) -> dict[str, object]:
+    return crop_las_open_options(args.laz_backend, decompression or args.decompression)
 
 
 def ensure_result_columns(conn: psycopg.Connection, table_name: str) -> None:
@@ -509,6 +551,60 @@ def null_result_values(
     )
 
 
+def crop_output_path(record: UnderpassRecord, args: argparse.Namespace) -> Path | None:
+    if args.crop_output_dir is None:
+        return None
+    extension = args.crop_output_extension
+    if not extension.startswith("."):
+        extension = f".{extension}"
+    return args.crop_output_dir / f"{sanitize_filename(record.key)}{extension}"
+
+
+def read_cached_crop_points(
+    path: Path,
+    accumulator: PointAccumulator,
+    max_points_per_underpass: int | None,
+    chunk_size: int,
+    open_options: dict[str, object],
+    timing: TimingStats,
+) -> None:
+    try:
+        tile_size = path.stat().st_size
+    except OSError:
+        tile_size = 0
+
+    t_open = time.perf_counter()
+    with laspy.open(path, **open_options) as reader:
+        timing.tile_open_s += time.perf_counter() - t_open
+        if reader.header.point_count == 0:
+            raise RuntimeError("Cached crop contains no points")
+        timing.tiles_opened += 1
+        timing.unique_tiles_opened += 1
+        timing.laz_bytes_seen += tile_size
+
+        chunk_iterator = reader.chunk_iterator(chunk_size)
+        while True:
+            t0 = time.perf_counter()
+            try:
+                chunk = next(chunk_iterator)
+            except StopIteration:
+                timing.chunk_read_s += time.perf_counter() - t0
+                break
+            timing.chunk_read_s += time.perf_counter() - t0
+            timing.chunks += 1
+
+            t0 = time.perf_counter()
+            xs = np.asarray(chunk.x, dtype=np.float64)
+            ys = np.asarray(chunk.y, dtype=np.float64)
+            zs = np.asarray(chunk.z, dtype=np.float64)
+            timing.chunk_coord_extract_s += time.perf_counter() - t0
+
+            indices = np.arange(xs.size, dtype=np.int64)
+            timing.points_read += int(xs.size)
+            timing.points_selected += int(xs.size)
+            accumulator.add(xs, ys, zs, indices, max_points_per_underpass)
+
+
 def write_pointcloud(path: Path, x: np.ndarray, y: np.ndarray, z: np.ndarray) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     header = laspy.LasHeader(point_format=3, version="1.2")
@@ -621,48 +717,6 @@ def run_height_estimation_task(task: HeightEstimationTask) -> HeightResult:
             laz_count=task.laz_count,
             error=short_error(exc),
         )
-
-
-def merge_timing_stats(target: TimingStats, source: TimingStats) -> None:
-    target.feature_transform_s += source.feature_transform_s
-    target.feature_buffer_s += source.feature_buffer_s
-    target.feature_prepare_s += source.feature_prepare_s
-    target.feature_write_gpkg_s += source.feature_write_gpkg_s
-    target.tile_open_s += source.tile_open_s
-    target.chunk_read_s += source.chunk_read_s
-    target.chunk_coord_extract_s += source.chunk_coord_extract_s
-    target.chunk_feature_cull_s += source.chunk_feature_cull_s
-    target.pip_select_s += source.pip_select_s
-    target.point_write_s += source.point_write_s
-    target.height_estimation_s += source.height_estimation_s
-    target.db_update_s += source.db_update_s
-    target.chunks += source.chunks
-    target.tiles_opened += source.tiles_opened
-    target.unique_tiles_opened += source.unique_tiles_opened
-    target.laz_bytes_seen += source.laz_bytes_seen
-    target.points_read += source.points_read
-    target.points_selected += source.points_selected
-    target.active_features_total += source.active_features_total
-    target.active_features_max = max(target.active_features_max, source.active_features_max)
-    target.feature_tests += source.feature_tests
-    target.feature_candidate_points_total += source.feature_candidate_points_total
-    target.feature_hits_total += source.feature_hits_total
-    target.component_tests += source.component_tests
-    target.component_candidate_points_total += source.component_candidate_points_total
-    target.component_hits_total += source.component_hits_total
-
-
-def select_feature_points(
-    feature_idx: int,
-    feature: object,
-    xs: np.ndarray,
-    ys: np.ndarray,
-) -> tuple[int, np.ndarray, TimingStats]:
-    local_timing = TimingStats()
-    t0 = time.perf_counter()
-    selected_idx = feature.select_indices(xs, ys, local_timing)
-    local_timing.pip_select_s += time.perf_counter() - t0
-    return feature_idx, selected_idx, local_timing
 
 
 def update_results(conn: psycopg.Connection, table_name: str, results: Iterable[HeightResult]) -> None:
@@ -830,18 +884,26 @@ def build_batch_inputs(
     tile_index: TileIndex,
     resolution: int,
     polygon_buffer: float,
-) -> tuple[list[UnderpassRecord], list[object], list[object], list[list[Path]], list[HeightResult]]:
+    args: argparse.Namespace,
+) -> tuple[list[UnderpassRecord], list[object], list[object], list[list[Path]], list[Path | None], list[HeightResult]]:
     prepared_records: list[UnderpassRecord] = []
     prepared_features: list[object] = []
     crop_geometries: list[object] = []
     feature_tile_paths: list[list[Path]] = []
+    crop_paths: list[Path | None] = []
     early_results: list[HeightResult] = []
 
     for record in records:
+        crop_path = crop_output_path(record, args)
         try:
             crop_geometry = prepare_crop_geometry(record, polygon_buffer)
             tiles = tile_index.query(crop_geometry)
-            if not tiles:
+            has_reusable_crop = (
+                crop_path is not None
+                and args.reuse_cropped
+                and crop_path.is_file()
+            )
+            if not tiles and not has_reusable_crop:
                 early_results.append(
                     null_result(
                         record,
@@ -856,7 +918,7 @@ def build_batch_inputs(
             prepared_feature = prepare_feature(
                 crop_geometry,
                 record.key,
-                Path(f"{record.key}.laz"),
+                crop_path or Path(f"{record.key}.laz"),
                 resolution,
             )
         except Exception as exc:
@@ -875,8 +937,9 @@ def build_batch_inputs(
         prepared_features.append(prepared_feature)
         crop_geometries.append(crop_geometry)
         feature_tile_paths.append(sorted({tile.path for tile in tiles}))
+        crop_paths.append(crop_path)
 
-    return prepared_records, prepared_features, crop_geometries, feature_tile_paths, early_results
+    return prepared_records, prepared_features, crop_geometries, feature_tile_paths, crop_paths, early_results
 
 
 def stream_points_for_batch(
@@ -889,6 +952,8 @@ def stream_points_for_batch(
     pip_workers: int,
     open_options: dict[str, object],
     timing: TimingStats,
+    writer_sink: LasWriterSink | None = None,
+    cached_feature_indices: set[int] | None = None,
 ) -> None:
     tile_to_feature_indices: dict[Path, list[int]] = defaultdict(list)
     for feature_idx, tile_paths in enumerate(feature_tile_paths):
@@ -898,111 +963,29 @@ def stream_points_for_batch(
     if not tile_to_feature_indices:
         return
 
-    feature_minx = np.fromiter((feature.bbox[0] for feature in features), dtype=np.float64, count=len(features))
-    feature_miny = np.fromiter((feature.bbox[1] for feature in features), dtype=np.float64, count=len(features))
-    feature_maxx = np.fromiter((feature.bbox[2] for feature in features), dtype=np.float64, count=len(features))
-    feature_maxy = np.fromiter((feature.bbox[3] for feature in features), dtype=np.float64, count=len(features))
+    cached_feature_indices = cached_feature_indices or set()
+    sink = HeightCropSink(accumulators, max_points_per_underpass, writer_sink)
 
-    executor = ThreadPoolExecutor(max_workers=pip_workers) if pip_workers > 1 else None
-    opened_tile_paths: set[Path] = set()
-    try:
-        for tile_path, candidate_indices_list in sorted(tile_to_feature_indices.items(), key=lambda item: str(item[0])):
-            candidate_indices = np.asarray(candidate_indices_list, dtype=np.int64)
-            if not tile_path.is_file():
-                for feature_idx in candidate_indices:
-                    errors[int(feature_idx)].append(f"Missing LAZ tile: {tile_path}")
-                continue
+    def should_skip(feature_idx: int) -> bool:
+        if feature_idx in cached_feature_indices:
+            return True
+        return writer_sink is None and accumulators[feature_idx].exceeded_limit
 
-            try:
-                tile_size = tile_path.stat().st_size
-            except OSError:
-                tile_size = 0
+    def record_error(feature_idx: int, message: str) -> None:
+        errors[feature_idx].append(message)
 
-            t_open = time.perf_counter()
-            try:
-                reader_context = laspy.open(tile_path, **open_options)
-            except Exception as exc:
-                timing.tile_open_s += time.perf_counter() - t_open
-                for feature_idx in candidate_indices:
-                    errors[int(feature_idx)].append(f"Could not open {tile_path}: {short_error(exc)}")
-                continue
-            timing.tile_open_s += time.perf_counter() - t_open
-
-            timing.tiles_opened += 1
-            timing.laz_bytes_seen += tile_size
-            opened_tile_paths.add(tile_path)
-            timing.unique_tiles_opened = len(opened_tile_paths)
-
-            with reader_context as reader:
-                chunk_iterator = reader.chunk_iterator(chunk_size)
-                while True:
-                    t0 = time.perf_counter()
-                    try:
-                        chunk = next(chunk_iterator)
-                    except StopIteration:
-                        timing.chunk_read_s += time.perf_counter() - t0
-                        break
-                    timing.chunk_read_s += time.perf_counter() - t0
-                    timing.chunks += 1
-                    t0 = time.perf_counter()
-                    xs = np.asarray(chunk.x, dtype=np.float64)
-                    ys = np.asarray(chunk.y, dtype=np.float64)
-                    timing.points_read += int(xs.size)
-                    if xs.size == 0:
-                        continue
-                    zs = np.asarray(chunk.z, dtype=np.float64)
-                    timing.chunk_coord_extract_s += time.perf_counter() - t0
-
-                    t0 = time.perf_counter()
-                    chunk_minx = float(xs.min())
-                    chunk_miny = float(ys.min())
-                    chunk_maxx = float(xs.max())
-                    chunk_maxy = float(ys.max())
-                    active_mask = (
-                        (feature_minx[candidate_indices] <= chunk_maxx)
-                        & (feature_maxx[candidate_indices] >= chunk_minx)
-                        & (feature_miny[candidate_indices] <= chunk_maxy)
-                        & (feature_maxy[candidate_indices] >= chunk_miny)
-                    )
-                    active_feature_indices = candidate_indices[active_mask]
-                    active_count = int(active_feature_indices.size)
-                    timing.active_features_total += active_count
-                    timing.active_features_max = max(timing.active_features_max, active_count)
-                    timing.chunk_feature_cull_s += time.perf_counter() - t0
-
-                    eligible_feature_indices = [
-                        int(feature_idx)
-                        for feature_idx in active_feature_indices
-                        if not accumulators[int(feature_idx)].exceeded_limit
-                    ]
-                    if not eligible_feature_indices:
-                        continue
-
-                    if executor is None or len(eligible_feature_indices) == 1:
-                        selection_results = [
-                            select_feature_points(feature_idx, features[feature_idx], xs, ys)
-                            for feature_idx in eligible_feature_indices
-                        ]
-                    else:
-                        futures = [
-                            executor.submit(select_feature_points, feature_idx, features[feature_idx], xs, ys)
-                            for feature_idx in eligible_feature_indices
-                        ]
-                        selection_results = [future.result() for future in futures]
-
-                    for feature_idx, selected_idx, local_timing in selection_results:
-                        merge_timing_stats(timing, local_timing)
-                        timing.points_selected += int(selected_idx.size)
-                        accumulators[feature_idx].add(
-                            xs,
-                            ys,
-                            zs,
-                            selected_idx,
-                            max_points_per_underpass,
-                        )
-    finally:
-        if executor is not None:
-            executor.shutdown()
+    stream_points_for_features(
+        tile_to_feature_indices,
+        features,
+        sink,
+        chunk_size,
+        timing,
+        pip_workers=pip_workers,
+        open_options=open_options,
+        read_z=True,
+        skip_feature=should_skip,
+        record_error=record_error,
+    )
 
 
 def estimate_batch_results(
@@ -1102,16 +1085,43 @@ def process_batch(
     args: argparse.Namespace,
 ) -> tuple[list[HeightResult], TimingStats]:
     timing = TimingStats()
-    prepared_records, features, crop_geometries, feature_tile_paths, early_results = build_batch_inputs(
+    prepared_records, features, crop_geometries, feature_tile_paths, crop_paths, early_results = build_batch_inputs(
         records,
         tile_index,
         args.resolution,
         args.polygon_buffer,
+        args,
     )
     accumulators = [PointAccumulator() for _ in features]
     errors: list[list[str]] = [[] for _ in features]
+    cached_feature_indices: set[int] = set()
+    writer_sink: LasWriterSink | None = None
 
     try:
+        if args.crop_output_dir is not None and args.reuse_cropped:
+            for feature_idx, crop_path in enumerate(crop_paths):
+                if crop_path is None or not crop_path.is_file():
+                    continue
+                try:
+                    read_cached_crop_points(
+                        crop_path,
+                        accumulators[feature_idx],
+                        args.max_points_per_underpass,
+                        args.chunk_size,
+                        laz_open_options(args, "xyz"),
+                        timing,
+                    )
+                    cached_feature_indices.add(feature_idx)
+                except Exception as exc:
+                    errors[feature_idx].append(f"Could not read cached crop {crop_path}: {short_error(exc)}")
+
+        if args.crop_output_dir is not None and args.write_cropped:
+            writer_sink = LasWriterSink(features, normalize_point_format=True, atomic=True)
+
+        source_open_options = laz_open_options(
+            args,
+            "all" if writer_sink is not None else args.decompression,
+        )
         stream_points_for_batch(
             features,
             feature_tile_paths,
@@ -1120,8 +1130,10 @@ def process_batch(
             args.chunk_size,
             args.max_points_per_underpass,
             args.pip_workers,
-            laz_open_options(args),
+            source_open_options,
             timing,
+            writer_sink=writer_sink,
+            cached_feature_indices=cached_feature_indices,
         )
         t0 = time.perf_counter()
         results = early_results + estimate_batch_results(
@@ -1138,6 +1150,8 @@ def process_batch(
         )
         timing.height_estimation_s += time.perf_counter() - t0
     finally:
+        if writer_sink is not None:
+            writer_sink.close()
         for feature in features:
             feature.close()
 
@@ -1275,6 +1289,11 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("--min-points cannot be negative")
     if args.max_points_per_underpass <= 0:
         args.max_points_per_underpass = None
+    if args.crop_output_dir is None:
+        args.reuse_cropped = False
+        args.write_cropped = False
+    elif args.write_cropped:
+        args.crop_output_dir.mkdir(parents=True, exist_ok=True)
     if args.within_index_extent:
         args.bbox = index_extent(args.index, args.index_layer)
         print(
@@ -1325,6 +1344,13 @@ def main(argv: list[str] | None = None) -> int:
         f"using {args.grid_cell_size:g} m grid cells and max {args.batch_size} underpasses per batch"
     )
     print(f"LAZ backend: {args.laz_backend}; decompression: {args.decompression}")
+    if args.crop_output_dir is not None:
+        source_decompression = "all" if args.write_cropped else args.decompression
+        print(
+            f"Cropped point cloud cache: {args.crop_output_dir} "
+            f"(reuse={args.reuse_cropped}, write={args.write_cropped}, "
+            f"source_decompression={source_decompression})"
+        )
     print(f"Batch workers: {args.batch_workers}")
     print(f"Point-in-polygon workers per batch: {args.pip_workers}")
     print(f"Height estimation workers per batch: {args.height_workers}")

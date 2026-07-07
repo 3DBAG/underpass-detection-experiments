@@ -10,6 +10,7 @@ The repository also includes a streaming crop script that reads a LAS/LAZ point 
 - `src/capi.zig`: C ABI for Python and other consumers
 - `python/zigpip/bindings.py`: NumPy + `ctypes` wrapper
 - `scripts/crop_las_by_polygons.py`: LAS/LAZ crop workflow
+- `../tests/convert_cropped_to_3dtiles.py`: convert cropped LAS/LAZ files to 3D Tiles 1.1
 - `scripts/bench_median.py`: aggregate repeated benchmark runs into a median report
 - `scripts/plot_bench.py`: render C vs Zig benchmark charts
 - `flake.nix`: development shell with Zig and Python GIS/LAS dependencies
@@ -74,6 +75,23 @@ The crop script prints a timing summary at the end, including:
 - feature preparation (`transform`, `buffer`, `prepare`, `write_gpkg`)
 - crop-time work (`coords`, `feature_cull`, `pip`, `write`)
 - counters such as chunks processed, active features per chunk, and candidate/hit totals
+
+## 3D Tiles Conversion
+
+Convert cropped point clouds to 3D Tiles 1.1:
+
+```bash
+nix develop -c python ../tests/convert_cropped_to_3dtiles.py \
+  /data2/rypeters/amsterdam_data/2025/cropped \
+  --out /data2/rypeters/amsterdam_data/2025/cropped/3dtiles-v1.1 \
+  --overwrite
+```
+
+The script calls the `py3dtiles` Python API directly, so it handles many input
+files without hitting shell argument length limits. By default it only includes
+crop-cache filenames containing `__`, which avoids accidentally converting raw
+source tiles. Use `--glob` or `--all-point-clouds` to
+override that filter.
 
 ## Python Binding
 
