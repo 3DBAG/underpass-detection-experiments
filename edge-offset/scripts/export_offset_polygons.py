@@ -7,7 +7,6 @@ from psycopg.sql import Identifier
 
 from edge_offset.postgis import write_offset_polygons_from_db
 
-DEFAULT_EDGES_TABLE = Identifier("underpasses", "edges")
 ENV_PATH = Path(".env")
 
 
@@ -22,6 +21,10 @@ def main() -> int:
     if not distance_value:
         raise ValueError("EDGE_OFFSET_OFFSET_DISTANCE must be set.")
 
+    edges_table = Identifier(
+        *environ.get("EDGE_OFFSET_EDGES_TABLE", "underpasses.edges").split(".")
+    )
+
     connection = connect(
         host=_require_env("EDGE_OFFSET_DB_HOST"),
         port=int(_require_env("EDGE_OFFSET_DB_PORT")),
@@ -32,7 +35,7 @@ def main() -> int:
     with connection:
         write_offset_polygons_from_db(
             connection,
-            edges_table=DEFAULT_EDGES_TABLE,
+            edges_table=edges_table,
             distance=float(distance_value),
             output_path=Path(output_path_value),
         )
