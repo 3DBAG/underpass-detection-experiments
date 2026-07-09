@@ -20,6 +20,11 @@
         let
           pkgs = nixpkgs.legacyPackages.${system};
           py = pkgs.python312Packages;
+          py3dtilesWithLas = py.py3dtiles.overridePythonAttrs (old: {
+            dependencies = (old.dependencies or [ ]) ++ [ py.laspy ];
+            doCheck = false;
+            doInstallCheck = false;
+          });
         in
         {
           default = pkgs.mkShell {
@@ -31,6 +36,7 @@
               py.numpy
               py.psycopg
               py.shapely
+              py3dtilesWithLas
               pkgs.uv
               pkgs.zig
               pkgs.zls

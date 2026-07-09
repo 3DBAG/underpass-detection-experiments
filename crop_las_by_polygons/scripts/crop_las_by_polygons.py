@@ -2,15 +2,18 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sqlite3
 import struct
 import sys
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
-from typing import Iterable
+from typing import Iterable, Protocol
 
 import laspy
 import numpy as np
@@ -37,6 +40,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--id-field", default="identificatie", help="Feature attribute used in output file names")
     parser.add_argument("--resolution", type=int, default=64, help="Prepared grid resolution per ring")
     parser.add_argument("--chunk-size", type=int, default=1_000_000, help="LAS reader chunk size")
+    parser.add_argument("--pip-workers", type=int, default=1, help="Thread workers for point-in-polygon selection")
+    parser.add_argument(
+        "--laz-backend",
+        choices=("auto", "lazrs-parallel", "lazrs", "laszip"),
+        default="auto",
+        help="LAZ decompression backend",
+    )
     parser.add_argument("--reproject-polygons", action="store_true", help="Reproject polygons into the LAS CRS when both CRS definitions are available")
     parser.add_argument("--output-extension", default=".laz", help="Output suffix, usually .laz or .las")
     return parser.parse_args()
@@ -427,6 +437,338 @@ class PreparedFeature:
         return result
 
 
+class PointSelectionSink(Protocol):
+    def add(
+        self,
+        feature_idx: int,
+        chunk,
+        xs: np.ndarray,
+        ys: np.ndarray,
+        zs: np.ndarray | None,
+        selected_idx: np.ndarray,
+        source_header: laspy.LasHeader,
+    ) -> None:
+        ...
+
+
+class LasWriterSink:
+    def __init__(
+        self,
+        features: list[PreparedFeature],
+        base_header: laspy.LasHeader | None = None,
+        create_empty: bool = False,
+        normalize_point_format: bool = False,
+        atomic: bool = False,
+    ) -> None:
+        self.features = features
+        self.base_header = base_header
+        self.normalize_point_format = normalize_point_format
+        self.atomic = atomic
+        self.writers: list[laspy.LasWriter | None] = [None] * len(features)
+        self.write_paths: list[Path | None] = [None] * len(features)
+        self.counts = [0] * len(features)
+
+        if create_empty:
+            if base_header is None:
+                raise ValueError("base_header is required when create_empty=True")
+            for feature_idx in range(len(features)):
+                self._open_writer(feature_idx, base_header)
+
+    def _open_writer(self, feature_idx: int, source_header: laspy.LasHeader) -> laspy.LasWriter:
+        writer = self.writers[feature_idx]
+        if writer is None:
+            feature = self.features[feature_idx]
+            feature.output_path.parent.mkdir(parents=True, exist_ok=True)
+            if self.normalize_point_format:
+                header = self._normalized_header(source_header)
+            else:
+                header = (self.base_header or source_header).copy()
+            write_path = feature.output_path
+            if self.atomic:
+                write_path = feature.output_path.with_name(
+                    f"{feature.output_path.name}.tmp-{os.getpid()}-{feature_idx}"
+                )
+                if write_path.exists():
+                    write_path.unlink()
+            writer = laspy.open(write_path, mode="w", header=header)
+            self.writers[feature_idx] = writer
+            self.write_paths[feature_idx] = write_path
+        return writer
+
+    def _normalized_header(self, source_header: laspy.LasHeader) -> laspy.LasHeader:
+        header = laspy.LasHeader(point_format=3, version="1.2")
+        header.scales = np.asarray(source_header.scales, dtype=np.float64).copy()
+        header.offsets = np.asarray(source_header.offsets, dtype=np.float64).copy()
+        try:
+            crs = source_header.parse_crs()
+        except Exception:
+            crs = None
+        if crs is not None:
+            try:
+                header.add_crs(crs)
+            except Exception:
+                pass
+        return header
+
+    def add(
+        self,
+        feature_idx: int,
+        chunk,
+        xs: np.ndarray,
+        ys: np.ndarray,
+        zs: np.ndarray | None,
+        selected_idx: np.ndarray,
+        source_header: laspy.LasHeader,
+    ) -> None:
+        if selected_idx.size == 0:
+            return
+        writer = self._open_writer(feature_idx, source_header)
+        if self.normalize_point_format:
+            writer.write_points(self._normalized_points(writer.header, chunk, xs, ys, zs, selected_idx))
+        else:
+            writer.write_points(chunk[selected_idx])
+        self.counts[feature_idx] += int(selected_idx.size)
+
+    def _normalized_points(
+        self,
+        header: laspy.LasHeader,
+        chunk,
+        xs: np.ndarray,
+        ys: np.ndarray,
+        zs: np.ndarray | None,
+        selected_idx: np.ndarray,
+    ):
+        chunk_header = header.copy()
+        chunk_header.point_count = 0
+        las = laspy.LasData(chunk_header)
+        las.x = xs[selected_idx]
+        las.y = ys[selected_idx]
+        las.z = (zs if zs is not None else np.asarray(chunk.z, dtype=np.float64))[selected_idx]
+
+        dimension_names = set(chunk.point_format.dimension_names)
+        for name in ("red", "green", "blue"):
+            if name in dimension_names:
+                setattr(las, name, np.asarray(chunk[name])[selected_idx])
+
+        return las.points
+
+    def close(self) -> None:
+        for feature_idx, writer in enumerate(self.writers):
+            if writer is not None:
+                writer.close()
+                write_path = self.write_paths[feature_idx]
+                output_path = self.features[feature_idx].output_path
+                if self.atomic and write_path is not None and write_path != output_path:
+                    write_path.replace(output_path)
+
+    def counts_by_identifier(self) -> dict[str, int]:
+        return {
+            feature.identifier: count
+            for feature, count in zip(self.features, self.counts, strict=True)
+        }
+
+
+def merge_timing_stats(target: TimingStats, source: TimingStats) -> None:
+    target.feature_transform_s += source.feature_transform_s
+    target.feature_buffer_s += source.feature_buffer_s
+    target.feature_prepare_s += source.feature_prepare_s
+    target.feature_write_gpkg_s += source.feature_write_gpkg_s
+    target.tile_open_s += source.tile_open_s
+    target.chunk_read_s += source.chunk_read_s
+    target.chunk_coord_extract_s += source.chunk_coord_extract_s
+    target.chunk_feature_cull_s += source.chunk_feature_cull_s
+    target.pip_select_s += source.pip_select_s
+    target.point_write_s += source.point_write_s
+    target.height_estimation_s += source.height_estimation_s
+    target.db_update_s += source.db_update_s
+    target.chunks += source.chunks
+    target.tiles_opened += source.tiles_opened
+    target.unique_tiles_opened += source.unique_tiles_opened
+    target.laz_bytes_seen += source.laz_bytes_seen
+    target.points_read += source.points_read
+    target.points_selected += source.points_selected
+    target.active_features_total += source.active_features_total
+    target.active_features_max = max(target.active_features_max, source.active_features_max)
+    target.feature_tests += source.feature_tests
+    target.feature_candidate_points_total += source.feature_candidate_points_total
+    target.feature_hits_total += source.feature_hits_total
+    target.component_tests += source.component_tests
+    target.component_candidate_points_total += source.component_candidate_points_total
+    target.component_hits_total += source.component_hits_total
+
+
+def select_feature_points(
+    feature_idx: int,
+    feature: PreparedFeature,
+    xs: np.ndarray,
+    ys: np.ndarray,
+) -> tuple[int, np.ndarray, TimingStats]:
+    local_timing = TimingStats()
+    t0 = perf_counter()
+    selected_idx = feature.select_indices(xs, ys, local_timing)
+    local_timing.pip_select_s += perf_counter() - t0
+    return feature_idx, selected_idx, local_timing
+
+
+def las_open_options(laz_backend: str = "auto", decompression: str = "all") -> dict[str, object]:
+    options: dict[str, object] = {}
+
+    backend_by_name = {
+        "lazrs-parallel": laspy.LazBackend.LazrsParallel,
+        "lazrs": laspy.LazBackend.Lazrs,
+        "laszip": laspy.LazBackend.Laszip,
+    }
+    if laz_backend != "auto":
+        options["laz_backend"] = backend_by_name[laz_backend]
+
+    if decompression == "xyz":
+        options["decompression_selection"] = (
+            laspy.DecompressionSelection.XY_RETURNS_CHANNEL
+            | laspy.DecompressionSelection.Z
+        )
+
+    return options
+
+
+def stream_points_for_features(
+    tile_to_feature_indices: dict[Path, list[int]],
+    features: list[PreparedFeature],
+    sink: PointSelectionSink,
+    chunk_size: int,
+    timing: TimingStats,
+    *,
+    pip_workers: int = 1,
+    open_options: dict[str, object] | None = None,
+    read_z: bool = False,
+    skip_feature: Callable[[int], bool] | None = None,
+    record_error: Callable[[int, str], None] | None = None,
+) -> None:
+    if not tile_to_feature_indices:
+        return
+
+    open_options = open_options or {}
+    feature_minx = np.fromiter((feature.bbox[0] for feature in features), dtype=np.float64, count=len(features))
+    feature_miny = np.fromiter((feature.bbox[1] for feature in features), dtype=np.float64, count=len(features))
+    feature_maxx = np.fromiter((feature.bbox[2] for feature in features), dtype=np.float64, count=len(features))
+    feature_maxy = np.fromiter((feature.bbox[3] for feature in features), dtype=np.float64, count=len(features))
+
+    executor = ThreadPoolExecutor(max_workers=pip_workers) if pip_workers > 1 else None
+    opened_tile_paths: set[Path] = set()
+    initial_unique_tiles_opened = timing.unique_tiles_opened
+    try:
+        for tile_path, candidate_indices_list in sorted(tile_to_feature_indices.items(), key=lambda item: str(item[0])):
+            candidate_indices = np.asarray(candidate_indices_list, dtype=np.int64)
+            if skip_feature is not None:
+                candidate_indices = np.asarray(
+                    [int(feature_idx) for feature_idx in candidate_indices if not skip_feature(int(feature_idx))],
+                    dtype=np.int64,
+                )
+                if candidate_indices.size == 0:
+                    continue
+
+            if not tile_path.is_file():
+                if record_error is not None:
+                    for feature_idx in candidate_indices:
+                        record_error(int(feature_idx), f"Missing LAZ tile: {tile_path}")
+                continue
+
+            try:
+                tile_size = tile_path.stat().st_size
+            except OSError:
+                tile_size = 0
+
+            t_open = perf_counter()
+            try:
+                reader_context = laspy.open(tile_path, **open_options)
+            except Exception as exc:
+                timing.tile_open_s += perf_counter() - t_open
+                if record_error is not None:
+                    error = str(exc) or exc.__class__.__name__
+                    for feature_idx in candidate_indices:
+                        record_error(int(feature_idx), f"Could not open {tile_path}: {error[:1000]}")
+                continue
+            timing.tile_open_s += perf_counter() - t_open
+
+            timing.tiles_opened += 1
+            timing.laz_bytes_seen += tile_size
+            opened_tile_paths.add(tile_path)
+            timing.unique_tiles_opened = initial_unique_tiles_opened + len(opened_tile_paths)
+
+            with reader_context as reader:
+                chunk_iterator = reader.chunk_iterator(chunk_size)
+                while True:
+                    t0 = perf_counter()
+                    try:
+                        chunk = next(chunk_iterator)
+                    except StopIteration:
+                        timing.chunk_read_s += perf_counter() - t0
+                        break
+                    timing.chunk_read_s += perf_counter() - t0
+                    timing.chunks += 1
+
+                    t0 = perf_counter()
+                    xs = np.asarray(chunk.x, dtype=np.float64)
+                    ys = np.asarray(chunk.y, dtype=np.float64)
+                    timing.points_read += int(xs.size)
+                    if xs.size == 0:
+                        continue
+                    zs = np.asarray(chunk.z, dtype=np.float64) if read_z else None
+                    timing.chunk_coord_extract_s += perf_counter() - t0
+
+                    t0 = perf_counter()
+                    chunk_minx = float(xs.min())
+                    chunk_miny = float(ys.min())
+                    chunk_maxx = float(xs.max())
+                    chunk_maxy = float(ys.max())
+                    active_mask = (
+                        (feature_minx[candidate_indices] <= chunk_maxx)
+                        & (feature_maxx[candidate_indices] >= chunk_minx)
+                        & (feature_miny[candidate_indices] <= chunk_maxy)
+                        & (feature_maxy[candidate_indices] >= chunk_miny)
+                    )
+                    active_feature_indices = candidate_indices[active_mask]
+                    if skip_feature is not None:
+                        active_feature_indices = np.asarray(
+                            [
+                                int(feature_idx)
+                                for feature_idx in active_feature_indices
+                                if not skip_feature(int(feature_idx))
+                            ],
+                            dtype=np.int64,
+                        )
+                    active_count = int(active_feature_indices.size)
+                    timing.active_features_total += active_count
+                    timing.active_features_max = max(timing.active_features_max, active_count)
+                    timing.chunk_feature_cull_s += perf_counter() - t0
+                    if active_feature_indices.size == 0:
+                        continue
+
+                    if executor is None or active_feature_indices.size == 1:
+                        selection_results = [
+                            select_feature_points(int(feature_idx), features[int(feature_idx)], xs, ys)
+                            for feature_idx in active_feature_indices
+                        ]
+                    else:
+                        futures = [
+                            executor.submit(select_feature_points, int(feature_idx), features[int(feature_idx)], xs, ys)
+                            for feature_idx in active_feature_indices
+                        ]
+                        selection_results = [future.result() for future in futures]
+
+                    for feature_idx, selected_idx, local_timing in selection_results:
+                        merge_timing_stats(timing, local_timing)
+                        if selected_idx.size == 0:
+                            continue
+
+                        t0 = perf_counter()
+                        sink.add(feature_idx, chunk, xs, ys, zs, selected_idx, reader.header)
+                        timing.point_write_s += perf_counter() - t0
+                        timing.points_selected += int(selected_idx.size)
+    finally:
+        if executor is not None:
+            executor.shutdown()
+
+
 def prepare_feature(geometry, identifier: str, output_path: Path, resolution: int) -> PreparedFeature:
     components: list[PreparedComponent] = []
     for polygon in iter_polygons(geometry):
@@ -650,63 +992,35 @@ def crop_point_cloud(
     features: list[PreparedFeature],
     chunk_size: int,
     timing: TimingStats,
+    *,
+    pip_workers: int = 1,
+    open_options: dict[str, object] | None = None,
 ) -> dict[str, int]:
-    counts = [0] * len(features)
-    writers: list[laspy.LasWriter] = []
-    feature_minx = np.fromiter((feature.bbox[0] for feature in features), dtype=np.float64, count=len(features))
-    feature_miny = np.fromiter((feature.bbox[1] for feature in features), dtype=np.float64, count=len(features))
-    feature_maxx = np.fromiter((feature.bbox[2] for feature in features), dtype=np.float64, count=len(features))
-    feature_maxy = np.fromiter((feature.bbox[3] for feature in features), dtype=np.float64, count=len(features))
-
+    sink = LasWriterSink(features, base_header=base_header, create_empty=True)
+    tile_to_feature_indices = {
+        input_las: list(range(len(features)))
+        for input_las in input_las_paths
+    }
     try:
-        for feature in features:
-            writers.append(laspy.open(feature.output_path, mode="w", header=base_header.copy()))
-
-        for input_las in input_las_paths:
-            with laspy.open(input_las) as reader:
-                for chunk in reader.chunk_iterator(chunk_size):
-                    timing.chunks += 1
-                    t0 = perf_counter()
-                    xs = np.asarray(chunk.x, dtype=np.float64)
-                    ys = np.asarray(chunk.y, dtype=np.float64)
-                    timing.chunk_coord_extract_s += perf_counter() - t0
-
-                    t0 = perf_counter()
-                    chunk_minx = float(xs.min())
-                    chunk_miny = float(ys.min())
-                    chunk_maxx = float(xs.max())
-                    chunk_maxy = float(ys.max())
-                    active_feature_idx = np.flatnonzero(
-                        (feature_minx <= chunk_maxx)
-                        & (feature_maxx >= chunk_minx)
-                        & (feature_miny <= chunk_maxy)
-                        & (feature_maxy >= chunk_miny)
-                    )
-                    active_count = int(active_feature_idx.size)
-                    timing.active_features_total += active_count
-                    timing.active_features_max = max(timing.active_features_max, active_count)
-                    timing.chunk_feature_cull_s += perf_counter() - t0
-
-                    for feature_idx in active_feature_idx:
-                        feature = features[int(feature_idx)]
-                        t0 = perf_counter()
-                        selected_idx = feature.select_indices(xs, ys, timing)
-                        timing.pip_select_s += perf_counter() - t0
-                        if selected_idx.size == 0:
-                            continue
-
-                        t0 = perf_counter()
-                        writers[int(feature_idx)].write_points(chunk[selected_idx])
-                        timing.point_write_s += perf_counter() - t0
-                        counts[int(feature_idx)] += int(selected_idx.size)
+        stream_points_for_features(
+            tile_to_feature_indices,
+            features,
+            sink,
+            chunk_size,
+            timing,
+            pip_workers=pip_workers,
+            open_options=open_options,
+        )
     finally:
-        for writer in writers:
-            writer.close()
+        sink.close()
 
-    return {feature.identifier: count for feature, count in zip(features, counts, strict=True)}
+    return sink.counts_by_identifier()
 
 
 def main(args: argparse.Namespace) -> int:
+    if args.pip_workers <= 0:
+        raise ValueError("--pip-workers must be positive")
+
     args.output_dir.mkdir(parents=True, exist_ok=True)
     output_extension = args.output_extension if args.output_extension.startswith(".") else f".{args.output_extension}"
     timing = TimingStats()
@@ -728,7 +1042,15 @@ def main(args: argparse.Namespace) -> int:
         raise RuntimeError("No polygon features were prepared")
 
     try:
-        counts = crop_point_cloud(args.input_las, base_header, features, args.chunk_size, timing)
+        counts = crop_point_cloud(
+            args.input_las,
+            base_header,
+            features,
+            args.chunk_size,
+            timing,
+            pip_workers=args.pip_workers,
+            open_options=las_open_options(args.laz_backend, "all"),
+        )
     finally:
         for feature in features:
             feature.close()
