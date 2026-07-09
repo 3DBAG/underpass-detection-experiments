@@ -29,10 +29,7 @@ from edge_classification.postgis import (
 
 
 ENV_PATH = Path(".env")
-GEOMETRIES_TABLE = "underpasses.geometries"
-BAG_BGT_JOIN_TABLE = "underpasses.bag_bgt_join"
-BAG_ADJACENCY_TABLE = "building_types.bag_adjacency_4"
-CHUNK_SIZE = 1000  # Process 100 underpasses per chunk
+CHUNK_SIZE = 1000
 
 
 def _load_dotenv(path: Path) -> None:
@@ -83,12 +80,12 @@ def setup_edges_table(db_params: Dict[str, str], edges_table: str) -> None:
             print("✓ Table created")
 
 
-def get_underpass_chunks(db_params: Dict[str, str], edges_table: str) -> List[List[int]]:
+def get_underpass_chunks(db_params: Dict[str, str], geometries_table: str, edges_table: str) -> List[List[int]]:
     """Get chunks of unprocessed underpass IDs."""
     with connect(**db_params) as conn:
         underpass_ids = get_unprocessed_underpass_ids(
             conn,
-            geometries_table=GEOMETRIES_TABLE,
+            geometries_table=geometries_table,
             edges_table=edges_table,
         )
     
@@ -237,6 +234,21 @@ def main() -> int:
     snap_tolerance = float(environ.get("EDGE_CLASSIFICATION_SNAP_TOLERANCE", "0.03"))
     max_workers = int(environ.get("EDGE_CLASSIFICATION_MAX_WORKERS", "4"))
     edges_table = environ.get("EDGE_CLASSIFICATION_EDGES_TABLE", "underpasses.edges")
+    geometries_table = environ.get(
+        "EDGE_CLASSIFICATION_GEOMETRIES_TABLE", "underpasses.geometries"
+    )
+    bag_bgt_join_table = environ.get(
+        "EDGE_CLASSIFICATION_BAG_BGT_JOIN_TABLE", "underpasses.bag_bgt_join"
+    )
+    bag_adjacency_table = environ.get(
+        "EDGE_CLASSIFICATION_BAG_ADJACENCY_TABLE", "building_types.bag_adjacency_4"
+    )
+    geometries_cache_table = environ.get(
+        "EDGE_CLASSIFICATION_GEOMETRIES_CACHE_TABLE", "underpasses.geometries_cache"
+    )
+    adjacency_cache_table = environ.get(
+        "EDGE_CLASSIFICATION_ADJACENCY_CACHE_TABLE", "underpasses.adjacency_cache"
+    )
     
     # Database connection parameters
     db_params = {
@@ -262,25 +274,25 @@ def main() -> int:
     print(f"Output table: {edges_table}")
     
     # Create cache tables (one-time expensive JOINs)
-    adjacency_cache_table = None
-    geometries_cache_table = None
-    
+    adjacency_cache_table_name = None
+    geometries_cache_table_name = None
+
     with connect(**db_params) as conn:
         # Create geometries cache (underpass + BGT JOIN)
-        geometries_cache_table = create_geometries_cache_table(
+        geometries_cache_table_name = create_geometries_cache_table(
             conn,
-            geometries_table=GEOMETRIES_TABLE,
-            bag_bgt_join_table=BAG_BGT_JOIN_TABLE,
-            cache_table_name="underpasses.geometries_cache",
+            geometries_table=geometries_table,
+            bag_bgt_join_table=bag_bgt_join_table,
+            cache_table_name=geometries_cache_table,
         )
         print()
         
         # Create adjacency cache (adjacency + BAG JOIN)
-        adjacency_cache_table = create_adjacency_cache_table(
+        adjacency_cache_table_name = create_adjacency_cache_table(
             conn,
-            bag_adjacency_table=BAG_ADJACENCY_TABLE,
-            bag_bgt_table=BAG_BGT_JOIN_TABLE,
-            cache_table_name="underpasses.adjacency_cache",
+            bag_adjacency_table=bag_adjacency_table,
+            bag_bgt_table=bag_bgt_join_table,
+            cache_table_name=adjacency_cache_table,
         )
     
     print("✓ Cache tables created")
@@ -288,7 +300,7 @@ def main() -> int:
     print()
     
     # Get chunks to process
-    underpass_chunks = get_underpass_chunks(db_params, edges_table)
+    underpass_chunks = get_underpass_chunks(db_params, geometries_table, edges_table)
     
     if not underpass_chunks:
         print("✓ All underpasses have been processed!")
@@ -317,8 +329,8 @@ def main() -> int:
                 snap_tolerance,
                 edges_table,
                 db_params,
-                adjacency_cache_table,
-                geometries_cache_table,
+                adjacency_cache_table_name,
+                geometries_cache_table_name,
             ): (chunk, chunk_num + 1)
             for chunk_num, chunk in enumerate(underpass_chunks)
         }
@@ -367,10 +379,10 @@ def main() -> int:
     # Cleanup: drop the cache tables
     print()
     with connect(**db_params) as conn:
-        if geometries_cache_table:
-            drop_geometries_cache_table(conn, geometries_cache_table)
-        if adjacency_cache_table:
-            drop_adjacency_cache_table(conn, adjacency_cache_table)
+        if geometries_cache_table_name:
+            drop_geometries_cache_table(conn, geometries_cache_table_name)
+        if adjacency_cache_table_name:
+            drop_adjacency_cache_table(conn, adjacency_cache_table_name)
     
     return 0 if total_failed == 0 else 1
 
