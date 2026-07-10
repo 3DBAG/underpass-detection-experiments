@@ -28,6 +28,13 @@ bool is_cityjsonseq_path(std::string_view path);
 
 ssize_t resolve_cityjson_object_index(CityJSONHandle cj, std::string_view feature_id);
 
+bool cityjson_lod22_first_vertex(
+    CityJSONHandle cj,
+    size_t object_index,
+    double& x,
+    double& y,
+    double& z);
+
 bool load_cityjson_object_mesh(
     CityJSONHandle cj,
     size_t object_index,

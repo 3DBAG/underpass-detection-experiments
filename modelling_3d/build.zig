@@ -132,6 +132,10 @@ pub fn build(b: *std.Build) void {
         .flags = cpp_flags,
     });
     exe.root_module.addCSourceFile(.{
+        .file = b.path("src/BooleanObjWriter.cpp"),
+        .flags = cpp_flags,
+    });
+    exe.root_module.addCSourceFile(.{
         .file = b.path("src/MeshConversion.cpp"),
         .flags = cpp_flags,
     });

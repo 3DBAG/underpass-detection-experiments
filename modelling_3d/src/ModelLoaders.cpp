@@ -336,6 +336,23 @@ bool append_ringed_geometry_faces(
     return added_faces;
 }
 
+ssize_t find_cityjson_lod22_solid_geometry(CityJSONHandle cj, size_t object_index) {
+    const size_t geometry_count = cityjson_get_geometry_count(cj, object_index);
+    for (size_t geometry_index = 0; geometry_index < geometry_count; ++geometry_index) {
+        if (cityjson_get_geometry_type(cj, object_index, geometry_index) != CITYJSON_SOLID) {
+            continue;
+        }
+
+        const char* lod_ptr = nullptr;
+        size_t lod_len = 0;
+        if (cityjson_get_geometry_lod(cj, object_index, geometry_index, &lod_ptr, &lod_len) == 1 &&
+            lod_ptr != nullptr && std::string_view(lod_ptr, lod_len) == "2.2") {
+            return static_cast<ssize_t>(geometry_index);
+        }
+    }
+    return -1;
+}
+
 } // namespace
 
 bool is_fcb_path(const std::string_view path) {
@@ -374,6 +391,30 @@ ssize_t resolve_cityjson_object_index(CityJSONHandle cj, std::string_view featur
     return cityjson_get_object_index(cj, feature_id_str.c_str());
 }
 
+bool cityjson_lod22_first_vertex(
+    CityJSONHandle cj,
+    size_t object_index,
+    double& x,
+    double& y,
+    double& z) {
+    if (cj == nullptr) {
+        return false;
+    }
+    const ssize_t geometry_index = find_cityjson_lod22_solid_geometry(cj, object_index);
+    if (geometry_index < 0) {
+        return false;
+    }
+    const size_t geometry = static_cast<size_t>(geometry_index);
+    const double* vertices = cityjson_get_vertices(cj, object_index, geometry);
+    if (vertices == nullptr || cityjson_get_vertex_count(cj, object_index, geometry) == 0) {
+        return false;
+    }
+    x = vertices[0];
+    y = vertices[1];
+    z = vertices[2];
+    return true;
+}
+
 bool load_cityjson_object_mesh(
     CityJSONHandle cj,
     size_t object_index,
@@ -387,25 +428,7 @@ bool load_cityjson_object_mesh(
         return false;
     }
 
-    ssize_t geometry_index = -1;
-    size_t geom_count = cityjson_get_geometry_count(cj, object_index);
-    for (size_t geom_idx = 0; geom_idx < geom_count; ++geom_idx) {
-        uint8_t geom_type = cityjson_get_geometry_type(cj, object_index, geom_idx);
-        if (geom_type != CITYJSON_SOLID) {
-            continue;
-        }
-
-        const char* lod_ptr = nullptr;
-        size_t lod_len = 0;
-        if (cityjson_get_geometry_lod(cj, object_index, geom_idx, &lod_ptr, &lod_len) != 1) {
-            continue;
-        }
-        std::string_view lod = (lod_ptr != nullptr) ? std::string_view(lod_ptr, lod_len) : std::string_view{};
-        if (lod == "2.2") {
-            geometry_index = static_cast<ssize_t>(geom_idx);
-            break;
-        }
-    }
+    const ssize_t geometry_index = find_cityjson_lod22_solid_geometry(cj, object_index);
     if (geometry_index < 0) {
         return false;
     }

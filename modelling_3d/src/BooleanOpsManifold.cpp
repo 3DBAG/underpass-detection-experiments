@@ -3,6 +3,7 @@
 #include <chrono>
 
 #include "MeshConversion.h"
+#include "MeshProcessingConfig.h"
 
 using Clock = std::chrono::steady_clock;
 
@@ -91,6 +92,17 @@ bool manifold_boolean_difference(
     }
 
     t_conversion_start = Clock::now();
+    result = result.AsOriginal().Simplify(mesh_processing::kCleanupTolerance);
+    if (result.Status() != manifold::Manifold::Error::NoError) {
+        t_conversion_end = Clock::now();
+        if (timing != nullptr) {
+            timing->conversion_ms += t_conversion_end - t_conversion_start;
+        }
+        if (error != nullptr) {
+            *error = ManifoldBooleanError::BooleanFailed;
+        }
+        return false;
+    }
     result_meshgl = result.GetMeshGL();
     t_conversion_end = Clock::now();
     if (timing != nullptr) {

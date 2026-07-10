@@ -86,7 +86,7 @@ With PostgreSQL/PostGIS as OGR source:
   h_underpass identificatie manifold
 ```
 
-Arguments: `<ogr_source> <model_input> <model_output> <height_attr> [id_attr] [method]`
+Arguments: `<ogr_source> <model_input> <model_output> <height_attr> [id_attr] [method] [copy_source_attributes] [boolean_obj_output]`
 
 | Argument | Default | Description |
 |----------|---------|-------------|
@@ -95,7 +95,12 @@ Arguments: `<ogr_source> <model_input> <model_output> <height_attr> [id_attr] [m
 | `model_output` | — | Output path (`.fcb` or `.jsonl`). Use `-` only for FCB stdout. |
 | `height_attr` | — | OGR absolute underpass elevation attribute name |
 | `id_attr` | `identificatie` | OGR Feature ID attribute name. This is used to match with ID of the building models. |
-| `method` | `manifold` | Boolean method: `manifold`, `nef`, `pmp`, or `geogram` |
+| `method` | `pmp` | Boolean method: `manifold`, `nef`, `pmp`, or `geogram` |
+| `copy_source_attributes` | `none` | Copy OGR attributes to `feature`, `parent`, or `none` |
+| `boolean_obj_output` | disabled | Write all feature meshes directly after the boolean operation to one OBJ file in local coordinates |
+
+For example, append `none sample_data/after_boolean.obj` to write the boolean results while keeping source attribute copying disabled. Each feature is stored as a named object in the same OBJ file.
+The local origin is the first vertex of the first matched LoD 2.2 feature and is shared by every object in the OBJ.
 
 ### Converting CityJSON to FlatCityBuf
 
@@ -160,8 +165,10 @@ fcb ser -i sample_data/9-444-728.city.jsonl -o - \
 │   ├── BooleanOpsPMP.cpp      # CGAL PMP corefinement backend
 │   ├── BooleanOpsGeogram.cpp  # Geogram backend
 │   ├── BooleanOpsManifold.cpp # Manifold backend
+│   ├── BooleanObjWriter.cpp   # Combined debug OBJ output
 │   ├── MeshConversion.cpp     # Surface_mesh conversions (exact + MeshGL helpers)
 │   ├── MeshConversion.h
+│   ├── MeshProcessingConfig.h # Shared mesh cleanup settings
 │   ├── ModelLoaders.cpp       # Mesh loaders for FlatCityBuf features
 │   ├── ModelLoaders.h
 │   ├── main.cpp               # Main entry point (FCB streaming pipeline)

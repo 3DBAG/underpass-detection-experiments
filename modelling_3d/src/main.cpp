@@ -2,6 +2,7 @@
 #include <format>
 #include <cmath>
 #include <chrono>
+#include <cstdint>
 #include <exception>
 #include <limits>
 #include <string>
@@ -20,6 +21,7 @@
 
 #include "BooleanOps.h"
 #include "BooleanOpsManifold.h"
+#include "BooleanObjWriter.h"
 #include "MeshConversion.h"
 #include "ModelLoaders.h"
 #include "PolygonalOutput.h"
@@ -409,6 +411,7 @@ struct StreamProcessingContext {
     std::chrono::duration<double, std::milli>& output_write_changed_ms;
     std::chrono::duration<double, std::milli>& output_write_passthrough_ms;
     std::chrono::duration<double, std::milli>& model_stream_read_ms;
+    BooleanObjWriter& boolean_obj_writer;
     std::ostream& log_out;
 };
 
@@ -783,7 +786,6 @@ struct CjseqStreamBackend {
         std::chrono::duration<double, std::milli>& output_write_passthrough_ms,
         const SourceAttributeBuffers& aborted_attributes,
         SourceAttributeTarget output_attribute_target) {
-        (void)next_id;
         (void)matched_indices;
         (void)polygon_features;
         (void)seen_feature;
@@ -792,10 +794,28 @@ struct CjseqStreamBackend {
         (void)output_write_passthrough_ms;
         (void)aborted_attributes;
         (void)output_attribute_target;
-        global_offset_set = true;
-        global_offset_x = 0.0;
-        global_offset_y = 0.0;
-        global_offset_z = 0.0;
+        if (global_offset_set) {
+            return true;
+        }
+
+        CityJSONHandle current_feature_cj = cityjsonseq_current_cityjson(reader);
+        if (current_feature_cj == nullptr) {
+            return true;
+        }
+        const ssize_t object_index_signed = resolve_cityjson_object_index(current_feature_cj, next_id);
+        if (object_index_signed < 0) {
+            return true;
+        }
+
+        const size_t object_index = static_cast<size_t>(object_index_signed);
+        if (cityjson_lod22_first_vertex(
+                current_feature_cj,
+                object_index,
+                global_offset_x,
+                global_offset_y,
+                global_offset_z)) {
+            global_offset_set = true;
+        }
         return true;
     }
 
@@ -990,6 +1010,13 @@ static bool process_stream_features(Backend& backend, StreamProcessingContext& c
 
         if (carve_result.any_succeeded) {
             std::string feature_id_str(next_id);
+            const bool obj_written = carve_result.has_polygonal_result
+                ? ctx.boolean_obj_writer.append(next_id, carve_result.result_surface_mesh)
+                : ctx.boolean_obj_writer.append(next_id, carve_result.result_meshgl);
+            if (!obj_written) {
+                std::cerr << std::format("Warning: failed to append feature '{}' to boolean OBJ", feature_id_str)
+                          << std::endl;
+            }
             SourceAttributeBuffers source_attributes = source_attribute_buffers(
                 ctx.polygon_features,
                 matched_indices,
@@ -1107,7 +1134,7 @@ int main(int argc, char* argv[]) {
 
     if (argc < 5) {
         std::cerr << "Usage: " << argv[0]
-                  << " <ogr_source> <model_input> <model_output> <absolute_underpass_elevation_attribute> [id_attribute] [method] [copy_source_attributes]" << std::endl;
+                  << " <ogr_source> <model_input> <model_output> <absolute_underpass_elevation_attribute> [id_attribute] [method] [copy_source_attributes] [boolean_obj_output]" << std::endl;
         std::cerr << "  model formats: .fcb (FlatCityBuf) or .jsonl (CityJSONSeq)" << std::endl;
         std::cerr << "  id_attribute default: identificatie" << std::endl;
         std::cerr << "  missing absolute underpass elevation falls back to 2.5 m above the local ground reference" << std::endl;
@@ -1117,6 +1144,7 @@ int main(int argc, char* argv[]) {
 #endif
                   << std::endl;
         std::cerr << "  copy_source_attributes: none (default), feature, parent" << std::endl;
+        std::cerr << "  boolean_obj_output: optional OBJ file containing all meshes directly after boolean operations" << std::endl;
         std::cerr << "  use '-' as input to read FCB from stdin" << std::endl;
         std::cerr << "  use '-' as output to write FCB to stdout" << std::endl;
         std::cerr << "  CityJSONSeq stdin/stdout piping is not supported yet" << std::endl;
@@ -1130,6 +1158,7 @@ int main(int argc, char* argv[]) {
     std::string id_attribute = argc > 5 ? argv[5] : "identificatie";
     std::string method_str = argc > 6 ? argv[6] : "pmp";
     std::string copy_source_attributes_str = argc > 7 ? argv[7] : "none";
+    std::string boolean_obj_output = argc > 8 ? argv[8] : "";
     const bool model_from_stdin = std::string_view(model_path) == "-";
     const bool output_to_stdout = std::string_view(output_path) == "-";
     std::ostream& log_out = output_to_stdout ? static_cast<std::ostream&>(std::cerr) : static_cast<std::ostream&>(std::cout);
@@ -1161,6 +1190,18 @@ int main(int argc, char* argv[]) {
         std::cerr << "Unknown copy_source_attributes: " << copy_source_attributes_str
                   << " (use none, feature, parent)" << std::endl;
         return 1;
+    }
+
+    BooleanObjWriter boolean_obj_writer;
+    if (!boolean_obj_output.empty()) {
+        if (boolean_obj_output == model_path || boolean_obj_output == output_path) {
+            std::cerr << "Boolean OBJ output must differ from the model input and primary output paths" << std::endl;
+            return 1;
+        }
+        if (!boolean_obj_writer.open(boolean_obj_output)) {
+            std::cerr << "Failed to open boolean OBJ output: " << boolean_obj_output << std::endl;
+            return 1;
+        }
     }
 
     const bool model_is_fcb = model_from_stdin || is_fcb_path(model_path);
@@ -1250,6 +1291,9 @@ int main(int argc, char* argv[]) {
         "Model input: {} ({})",
         model_from_stdin ? "stdin" : model_path,
         model_is_fcb ? "FlatCityBuf stream" : "CityJSONSeq stream") << std::endl;
+    if (!boolean_obj_output.empty()) {
+        log_out << std::format("Boolean OBJ output: {}", boolean_obj_output) << std::endl;
+    }
 
     bool ignore_holes = false;
     size_t processed_count = 0;
@@ -1301,6 +1345,7 @@ int main(int argc, char* argv[]) {
         .output_write_changed_ms = output_write_changed_ms,
         .output_write_passthrough_ms = output_write_passthrough_ms,
         .model_stream_read_ms = model_stream_read_ms,
+        .boolean_obj_writer = boolean_obj_writer,
         .log_out = log_out,
     };
 

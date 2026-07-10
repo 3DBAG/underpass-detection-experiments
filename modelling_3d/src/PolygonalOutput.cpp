@@ -11,6 +11,10 @@
 #include <utility>
 #include <vector>
 
+#include <CGAL/Polygon_2.h>
+
+#include "MeshProcessingConfig.h"
+
 namespace {
 
 constexpr uint8_t kRoofSurface = 0;
@@ -32,7 +36,6 @@ constexpr double kSemanticNzThreshold = 0.3;
 // classified as ground; otherwise they are classified as outer ceilings.
 // Units are the same as the mesh coordinate system.
 constexpr double kGroundZTolerance = 0.5;
-
 struct Vec2 {
     double x = 0.0;
     double y = 0.0;
@@ -122,6 +125,51 @@ double signed_area_2d(const std::vector<Vec2>& ring) {
         area += ring[i].x * ring[j].y - ring[j].x * ring[i].y;
     }
     return 0.5 * area;
+}
+
+bool cycle_is_simple(
+    const std::vector<uint32_t>& cycle,
+    const std::vector<K::Point_3>& dense_vertices,
+    int drop_axis,
+    bool enforce_minimum_width = true) {
+    if (cycle.size() < 3) {
+        return false;
+    }
+
+    std::vector<Vec2> projected;
+    projected.reserve(cycle.size());
+    CGAL::Polygon_2<K> polygon;
+    for (uint32_t vertex : cycle) {
+        const Vec2 point = project_point(dense_vertices[vertex], drop_axis);
+        projected.push_back(point);
+        polygon.push_back(K::Point_2(point.x, point.y));
+    }
+    if (!polygon.is_simple()) {
+        return false;
+    }
+    const double area = std::abs(signed_area_2d(projected));
+    double perimeter = 0.0;
+    for (size_t i = 0; i < projected.size(); ++i) {
+        const auto& a = projected[i];
+        const auto& b = projected[(i + 1) % projected.size()];
+        perimeter += std::hypot(b.x - a.x, b.y - a.y);
+    }
+    if (perimeter <= 0.0 ||
+        (enforce_minimum_width &&
+         2.0 * area / perimeter < mesh_processing::kCleanupTolerance)) {
+        return false;
+    }
+    return true;
+}
+
+void append_surface_header(PolygonalOutput& out, size_t ring_count, uint8_t semantic_type) {
+    out.surface_ring_counts.push_back(static_cast<uint32_t>(ring_count));
+    out.surface_semantic_types.push_back(semantic_type);
+}
+
+void append_surface_ring(PolygonalOutput& out, const std::vector<uint32_t>& ring) {
+    out.ring_vertex_counts.push_back(static_cast<uint32_t>(ring.size()));
+    out.boundary_indices.insert(out.boundary_indices.end(), ring.begin(), ring.end());
 }
 
 bool outer_ring_wants_positive_projected_area(const K::Vector_3& normal) {
@@ -637,19 +685,45 @@ bool build_polygonal_output_from_grouped_mesh(
 
         const auto& seed_geom = face_geometry.at(descriptor_id(groups[group_id].front()));
         auto grouped_surfaces = group_cycles_into_surfaces(dense_vertices, seed_geom.unit_normal, std::move(cycles));
-        if (grouped_surfaces.empty()) {
+        const int drop_axis = choose_drop_axis(seed_geom.unit_normal);
+        bool valid_grouped_surfaces = !grouped_surfaces.empty();
+        for (const auto& surface_rings : grouped_surfaces) {
+            for (const auto& cycle : surface_rings) {
+                if (!cycle_is_simple(cycle, dense_vertices, drop_axis)) {
+                    valid_grouped_surfaces = false;
+                    break;
+                }
+            }
+            if (!valid_grouped_surfaces) {
+                break;
+            }
+        }
+        if (!valid_grouped_surfaces) {
+            for (auto face : groups[group_id]) {
+                const auto& geom = face_geometry.at(descriptor_id(face));
+                std::vector<uint32_t> cycle;
+                cycle.reserve(geom.vertices.size());
+                for (auto vertex : geom.vertices) {
+                    cycle.push_back(vertex_to_dense.at(descriptor_id(vertex)));
+                }
+                if (!cycle_is_simple(cycle, dense_vertices, choose_drop_axis(geom.unit_normal), false)) {
+                    continue;
+                }
+                append_surface_header(out, 1, face_semantic.at(descriptor_id(face)));
+                append_surface_ring(out, cycle);
+            }
             continue;
         }
-
         for (const auto& surface_rings : grouped_surfaces) {
             if (surface_rings.empty()) {
                 continue;
             }
-            out.surface_ring_counts.push_back(static_cast<uint32_t>(surface_rings.size()));
-            out.surface_semantic_types.push_back(face_semantic.at(descriptor_id(groups[group_id].front())));
+            append_surface_header(
+                out,
+                surface_rings.size(),
+                face_semantic.at(descriptor_id(groups[group_id].front())));
             for (const auto& cycle : surface_rings) {
-                out.ring_vertex_counts.push_back(static_cast<uint32_t>(cycle.size()));
-                out.boundary_indices.insert(out.boundary_indices.end(), cycle.begin(), cycle.end());
+                append_surface_ring(out, cycle);
             }
         }
     }
