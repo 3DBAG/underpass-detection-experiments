@@ -1,0 +1,19 @@
+{
+  "name": "3dtiles-tester",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "bun run build.ts",
+    "deploy": "bash scripts/deploy.sh",
+    "serve": "bun run serve.ts",
+    "dev": "bun run build.ts && bun run serve.ts"
+  },
+  "dependencies": {
+    "cesium": "^1.121.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.5.0"
+  }
+}
