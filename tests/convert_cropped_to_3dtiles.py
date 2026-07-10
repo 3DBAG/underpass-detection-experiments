@@ -5,6 +5,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from pyproj import CRS
 from py3dtiles.constants import SpecVersion
 from py3dtiles.convert import convert
 
@@ -127,6 +128,10 @@ def discover_point_clouds(
     )
 
 
+def epsg_crs(code: int | None) -> CRS | None:
+    return None if code is None else CRS.from_epsg(code)
+
+
 def main() -> int:
     args = parse_args()
     input_dir = args.input_dir.resolve()
@@ -168,8 +173,8 @@ def main() -> int:
         "outfolder": out_dir,
         "overwrite": args.overwrite,
         "jobs": args.jobs,
-        "crs_out": args.srs_out,
-        "crs_in": args.srs_in,
+        "crs_out": epsg_crs(args.srs_out),
+        "crs_in": epsg_crs(args.srs_in),
         "force_crs_in": args.force_srs_in,
         "pyproj_always_xy": args.pyproj_always_xy,
         "rgb": not args.no_rgb,

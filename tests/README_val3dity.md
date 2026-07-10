@@ -97,6 +97,29 @@ error occurrences: 178060
 ```
 
 after normal orientation fix:
+
+> ./val3dity_tools.py summarise /data2/rypeters/ams-run-07-07-rf/seq_underpasses_manifold/
+reports: 210
+objects: 163538
+objects with errors: 8785 (5.37%)
+error occurrences: 46023
+
+  code  occurrences    objects  objects_% of_error_objects_%  description
+------ ------------ ---------- ---------- ------------------  -----------
+   102        36672       7497      4.58%             85.34%  CONSECUTIVE_POINTS_SAME
+   104         5051       2154      1.32%             24.52%  RING_SELF_INTERSECTION
+   201            6          6      0.00%              0.07%  INTERSECTION_RINGS
+   203         2150       1607      0.98%             18.29%  NON_PLANAR_POLYGON_DISTANCE_PLANE
+   204          147        136      0.08%              1.55%  NON_PLANAR_POLYGON_NORMALS_DEVIATION
+   206            2          2      0.00%              0.02%  INNER_RING_OUTSIDE
+   301            3          3      0.00%              0.03%  TOO_FEW_POLYGONS
+   302           30         14      0.01%              0.16%  SHELL_NOT_CLOSED
+   303          244         63      0.04%              0.72%  NON_MANIFOLD_CASE
+   305           14         14      0.01%              0.16%  MULTIPLE_CONNECTED_COMPONENTS
+   306         1633        126      0.08%              1.43%  SHELL_SELF_INTERSECTION
+   307           69         20      0.01%              0.23%  POLYGON_WRONG_ORIENTATION
+   405            2          1      0.00%              0.01%  WRONG_ORIENTATION_SHELL
+   
 > ./val3dity_tools.py summarise /data2/rypeters/ams-run-07-07-rf/seq_underpasses_pmp/
 reports: 210
 objects: 163538
@@ -118,3 +141,28 @@ error occurrences: 166895
    306           67          7      0.00%              0.06%  SHELL_SELF_INTERSECTION
    307            3          3      0.00%              0.02%  POLYGON_WRONG_ORIENTATION
    405            2          1      0.00%              0.01%  WRONG_ORIENTATION_SHELL
+
+after fixing repeated vertices and 2degenerate triangles
+
+git/underpass-detection-experiments/tests  main $!?  impure 23s
+> ./val3dity_tools.py summarise /data2/rypeters/ams-run-07-07-rf/seq_underpasses_manifold/
+reports: 210
+objects: 163538
+objects with errors: 3994 (2.44%)
+error occurrences: 11415
+
+  code  occurrences    objects  objects_% of_error_objects_%  description
+------ ------------ ---------- ---------- ------------------  -----------
+   102          304        142      0.09%              3.56%  CONSECUTIVE_POINTS_SAME
+   104         3876       1443      0.88%             36.13%  RING_SELF_INTERSECTION
+   201            6          6      0.00%              0.15%  INTERSECTION_RINGS
+   203         2131       1592      0.97%             39.86%  NON_PLANAR_POLYGON_DISTANCE_PLANE
+   204          171        160      0.10%              4.01%  NON_PLANAR_POLYGON_NORMALS_DEVIATION
+   206            2          2      0.00%              0.05%  INNER_RING_OUTSIDE
+   301            3          3      0.00%              0.08%  TOO_FEW_POLYGONS
+   302          591        518      0.32%             12.97%  SHELL_NOT_CLOSED
+   303          444        134      0.08%              3.36%  NON_MANIFOLD_CASE
+   305           60         60      0.04%              1.50%  MULTIPLE_CONNECTED_COMPONENTS
+   306         3720        315      0.19%              7.89%  SHELL_SELF_INTERSECTION
+   307          105         41      0.03%              1.03%  POLYGON_WRONG_ORIENTATION
+   405            2          1      0.00%              0.03%  WRONG_ORIENTATION_SHELL

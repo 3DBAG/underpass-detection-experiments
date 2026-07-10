@@ -1,0 +1,28 @@
+diff --git a/py3dtiles/tileset/content/gltf_utils.py b/py3dtiles/tileset/content/gltf_utils.py
+--- a/py3dtiles/tileset/content/gltf_utils.py
++++ b/py3dtiles/tileset/content/gltf_utils.py
+@@ -219,7 +219,11 @@ def gltf_from_points(points: Points, name: str | None = None) -> pygltflib.GLTF2
+         primitives=[primitive],
+         additional_attributes=attributes,
+     )
+-    return gltf_from_meshes(meshes=[mesh])
++    z_up_to_y_up = np.array(
++        [[1, 0, 0, 0], [0, 0, 1, 0], [0, -1, 0, 0], [0, 0, 0, 1]],
++        dtype=np.float32,
++    )
++    return gltf_from_meshes(meshes=[mesh], transform=z_up_to_y_up)
+ 
+ 
+ def get_component_type_from_dtype(dtype: np.dtype[Any]) -> int:
+diff --git a/py3dtiles/tilers/point/node/node.py b/py3dtiles/tilers/point/node/node.py
+--- a/py3dtiles/tilers/point/node/node.py
++++ b/py3dtiles/tilers/point/node/node.py
+@@ -64,7 +64,7 @@ class DummyNode:
+             self.points = _bytes["points"]
+ 
+     def get_points(self) -> Points | None:
+-        if self.children:
++        if self.children is not None:
+             return self.grid.get_points()
+         else:
+             points = self.points
