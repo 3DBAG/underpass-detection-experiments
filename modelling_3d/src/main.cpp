@@ -267,8 +267,10 @@ static FeatureCarveResult carve_underpasses_for_feature(
         const auto& feature = polygon_features[feature_idx];
 
         auto t_conversion_start = Clock::now();
+        // Boolean operations use coordinates relative to the shared model offset.
+        // Convert the absolute OGR elevation to that same local coordinate frame.
         double roof_height = (feature.has_absolute_elevation && std::isfinite(feature.absolute_elevation))
-            ? feature.absolute_elevation
+            ? feature.absolute_elevation - global_offset_z
             : result.house_min_z + kNullUnderpassHeightAboveGround;
         auto offset_polygon = make_offset_polygon(
             feature.polygon,
@@ -305,7 +307,7 @@ static FeatureCarveResult carve_underpasses_for_feature(
         }
 
         underpass_meshes.push_back(std::move(underpass_sm));
-        result.underpass_z = roof_height - global_offset_z;
+        result.underpass_z = roof_height;
         ++merged_feature_count;
     }
 

@@ -83,7 +83,7 @@ With PostgreSQL/PostGIS as OGR source:
   "PG:dbname='baseregisters' host=localhost port=5432 user=superson password='supassword' tables=bgt.underpasses_with_height(geom)" \
   sample_data/9-320-584.tmp.fcb \
   sample_data/out.fcb \
-  h_underpass identificatie manifold
+  underpass_z identificatie manifold
 ```
 
 Arguments: `<ogr_source> <model_input> <model_output> <height_attr> [id_attr] [method] [copy_source_attributes] [boolean_obj_output]`
