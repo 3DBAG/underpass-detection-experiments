@@ -8,11 +8,11 @@
 | Fallback rows | 48,968 |
 | Still placeholder/null | 298,971 |
 
-The 298,971 unprocessed/placeholder rows all have h_underpass = 2.5 with h_underpass_source/status still null.
+The 298,971 unprocessed/placeholder rows all have underpass_z = 2.5 with underpass_source/status still null.
 
 ### Status Counts
 
-| source | status | rows | h median | point median |
+| source | status | rows | z median | point median |
 |---|---|---:|---:|---:|
 | null | null | 298,971 | 3.5 | null |
 | fallback | no_laz_tiles | 45,885 | 2.5 | 0 |
@@ -65,13 +65,13 @@ The 298,971 unprocessed/placeholder rows all have h_underpass = 2.5 with h_under
 | max | 4,980,052 |
 | avg | 135,158 |
 
-### Height Histogram
+### Underpass Elevation Histogram
 
 This includes fallback 2.5 and placeholder 3.5.
 
-| h_underpass | rows | success | other |
+| underpass_z | rows | success | other |
 |---|---:|---:|---:|
-| 0-1 | 1,120 | 1,120 | 0 |
+| <1 | 1,120 | 1,120 | 0 |
 | 1-1.5 | 943 | 943 | 0 |
 | 1.5-2 | 1,001 | 1,001 | 0 |
 | 2-2.5 | 2,234 | 2,234 | 0 |
@@ -84,7 +84,7 @@ This includes fallback 2.5 and placeholder 3.5.
 | 5-10 | 2,809 | 2,809 | 0 |
 | >=10 | 318 | 318 | 0 |
 
-### Success-only h_underpass quantiles
+### Success-only underpass_z quantiles
 
 | Quantile | Value |
 |---|---:|
@@ -111,11 +111,11 @@ This includes fallback 2.5 and placeholder 3.5.
 | Fallback rows | 47,636 |
 | Still placeholder/null | 290,713 |
 
-The 290,713 unprocessed/placeholder rows have h_underpass_source/status still null.
+The 290,713 unprocessed/placeholder rows have underpass_source/status still null.
 
 ### Status Counts
 
-| source | status | rows | h median | point median |
+| source | status | rows | z median | point median |
 |---|---|---:|---:|---:|
 | null | null | 290,713 | null | null |
 | fallback | no_laz_tiles | 44,490 | null | 0 |
@@ -168,13 +168,13 @@ The 290,713 unprocessed/placeholder rows have h_underpass_source/status still nu
 | max | 44,369,527 |
 | avg | 89,857 |
 
-### Height Histogram
+### Underpass Elevation Histogram
 
-Rows with null h_underpass are omitted from this histogram.
+Rows with null underpass_z are omitted from this histogram.
 
-| h_underpass | rows | success | other |
+| underpass_z | rows | success | other |
 |---|---:|---:|---:|
-| 0-1 | 1,570 | 1,570 | 0 |
+| <1 | 1,570 | 1,570 | 0 |
 | 1-1.5 | 937 | 937 | 0 |
 | 1.5-2 | 987 | 987 | 0 |
 | 2-2.5 | 2,098 | 2,098 | 0 |
@@ -185,7 +185,7 @@ Rows with null h_underpass are omitted from this histogram.
 | 5-10 | 2,902 | 2,902 | 0 |
 | >=10 | 472 | 472 | 0 |
 
-### Success-only h_underpass quantiles
+### Success-only underpass_z quantiles
 
 | Quantile | Value |
 |---|---:|

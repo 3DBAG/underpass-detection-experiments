@@ -72,16 +72,14 @@ DEFAULT_DECOMPRESSION = "xyz"
 DEFAULT_BATCH_WORKERS = 1
 
 RESULT_COLUMNS = {
-    "h_underpass": "double precision",
-    "h_underpass_source": "text",
-    "h_underpass_status": "text",
-    "h_underpass_z_min": "double precision",
-    "h_underpass_z_max": "double precision",
-    "h_underpass_candidate_peaks": "jsonb",
-    "h_underpass_point_count": "integer",
-    "h_underpass_laz_count": "integer",
-    "h_underpass_error": "text",
-    "h_underpass_updated_at": "timestamptz",
+    "underpass_z": "double precision",
+    "underpass_source": "text",
+    "underpass_status": "text",
+    "underpass_candidate_peaks": "jsonb",
+    "underpass_point_count": "integer",
+    "underpass_laz_count": "integer",
+    "underpass_error": "text",
+    "underpass_updated_at": "timestamptz",
 }
 
 
@@ -183,9 +181,7 @@ class HeightResult:
     status: str
     point_count: int
     laz_count: int
-    h_underpass: float | None = None
-    z_min: float | None = None
-    z_max: float | None = None
+    underpass_z: float | None = None
     candidate_peaks: list[dict[str, object]] | None = None
     error: str | None = None
 
@@ -312,7 +308,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--only-status",
         action="append",
         default=[],
-        help="Only process rows with this existing h_underpass_status. Can be passed multiple times.",
+        help="Only process rows with this existing underpass_status. Can be passed multiple times.",
     )
     parser.add_argument("--polygon-buffer", type=float, default=POLYGON_BUFFER_DISTANCE)
     parser.add_argument(
@@ -337,7 +333,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=[],
         help="Only process rows with this identificatie/BAG building id. Can be passed multiple times.",
     )
-    parser.add_argument("--all", action="store_true", help="Process rows even when h_underpass is already filled.")
+    parser.add_argument("--all", action="store_true", help="Process rows even when underpass_z is already filled.")
     parser.add_argument(
         "--plot-dir",
         type=Path,
@@ -403,10 +399,10 @@ def fetch_pending_records(conn: psycopg.Connection, args: argparse.Namespace) ->
     params: list[object] = []
 
     if args.only_status:
-        conditions.append(sql.SQL("h_underpass_status = ANY(%s::text[])"))
+        conditions.append(sql.SQL("underpass_status = ANY(%s::text[])"))
         params.append(args.only_status)
     elif not args.all:
-        conditions.append(sql.SQL("h_underpass IS NULL"))
+        conditions.append(sql.SQL("underpass_z IS NULL"))
 
     if args.only_underpass_id:
         conditions.append(sql.SQL("underpass_id = ANY(%s)"))
@@ -481,19 +477,19 @@ def fetch_table_summary(conn: psycopg.Connection, table_name: str) -> dict[str, 
                 WHERE geom IS NOT NULL
                   AND NOT ST_IsEmpty(geom)
                   AND (
-                    h_underpass IS NULL
-                    OR h_underpass_status IN ('failed', 'no_laz_tiles', 'no_points', 'too_few_points')
+                    underpass_z IS NULL
+                    OR underpass_status IN ('failed', 'no_laz_tiles', 'no_points', 'too_few_points')
                   )
             ) AS pending_rows,
-            count(*) FILTER (WHERE h_underpass IS NOT NULL) AS rows_with_height
+            count(*) FILTER (WHERE underpass_z IS NOT NULL) AS rows_with_height
         FROM {table}
         """
     ).format(table=table_identifier(table_name))
     status_query = sql.SQL(
         """
-        SELECT coalesce(h_underpass_status, '<null>') AS status, count(*)
+        SELECT coalesce(underpass_status, '<null>') AS status, count(*)
         FROM {table}
-        GROUP BY coalesce(h_underpass_status, '<null>')
+        GROUP BY coalesce(underpass_status, '<null>')
         ORDER BY count(*) DESC, status
         LIMIT 12
         """
@@ -543,7 +539,7 @@ def null_result_values(
         identificatie=identificatie,
         underpass_id=underpass_id,
         status=status,
-        h_underpass=None,
+        underpass_z=None,
         point_count=point_count,
         laz_count=laz_count,
         candidate_peaks=None,
@@ -700,9 +696,7 @@ def run_height_estimation_task(task: HeightEstimationTask) -> HeightResult:
             identificatie=task.identificatie,
             underpass_id=task.underpass_id,
             status="success",
-            h_underpass=float(metrics["underpass_h"]),
-            z_min=float(metrics["underpass_z_min"]),
-            z_max=float(metrics["underpass_z_max"]),
+            underpass_z=float(metrics["underpass_z"]),
             candidate_peaks=metrics["underpass_candidate_peaks"],
             point_count=task.point_count,
             laz_count=task.laz_count,
@@ -722,11 +716,9 @@ def run_height_estimation_task(task: HeightEstimationTask) -> HeightResult:
 def update_results(conn: psycopg.Connection, table_name: str, results: Iterable[HeightResult]) -> None:
     rows = [
         (
-            result.h_underpass,
+            result.underpass_z,
             "streetlidar" if result.status == "success" else "fallback",
             result.status,
-            result.z_min,
-            result.z_max,
             Jsonb(result.candidate_peaks) if result.candidate_peaks is not None else None,
             result.point_count,
             result.laz_count,
@@ -742,16 +734,14 @@ def update_results(conn: psycopg.Connection, table_name: str, results: Iterable[
     query = sql.SQL(
         """
         UPDATE {table}
-        SET h_underpass = %s,
-            h_underpass_source = %s,
-            h_underpass_status = %s,
-            h_underpass_z_min = %s,
-            h_underpass_z_max = %s,
-            h_underpass_candidate_peaks = %s,
-            h_underpass_point_count = %s,
-            h_underpass_laz_count = %s,
-            h_underpass_error = %s,
-            h_underpass_updated_at = now()
+        SET underpass_z = %s,
+            underpass_source = %s,
+            underpass_status = %s,
+            underpass_candidate_peaks = %s,
+            underpass_point_count = %s,
+            underpass_laz_count = %s,
+            underpass_error = %s,
+            underpass_updated_at = now()
         WHERE identificatie = %s
           AND underpass_id = %s
         """
@@ -1325,7 +1315,7 @@ def main(argv: list[str] | None = None) -> int:
             print("Status counts:")
             for status, count in statuses:
                 print(f"  {status}: {count}")
-        print("Use --all to ignore existing h_underpass values/statuses.")
+        print("Use --all to ignore existing underpass_z values/statuses.")
         return 0
 
     print(f"Loaded {len(records)} pending underpasses from {args.table}")

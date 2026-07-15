@@ -350,7 +350,7 @@ function getUnderpassColor(feature: Cesium3DTileFeature) {
   }
 
   if (success === 1 || success === "1" || success === true) {
-    const source = feature.getProperty("h_underpass_source");
+    const source = feature.getProperty("underpass_source");
     return source === "streetlidar" ? UNDERPASS_STREETLIDAR_SUCCESS_COLOR : UNDERPASS_ASSUMED_SUCCESS_COLOR;
   }
 

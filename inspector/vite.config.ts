@@ -6,7 +6,7 @@ import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig, loadEnv, type Plugin } from "vite";
 
-const DEFAULT_FCB_PATH = "/data2/rypeters/ams-run-07-14-rf/seq_underpasses_manifold/city.viewer.fcb";
+const DEFAULT_FCB_PATH = "/data2/rypeters/ams-run-07-15-rf/seq_underpasses_manifold/city.viewer.fcb";
 const DEFAULT_COPC_PATH = "/data2/rypeters/amsterdam_data/2025/merged.copc";
 
 function sendRangeFile(
