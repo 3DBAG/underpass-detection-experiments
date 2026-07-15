@@ -61,6 +61,7 @@ enum class SourceAttributeTarget : uint8_t {
     None = 0,
     Feature = 1,
     Parent = 2,
+    SemanticSurface = 3,
 };
 
 struct SourceAttributeBuffers {
@@ -74,6 +75,28 @@ struct SourceAttributeBuffers {
 
     size_t size() const { return names.size(); }
 };
+
+struct SurfaceAttributeGroups {
+    SourceAttributeBuffers attributes;
+    // Attribute offsets for each underpass group. Size is group_count + 1.
+    std::vector<uint32_t> offsets{0};
+};
+
+static std::vector<uint32_t> semantic_surface_attribute_group_indices(
+    const std::vector<int32_t>& underpass_indices,
+    const SurfaceAttributeGroups& groups) {
+    std::vector<uint32_t> result;
+    result.reserve(underpass_indices.size());
+    const size_t group_count = groups.offsets.empty() ? 0 : groups.offsets.size() - 1;
+    for (int32_t underpass_index : underpass_indices) {
+        if (underpass_index < 0 || static_cast<size_t>(underpass_index) >= group_count) {
+            result.push_back(std::numeric_limits<uint32_t>::max());
+        } else {
+            result.push_back(static_cast<uint32_t>(underpass_index));
+        }
+    }
+    return result;
+}
 
 static std::string source_filename_from_path(std::string_view path) {
     if (path == "-") {
@@ -165,6 +188,30 @@ static SourceAttributeBuffers source_attribute_buffers(
     return out;
 }
 
+static SurfaceAttributeGroups surface_attribute_groups(
+    const std::vector<ogr::VectorReader::PolygonFeature>& polygon_features,
+    const std::vector<UnderpassSurfaceSource>& underpasses) {
+    SurfaceAttributeGroups out;
+    for (const auto& underpass : underpasses) {
+        if (underpass.polygon_feature_index < polygon_features.size()) {
+            for (const auto& attribute : polygon_features[underpass.polygon_feature_index].source_attributes) {
+                if (attribute.name.empty()) {
+                    continue;
+                }
+                out.attributes.names.push_back(attribute.name.c_str());
+                out.attributes.name_lens.push_back(attribute.name.size());
+                out.attributes.types.push_back(static_cast<uint8_t>(attribute.type));
+                out.attributes.integer_values.push_back(attribute.integer_value);
+                out.attributes.real_values.push_back(attribute.real_value);
+                out.attributes.string_values.push_back(attribute.string_value.c_str());
+                out.attributes.string_value_lens.push_back(attribute.string_value.size());
+            }
+        }
+        out.offsets.push_back(static_cast<uint32_t>(out.attributes.size()));
+    }
+    return out;
+}
+
 // Classify each triangle by face normal orientation and Z-position.
 // ground_z: building ground level (local coords).
 // underpass_z: underpass ceiling height (local coords).
@@ -228,6 +275,7 @@ struct FeatureCarveResult {
     bool has_polygonal_result = false;
     double house_min_z = std::numeric_limits<double>::quiet_NaN();
     double underpass_z = 0.0;
+    std::vector<UnderpassSurfaceSource> underpasses;
     size_t processed_count = 0;
     size_t skipped_count = 0;
 };
@@ -308,6 +356,11 @@ static FeatureCarveResult carve_underpasses_for_feature(
 
         underpass_meshes.push_back(std::move(underpass_sm));
         result.underpass_z = roof_height;
+        result.underpasses.push_back(UnderpassSurfaceSource{
+            .polygon_feature_index = feature_idx,
+            .polygon = &feature.polygon,
+            .roof_z_local = roof_height,
+        });
         ++merged_feature_count;
     }
 
@@ -496,7 +549,11 @@ struct FcbStreamBackend {
         const uint8_t* semantic_types,
         size_t semantic_types_count,
         const SourceAttributeBuffers& source_attributes,
-        SourceAttributeTarget source_attribute_target) {
+        SourceAttributeTarget source_attribute_target,
+        const std::vector<int32_t>* surface_underpass_indices,
+        const SurfaceAttributeGroups* surface_attribute_groups) {
+        (void)surface_underpass_indices;
+        (void)surface_attribute_groups;
         if (source_attribute_target != SourceAttributeTarget::None) {
             return zfcb_writer_write_current_replaced_lod22_with_attributes(
                 reader, writer,
@@ -536,7 +593,11 @@ struct FcbStreamBackend {
         const uint8_t* surface_semantic_types,
         size_t surface_semantic_types_count,
         const SourceAttributeBuffers& source_attributes,
-        SourceAttributeTarget source_attribute_target) {
+        SourceAttributeTarget source_attribute_target,
+        const std::vector<int32_t>* surface_underpass_indices,
+        const SurfaceAttributeGroups* surface_attribute_groups) {
+        (void)surface_underpass_indices;
+        (void)surface_attribute_groups;
         if (source_attribute_target != SourceAttributeTarget::None) {
             return zfcb_writer_write_current_replaced_lod22_polygonal_with_attributes(
                 reader, writer,
@@ -704,7 +765,37 @@ struct CjseqStreamBackend {
         const uint8_t* semantic_types,
         size_t semantic_types_count,
         const SourceAttributeBuffers& source_attributes,
-        SourceAttributeTarget source_attribute_target) {
+        SourceAttributeTarget source_attribute_target,
+        const std::vector<int32_t>* surface_underpass_indices,
+        const SurfaceAttributeGroups* surface_attribute_groups) {
+        if (surface_underpass_indices != nullptr && surface_attribute_groups != nullptr) {
+            if (surface_underpass_indices->size() != semantic_types_count) {
+                return -1;
+            }
+            std::vector<uint32_t> surface_ring_counts(semantic_types_count, 1);
+            std::vector<uint32_t> ring_vertex_counts(semantic_types_count, 3);
+            auto group_indices = semantic_surface_attribute_group_indices(
+                *surface_underpass_indices, *surface_attribute_groups);
+            const auto& grouped = surface_attribute_groups->attributes;
+            return cityjsonseq_writer_write_current_replaced_lod22_polygonal_with_semantic_surface_attributes(
+                reader, writer,
+                feature_id_ptr, feature_id_len,
+                vertices_xyz_world, vertex_count,
+                surface_ring_counts.data(), surface_ring_counts.size(),
+                ring_vertex_counts.data(), ring_vertex_counts.size(),
+                triangle_indices, triangle_index_count,
+                semantic_types, semantic_types_count,
+                source_attributes.names.data(), source_attributes.name_lens.data(),
+                source_attributes.types.data(), source_attributes.integer_values.data(),
+                source_attributes.real_values.data(), source_attributes.string_values.data(),
+                source_attributes.string_value_lens.data(), source_attributes.size(),
+                static_cast<uint8_t>(source_attribute_target),
+                group_indices.data(), group_indices.size(),
+                surface_attribute_groups->offsets.data(), surface_attribute_groups->offsets.size(),
+                grouped.names.data(), grouped.name_lens.data(), grouped.types.data(),
+                grouped.integer_values.data(), grouped.real_values.data(), grouped.string_values.data(),
+                grouped.string_value_lens.data(), grouped.size());
+        }
         if (source_attribute_target == SourceAttributeTarget::None) {
             return cityjsonseq_writer_write_current_replaced_lod22(
                 reader, writer,
@@ -744,7 +835,35 @@ struct CjseqStreamBackend {
         const uint8_t* surface_semantic_types,
         size_t surface_semantic_types_count,
         const SourceAttributeBuffers& source_attributes,
-        SourceAttributeTarget source_attribute_target) {
+        SourceAttributeTarget source_attribute_target,
+        const std::vector<int32_t>* surface_underpass_indices,
+        const SurfaceAttributeGroups* surface_attribute_groups) {
+        if (surface_underpass_indices != nullptr && surface_attribute_groups != nullptr) {
+            if (surface_underpass_indices->size() != surface_count) {
+                return -1;
+            }
+            auto group_indices = semantic_surface_attribute_group_indices(
+                *surface_underpass_indices, *surface_attribute_groups);
+            const auto& grouped = surface_attribute_groups->attributes;
+            return cityjsonseq_writer_write_current_replaced_lod22_polygonal_with_semantic_surface_attributes(
+                reader, writer,
+                feature_id_ptr, feature_id_len,
+                vertices_xyz_world, vertex_count,
+                surface_ring_counts, surface_count,
+                ring_vertex_counts, ring_count,
+                boundary_indices, boundary_index_count,
+                surface_semantic_types, surface_semantic_types_count,
+                source_attributes.names.data(), source_attributes.name_lens.data(),
+                source_attributes.types.data(), source_attributes.integer_values.data(),
+                source_attributes.real_values.data(), source_attributes.string_values.data(),
+                source_attributes.string_value_lens.data(), source_attributes.size(),
+                static_cast<uint8_t>(source_attribute_target),
+                group_indices.data(), group_indices.size(),
+                surface_attribute_groups->offsets.data(), surface_attribute_groups->offsets.size(),
+                grouped.names.data(), grouped.name_lens.data(), grouped.types.data(),
+                grouped.integer_values.data(), grouped.real_values.data(), grouped.string_values.data(),
+                grouped.string_value_lens.data(), grouped.size());
+        }
         if (source_attribute_target == SourceAttributeTarget::None) {
             return cityjsonseq_writer_write_current_replaced_lod22_polygonal(
                 reader, writer,
@@ -918,13 +1037,15 @@ static bool process_stream_features(Backend& backend, StreamProcessingContext& c
 
         const auto& matched_indices = exact_hint_it->second;
         SourceAttributeTarget output_attribute_target =
-            ctx.source_attribute_target == SourceAttributeTarget::None
+            (ctx.source_attribute_target == SourceAttributeTarget::None ||
+             ctx.source_attribute_target == SourceAttributeTarget::SemanticSurface)
                 ? SourceAttributeTarget::Feature
                 : ctx.source_attribute_target;
         SourceAttributeBuffers aborted_attributes = source_attribute_buffers(
             ctx.polygon_features,
             matched_indices,
-            ctx.source_attribute_target != SourceAttributeTarget::None,
+            ctx.source_attribute_target == SourceAttributeTarget::Feature ||
+                ctx.source_attribute_target == SourceAttributeTarget::Parent,
             ctx.feature_source_filename,
             false);
         if (!backend.prepare_current_feature(
@@ -1022,9 +1143,17 @@ static bool process_stream_features(Backend& backend, StreamProcessingContext& c
             SourceAttributeBuffers source_attributes = source_attribute_buffers(
                 ctx.polygon_features,
                 matched_indices,
-                ctx.source_attribute_target != SourceAttributeTarget::None,
+                ctx.source_attribute_target == SourceAttributeTarget::Feature ||
+                    ctx.source_attribute_target == SourceAttributeTarget::Parent,
                 ctx.feature_source_filename,
                 true);
+            SurfaceAttributeGroups grouped_surface_attributes;
+            const SurfaceAttributeGroups* grouped_surface_attributes_ptr = nullptr;
+            if (ctx.source_attribute_target == SourceAttributeTarget::SemanticSurface) {
+                grouped_surface_attributes = surface_attribute_groups(
+                    ctx.polygon_features, carve_result.underpasses);
+                grouped_surface_attributes_ptr = &grouped_surface_attributes;
+            }
             auto t_output_write_start_local = Clock::now();
             int write_result = -1;
             if (ctx.method == BooleanMethod::Manifold && carve_result.result_meshgl.NumTri() > 0) {
@@ -1034,6 +1163,7 @@ static bool process_stream_features(Backend& backend, StreamProcessingContext& c
                         house,
                         carve_result.house_min_z,
                         carve_result.underpass_z,
+                        carve_result.underpasses,
                         ctx.global_offset_x,
                         ctx.global_offset_y,
                         ctx.global_offset_z,
@@ -1046,7 +1176,11 @@ static bool process_stream_features(Backend& backend, StreamProcessingContext& c
                         polygonal_output.boundary_indices.data(), polygonal_output.boundary_indices.size(),
                         polygonal_output.surface_semantic_types.data(), polygonal_output.surface_semantic_types.size(),
                         source_attributes,
-                        output_attribute_target);
+                        output_attribute_target,
+                        grouped_surface_attributes_ptr != nullptr
+                            ? &polygonal_output.surface_underpass_indices
+                            : nullptr,
+                        grouped_surface_attributes_ptr);
                 }
             } else if (carve_result.has_polygonal_result) {
                 PolygonalOutput polygonal_output;
@@ -1055,6 +1189,7 @@ static bool process_stream_features(Backend& backend, StreamProcessingContext& c
                         house,
                         carve_result.house_min_z,
                         carve_result.underpass_z,
+                        carve_result.underpasses,
                         ctx.global_offset_x,
                         ctx.global_offset_y,
                         ctx.global_offset_z,
@@ -1067,7 +1202,11 @@ static bool process_stream_features(Backend& backend, StreamProcessingContext& c
                         polygonal_output.boundary_indices.data(), polygonal_output.boundary_indices.size(),
                         polygonal_output.surface_semantic_types.data(), polygonal_output.surface_semantic_types.size(),
                         source_attributes,
-                        output_attribute_target);
+                        output_attribute_target,
+                        grouped_surface_attributes_ptr != nullptr
+                            ? &polygonal_output.surface_underpass_indices
+                            : nullptr,
+                        grouped_surface_attributes_ptr);
                 }
 
                 if (write_result < 0) {
@@ -1085,13 +1224,26 @@ static bool process_stream_features(Backend& backend, StreamProcessingContext& c
                     ctx.global_offset_z);
                 auto semantics = classify_triangle_semantics(
                     carve_result.result_meshgl, carve_result.house_min_z, carve_result.underpass_z);
+                std::vector<int32_t> triangle_underpass_indices;
+                const std::vector<int32_t>* triangle_underpass_indices_ptr = nullptr;
+                if (grouped_surface_attributes_ptr != nullptr) {
+                    triangle_underpass_indices = match_triangle_outer_ceiling_surfaces(
+                        carve_result.result_meshgl,
+                        semantics,
+                        carve_result.underpasses,
+                        ctx.global_offset_x,
+                        ctx.global_offset_y);
+                    triangle_underpass_indices_ptr = &triangle_underpass_indices;
+                }
                 write_result = backend.write_current_replaced_lod22(
                     feature_id_str.c_str(), feature_id_str.size(),
                     world_verts.data(), world_verts.size() / 3,
                     carve_result.result_meshgl.triVerts.data(), carve_result.result_meshgl.triVerts.size(),
                     semantics.data(), semantics.size(),
                     source_attributes,
-                    output_attribute_target);
+                    output_attribute_target,
+                    triangle_underpass_indices_ptr,
+                    grouped_surface_attributes_ptr);
             }
             auto t_output_write_end_local = Clock::now();
             auto d_output_write = t_output_write_end_local - t_output_write_start_local;
@@ -1145,7 +1297,7 @@ int main(int argc, char* argv[]) {
                   << ", geogram"
 #endif
                   << std::endl;
-        std::cerr << "  copy_source_attributes: none (default), feature, parent" << std::endl;
+        std::cerr << "  copy_source_attributes: none (default), feature, parent, surface (CityJSONSeq only)" << std::endl;
         std::cerr << "  boolean_obj_output: optional OBJ file containing all meshes directly after boolean operations" << std::endl;
         std::cerr << "  use '-' as input to read FCB from stdin" << std::endl;
         std::cerr << "  use '-' as output to write FCB to stdout" << std::endl;
@@ -1188,9 +1340,11 @@ int main(int argc, char* argv[]) {
         source_attribute_target = SourceAttributeTarget::Feature;
     } else if (copy_source_attributes_str == "parent") {
         source_attribute_target = SourceAttributeTarget::Parent;
+    } else if (copy_source_attributes_str == "surface") {
+        source_attribute_target = SourceAttributeTarget::SemanticSurface;
     } else if (copy_source_attributes_str != "none") {
         std::cerr << "Unknown copy_source_attributes: " << copy_source_attributes_str
-                  << " (use none, feature, parent)" << std::endl;
+                  << " (use none, feature, parent, surface)" << std::endl;
         return 1;
     }
 
@@ -1229,6 +1383,10 @@ int main(int argc, char* argv[]) {
     }
     if (model_is_cityjsonseq && !output_is_cityjsonseq) {
         std::cerr << "CityJSONSeq input currently requires CityJSONSeq (.jsonl) output" << std::endl;
+        return 1;
+    }
+    if (source_attribute_target == SourceAttributeTarget::SemanticSurface && !model_is_cityjsonseq) {
+        std::cerr << "copy_source_attributes=surface is supported only for CityJSONSeq input/output" << std::endl;
         return 1;
     }
 

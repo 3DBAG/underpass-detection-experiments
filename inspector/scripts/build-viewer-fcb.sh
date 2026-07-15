@@ -45,20 +45,30 @@ echo "Building $output_fcb from ${#input_files[@]} CityJSONSeq files"
 fcb ser \
   -i "$clean_first" "${input_files[@]:1}" \
   -o "$output_fcb" \
-  -a identificatie,underpass_id \
+  -a identificatie \
   -g
 
 underpass_manifest="${output_fcb%.fcb}.underpasses.json"
 echo "Building $underpass_manifest"
-jq -c '
-  select(.type == "CityJSONFeature")
-  | .CityObjects[]
-  | select(.type == "Building" and .attributes.underpass_id? != null)
-  | {
-      id: .attributes.identificatie,
-      underpassId: .attributes.underpass_id
-    }
-  | select(.id | type == "string")
-' "${input_files[@]}" \
-  | jq -s 'unique_by(.id) | sort_by(.underpassId, .id) | map(.id)' \
-  > "$underpass_manifest"
+manifest_tmp="$temporary_dir/underpasses.json"
+{
+  for input_file in "${input_files[@]}"; do
+    jq -r '
+      select(.type == "CityJSONFeature")
+      | select(any(
+          .CityObjects[];
+          .type == "BuildingPart"
+          and (
+            .attributes.add_underpass_success? == 1
+            or .attributes.add_underpass_success? == true
+          )
+        ))
+      | .id
+      | select(type == "string")
+    ' "$input_file"
+  done
+} \
+  | LC_ALL=C sort -u \
+  | jq -Rsc 'split("\n") | map(select(length > 0))' \
+  > "$manifest_tmp"
+mv "$manifest_tmp" "$underpass_manifest"

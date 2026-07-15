@@ -96,7 +96,7 @@ Arguments: `<ogr_source> <model_input> <model_output> <height_attr> [id_attr] [m
 | `height_attr` | — | OGR absolute underpass elevation attribute name |
 | `id_attr` | `identificatie` | OGR Feature ID attribute name. This is used to match with ID of the building models. |
 | `method` | `pmp` | Boolean method: `manifold`, `nef`, `pmp`, or `geogram` |
-| `copy_source_attributes` | `none` | Copy OGR attributes to `feature`, `parent`, or `none` |
+| `copy_source_attributes` | `none` | Copy OGR attributes to `feature`, `parent`, or `none`; use `surface` with CityJSONSeq to attach each OGR feature's attributes to its matching `OuterCeilingSurface` |
 | `boolean_obj_output` | disabled | Write all feature meshes directly after the boolean operation to one OBJ file in local coordinates |
 
 For example, append `none sample_data/after_boolean.obj` to write the boolean results while keeping source attribute copying disabled. Each feature is stored as a named object in the same OBJ file.

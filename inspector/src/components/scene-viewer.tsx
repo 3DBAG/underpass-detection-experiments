@@ -25,8 +25,16 @@ import {
   WebGLRenderer,
 } from "three";
 import { ArcballControls } from "three/examples/jsm/controls/ArcballControls.js";
-import type { BuildingScene } from "@/lib/cityjson-mesh";
-import { setBuildingDisplay } from "@/lib/cityjson-mesh";
+import type {
+  BuildingScene,
+  SemanticSurfacePick,
+} from "@/lib/cityjson-mesh";
+import {
+  OUTER_CEILING_SURFACE,
+  semanticSurfaceForFace,
+  setBuildingDisplay,
+  setSelectedUnderpass,
+} from "@/lib/cityjson-mesh";
 
 // These runtime members are omitted from the Three.js Arcball type declaration.
 type ArcballControlsWithFocus = ArcballControls & {
@@ -52,6 +60,7 @@ export interface PickedWorldPoint {
   x: number;
   y: number;
   z: number;
+  semanticSurface?: SemanticSurfacePick;
 }
 
 interface SceneViewerProps {
@@ -60,7 +69,7 @@ interface SceneViewerProps {
   modelVisible: boolean;
   outerCeilingOnly: boolean;
   pointCloudVisible: boolean;
-  pickEnabled: boolean;
+  selectedUnderpassId?: string;
   pointSize: number;
   pointBudget: number;
   onPickPoint: (point: PickedWorldPoint) => void;
@@ -127,7 +136,7 @@ export const SceneViewer = forwardRef<SceneViewerHandle, SceneViewerProps>(
       modelVisible,
       outerCeilingOnly,
       pointCloudVisible,
-      pickEnabled,
+      selectedUnderpassId,
       pointSize,
       pointBudget,
       onPickPoint,
@@ -142,11 +151,9 @@ export const SceneViewer = forwardRef<SceneViewerHandle, SceneViewerProps>(
     const pointsRef = useRef<{ group: Group; material: PointsMaterial } | undefined>(undefined);
     const pointCloudVisibleRef = useRef(pointCloudVisible);
     const pointSizeRef = useRef(pointSize);
-    const pickEnabledRef = useRef(pickEnabled);
     const onPickPointRef = useRef(onPickPoint);
     pointCloudVisibleRef.current = pointCloudVisible;
     pointSizeRef.current = pointSize;
-    pickEnabledRef.current = pickEnabled;
     onPickPointRef.current = onPickPoint;
 
     useImperativeHandle(ref, () => ({
@@ -166,6 +173,7 @@ export const SceneViewer = forwardRef<SceneViewerHandle, SceneViewerProps>(
       const camera = new PerspectiveCamera(CAMERA_FOV, 1, 0.01, 10000);
       camera.up.set(0, 0, 1);
       const renderer = new WebGLRenderer({ antialias: true });
+      renderer.domElement.style.cursor = "crosshair";
       renderer.outputColorSpace = SRGBColorSpace;
       renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
       container.append(renderer.domElement);
@@ -234,7 +242,7 @@ export const SceneViewer = forwardRef<SceneViewerHandle, SceneViewerProps>(
       };
       let pickStart: { pointerId: number; x: number; y: number } | undefined;
       const onPickPointerDown = (event: PointerEvent) => {
-        if (pickEnabledRef.current && event.isPrimary && event.button === 0) {
+        if (event.isPrimary && event.button === 0) {
           pickStart = { pointerId: event.pointerId, x: event.clientX, y: event.clientY };
         }
       };
@@ -242,15 +250,22 @@ export const SceneViewer = forwardRef<SceneViewerHandle, SceneViewerProps>(
         if (!pickStart || event.pointerId !== pickStart.pointerId) return;
         const movement = Math.hypot(event.clientX - pickStart.x, event.clientY - pickStart.y);
         pickStart = undefined;
-        if (!pickEnabledRef.current || movement > 4) return;
+        if (movement > 4) return;
 
         const building = buildingRef.current;
         const intersection = intersectionAt(event.clientX, event.clientY);
         if (!building || !intersection) return;
+        const semanticSurface = intersection.object instanceof Mesh
+          ? semanticSurfaceForFace(intersection.object, intersection.faceIndex)
+          : undefined;
         onPickPointRef.current({
           x: intersection.point.x + building.origin.x,
           y: intersection.point.y + building.origin.y,
           z: intersection.point.z + building.origin.z,
+          semanticSurface:
+            semanticSurface?.type === OUTER_CEILING_SURFACE
+              ? semanticSurface
+              : undefined,
         });
       };
       const cancelPick = () => {
@@ -304,6 +319,12 @@ export const SceneViewer = forwardRef<SceneViewerHandle, SceneViewerProps>(
       setBuildingDisplay(building, modelVisible, outerCeilingOnly);
       contextRef.current?.render();
     }, [building, modelVisible, outerCeilingOnly]);
+
+    useEffect(() => {
+      if (!building) return;
+      setSelectedUnderpass(building, selectedUnderpassId);
+      contextRef.current?.render();
+    }, [building, selectedUnderpassId]);
 
     useEffect(() => {
       const context = contextRef.current;
@@ -364,11 +385,6 @@ export const SceneViewer = forwardRef<SceneViewerHandle, SceneViewerProps>(
         if (contextRef.current === context) context.render();
       };
     }, [building, copcUrl, pointBudget, onError, onPointCloudStatus]);
-
-    useEffect(() => {
-      const canvas = contextRef.current?.renderer.domElement;
-      if (canvas) canvas.style.cursor = pickEnabled ? "crosshair" : "";
-    }, [pickEnabled]);
 
     useEffect(() => {
       const points = pointsRef.current;

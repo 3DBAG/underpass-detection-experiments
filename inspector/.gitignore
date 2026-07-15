@@ -3,4 +3,8 @@ dist/
 .env
 .env.local
 *.log
+.viewer-tags.json
 
+# The parent repository ignores generic lib/ build directories. This is source.
+!src/lib/
+!src/lib/**

@@ -323,6 +323,47 @@ int cityjsonseq_writer_write_current_replaced_lod22_polygonal_with_attributes(
     uint8_t source_attribute_target
 );
 
+// Write polygonal LoD 2.2 geometry while attaching grouped OGR attributes to
+// matching OuterCeilingSurface semantic objects. surface_attribute_group_indices
+// has one entry per output surface; UINT32_MAX means no attribute group.
+int cityjsonseq_writer_write_current_replaced_lod22_polygonal_with_semantic_surface_attributes(
+    CityJSONSeqReaderHandle reader_handle,
+    CityJSONSeqWriterHandle writer_handle,
+    const char* feature_id,
+    size_t feature_id_len,
+    const double* vertices_xyz_world,
+    size_t vertex_count,
+    const uint32_t* surface_ring_counts,
+    size_t surface_count,
+    const uint32_t* ring_vertex_counts,
+    size_t ring_count,
+    const uint32_t* boundary_indices,
+    size_t boundary_index_count,
+    const uint8_t* surface_semantic_types,
+    size_t surface_semantic_types_count,
+    const char* const* root_attribute_names,
+    const size_t* root_attribute_name_lens,
+    const uint8_t* root_attribute_types,
+    const int64_t* root_attribute_integer_values,
+    const double* root_attribute_real_values,
+    const char* const* root_attribute_string_values,
+    const size_t* root_attribute_string_value_lens,
+    size_t root_attribute_count,
+    uint8_t root_attribute_target,
+    const uint32_t* surface_attribute_group_indices,
+    size_t surface_attribute_group_indices_count,
+    const uint32_t* surface_attribute_group_offsets,
+    size_t surface_attribute_group_offsets_count,
+    const char* const* surface_attribute_names,
+    const size_t* surface_attribute_name_lens,
+    const uint8_t* surface_attribute_types,
+    const int64_t* surface_attribute_integer_values,
+    const double* surface_attribute_real_values,
+    const char* const* surface_attribute_string_values,
+    const size_t* surface_attribute_string_value_lens,
+    size_t surface_attribute_count
+);
+
 #ifdef __cplusplus
 }
 #endif

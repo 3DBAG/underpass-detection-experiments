@@ -1796,6 +1796,43 @@ const SourceAttributes = struct {
             else => error.InvalidSourceAttributes,
         };
     }
+
+    fn slice(self: SourceAttributes, start: usize, end: usize) !SourceAttributes {
+        if (start > end or end > self.count) return error.InvalidSourceAttributes;
+        return .{
+            .names = self.names + start,
+            .name_lens = self.name_lens + start,
+            .types = self.types + start,
+            .integer_values = self.integer_values + start,
+            .real_values = self.real_values + start,
+            .string_values = self.string_values + start,
+            .string_value_lens = self.string_value_lens + start,
+            .count = end - start,
+        };
+    }
+};
+
+const SourceAttributeGroups = struct {
+    attributes: ?SourceAttributes,
+    offsets: []const u32,
+
+    fn count(self: SourceAttributeGroups) usize {
+        return if (self.offsets.len == 0) 0 else self.offsets.len - 1;
+    }
+
+    fn group(self: SourceAttributeGroups, index: usize) !?SourceAttributes {
+        if (index >= self.count()) return error.InvalidSourceAttributeGroup;
+        const start: usize = @intCast(self.offsets[index]);
+        const end: usize = @intCast(self.offsets[index + 1]);
+        if (start > end) return error.InvalidSourceAttributeGroup;
+        const attributes = self.attributes orelse {
+            if (start == 0 and end == 0) return null;
+            return error.InvalidSourceAttributeGroup;
+        };
+        if (end > attributes.count) return error.InvalidSourceAttributeGroup;
+        if (start == end) return null;
+        return try attributes.slice(start, end);
+    }
 };
 
 fn sourceAttributesFromC(
@@ -1835,12 +1872,19 @@ fn writeReplacedCurrentFeatureLinePolygonal(
     surface_semantic_types: []const u8,
     source_attributes: ?SourceAttributes,
     source_attribute_target: u8,
+    surface_attribute_group_indices: ?[]const u32,
+    surface_attribute_groups: ?SourceAttributeGroups,
 ) !void {
     if (vertices_xyz_world.len % 3 != 0) return error.InvalidVertexArray;
     if (surface_ring_counts.len == 0 or ring_vertex_counts.len == 0 or boundary_indices.len == 0) {
         return error.InvalidReplacementGeometry;
     }
     if (surface_semantic_types.len != surface_ring_counts.len) return error.InvalidSemanticTypesArray;
+    if (surface_attribute_group_indices) |indices| {
+        if (indices.len != surface_ring_counts.len or surface_attribute_groups == null) {
+            return error.InvalidSourceAttributeGroup;
+        }
+    }
     var expected_ring_count: usize = 0;
     for (surface_ring_counts) |ring_count| {
         expected_ring_count += ring_count;
@@ -2014,20 +2058,43 @@ fn writeReplacedCurrentFeatureLinePolygonal(
     try solid_boundaries.append(.{ .array = shell_polygons });
 
     var surfaces = std.json.Array.init(arena_alloc);
-    var semantic_to_surface = std.AutoHashMap(u8, usize).init(arena_alloc);
+    const no_attribute_group = std.math.maxInt(u32);
+    const SemanticSurfaceKey = struct {
+        semantic_type: u8,
+        attribute_group: u32,
+    };
+    var semantic_to_surface = std.AutoHashMap(SemanticSurfaceKey, usize).init(arena_alloc);
     defer semantic_to_surface.deinit();
     var semantic_values = std.ArrayList(usize).empty;
     defer semantic_values.deinit(arena_alloc);
 
-    for (surface_semantic_types) |semantic_type| {
-        const surface_idx = if (semantic_to_surface.get(semantic_type)) |idx| blk: {
+    for (surface_semantic_types, 0..) |semantic_type, geometry_surface_index| {
+        const attribute_group = if (semantic_type == 4 and surface_attribute_group_indices != null)
+            surface_attribute_group_indices.?[geometry_surface_index]
+        else
+            no_attribute_group;
+        if (attribute_group != no_attribute_group) {
+            const groups = surface_attribute_groups orelse return error.InvalidSourceAttributeGroup;
+            if (attribute_group >= groups.count()) return error.InvalidSourceAttributeGroup;
+        }
+        const key = SemanticSurfaceKey{
+            .semantic_type = semantic_type,
+            .attribute_group = attribute_group,
+        };
+        const surface_idx = if (semantic_to_surface.get(key)) |idx| blk: {
             break :blk idx;
         } else blk: {
             var surface_obj: std.json.ObjectMap = .empty;
             try surface_obj.put(arena_alloc, "type", .{ .string = semanticSurfaceTypeName(semantic_type) });
+            if (attribute_group != no_attribute_group) {
+                const groups = surface_attribute_groups orelse return error.InvalidSourceAttributeGroup;
+                if (try groups.group(attribute_group)) |attributes| {
+                    try mergeAttributesIntoObject(arena_alloc, &surface_obj, attributes);
+                }
+            }
             const idx = surfaces.items.len;
             try surfaces.append(.{ .object = surface_obj });
-            try semantic_to_surface.put(semantic_type, idx);
+            try semantic_to_surface.put(key, idx);
             break :blk idx;
         };
         try semantic_values.append(arena_alloc, surface_idx);
@@ -2107,10 +2174,18 @@ fn mergeSourceAttributes(
     var attributes = attributes_value orelse return error.InvalidCityJSONSeqFeature;
     if (attributes.* != .object) return error.InvalidCityJSONSeqFeature;
 
+    try mergeAttributesIntoObject(arena_alloc, &attributes.object, attrs);
+}
+
+fn mergeAttributesIntoObject(
+    arena_alloc: std.mem.Allocator,
+    object: *std.json.ObjectMap,
+    attrs: SourceAttributes,
+) !void {
     for (0..attrs.count) |i| {
         const name = attrs.name(i) orelse continue;
-        if (name.len == 0 or attributes.object.contains(name)) continue;
-        try attributes.object.put(arena_alloc, name, try attrs.jsonValue(i));
+        if (name.len == 0 or object.contains(name)) continue;
+        try object.put(arena_alloc, name, try attrs.jsonValue(i));
     }
 }
 
@@ -2146,6 +2221,8 @@ fn writeReplacedCurrentFeatureLine(
         semantic_types,
         source_attributes,
         source_attribute_target,
+        null,
+        null,
     );
 }
 
@@ -2291,6 +2368,8 @@ export fn cityjsonseq_writer_write_current_replaced_lod22_polygonal(
         surface_semantic_types,
         null,
         0,
+        null,
+        null,
     ) catch return -1;
 
     return 0;
@@ -2360,9 +2439,201 @@ export fn cityjsonseq_writer_write_current_replaced_lod22_polygonal_with_attribu
         surface_semantic_types,
         source_attributes,
         source_attribute_target,
+        null,
+        null,
     ) catch return -1;
 
     return 0;
+}
+
+export fn cityjsonseq_writer_write_current_replaced_lod22_polygonal_with_semantic_surface_attributes(
+    reader_handle: ?CityJSONSeqReaderHandle,
+    writer_handle: ?CityJSONSeqWriterHandle,
+    feature_id_ptr: [*c]const u8,
+    feature_id_len: usize,
+    vertices_xyz_world_ptr: [*c]const f64,
+    vertex_count: usize,
+    surface_ring_counts_ptr: [*c]const u32,
+    surface_count: usize,
+    ring_vertex_counts_ptr: [*c]const u32,
+    ring_count: usize,
+    boundary_indices_ptr: [*c]const u32,
+    boundary_index_count: usize,
+    surface_semantic_types_ptr: [*c]const u8,
+    surface_semantic_types_count: usize,
+    root_attribute_names: [*c]const [*c]const u8,
+    root_attribute_name_lens: [*c]const usize,
+    root_attribute_types: [*c]const u8,
+    root_attribute_integer_values: [*c]const i64,
+    root_attribute_real_values: [*c]const f64,
+    root_attribute_string_values: [*c]const [*c]const u8,
+    root_attribute_string_value_lens: [*c]const usize,
+    root_attribute_count: usize,
+    root_attribute_target: u8,
+    surface_attribute_group_indices_ptr: [*c]const u32,
+    surface_attribute_group_indices_count: usize,
+    surface_attribute_group_offsets_ptr: [*c]const u32,
+    surface_attribute_group_offsets_count: usize,
+    surface_attribute_names: [*c]const [*c]const u8,
+    surface_attribute_name_lens: [*c]const usize,
+    surface_attribute_types: [*c]const u8,
+    surface_attribute_integer_values: [*c]const i64,
+    surface_attribute_real_values: [*c]const f64,
+    surface_attribute_string_values: [*c]const [*c]const u8,
+    surface_attribute_string_value_lens: [*c]const usize,
+    surface_attribute_count: usize,
+) callconv(.c) c_int {
+    const reader = reader_handle orelse return -1;
+    const writer = writer_handle orelse return -1;
+    if (feature_id_ptr == null or feature_id_len == 0) return -1;
+    if (vertices_xyz_world_ptr == null or vertex_count == 0) return -1;
+    if (surface_ring_counts_ptr == null or surface_count == 0) return -1;
+    if (ring_vertex_counts_ptr == null or ring_count == 0) return -1;
+    if (boundary_indices_ptr == null or boundary_index_count == 0) return -1;
+    if (surface_semantic_types_ptr == null or surface_semantic_types_count != surface_count) return -1;
+    if (surface_attribute_group_indices_ptr == null or surface_attribute_group_indices_count != surface_count) return -1;
+    if (surface_attribute_group_offsets_ptr == null or surface_attribute_group_offsets_count < 2) return -1;
+    if (reader.current_line.len == 0) return -1;
+
+    const root_attributes = sourceAttributesFromC(
+        root_attribute_names,
+        root_attribute_name_lens,
+        root_attribute_types,
+        root_attribute_integer_values,
+        root_attribute_real_values,
+        root_attribute_string_values,
+        root_attribute_string_value_lens,
+        root_attribute_count,
+    );
+    if (root_attribute_target != 0 and root_attribute_count != 0 and root_attributes == null) return -1;
+    const grouped_attributes = sourceAttributesFromC(
+        surface_attribute_names,
+        surface_attribute_name_lens,
+        surface_attribute_types,
+        surface_attribute_integer_values,
+        surface_attribute_real_values,
+        surface_attribute_string_values,
+        surface_attribute_string_value_lens,
+        surface_attribute_count,
+    );
+    const group_offsets = surface_attribute_group_offsets_ptr[0..surface_attribute_group_offsets_count];
+    if (group_offsets[0] != 0 or group_offsets[group_offsets.len - 1] != surface_attribute_count) return -1;
+    for (group_offsets[1..], group_offsets[0 .. group_offsets.len - 1]) |end, start| {
+        if (end < start) return -1;
+    }
+    if (surface_attribute_count != 0 and grouped_attributes == null) return -1;
+
+    const feature_id = feature_id_ptr[0..feature_id_len];
+    const vertices_xyz_world = vertices_xyz_world_ptr[0 .. vertex_count * 3];
+    const surface_ring_counts = surface_ring_counts_ptr[0..surface_count];
+    const ring_vertex_counts = ring_vertex_counts_ptr[0..ring_count];
+    const boundary_indices = boundary_indices_ptr[0..boundary_index_count];
+    const surface_semantic_types = surface_semantic_types_ptr[0..surface_semantic_types_count];
+    const surface_attribute_group_indices = surface_attribute_group_indices_ptr[0..surface_attribute_group_indices_count];
+    const attribute_groups = SourceAttributeGroups{
+        .attributes = grouped_attributes,
+        .offsets = group_offsets,
+    };
+
+    writeReplacedCurrentFeatureLinePolygonal(
+        reader,
+        writer,
+        feature_id,
+        vertices_xyz_world,
+        surface_ring_counts,
+        ring_vertex_counts,
+        boundary_indices,
+        surface_semantic_types,
+        root_attributes,
+        root_attribute_target,
+        surface_attribute_group_indices,
+        attribute_groups,
+    ) catch return -1;
+
+    return 0;
+}
+
+test "CityJSONSeq polygonal writer attaches distinct attributes to outer ceilings" {
+    const allocator = std.testing.allocator;
+    const input_path = "/tmp/zityjson_semantic_surface_attributes_input.city.jsonl";
+    const output_path = "/tmp/zityjson_semantic_surface_attributes_output.city.jsonl";
+    const input =
+        \\{"type":"CityJSON","version":"2.0","transform":{"scale":[1,1,1],"translate":[0,0,0]},"CityObjects":{},"vertices":[]}
+        \\{"type":"CityJSONFeature","id":"B","CityObjects":{"B":{"type":"Building","children":["B-0"],"geometry":[{"type":"MultiSurface","lod":"0","boundaries":[[[0,1,2]]]}]},"B-0":{"type":"BuildingPart","parents":["B"],"geometry":[{"type":"Solid","lod":"2.2","boundaries":[[[[0,1,2]]]],"semantics":{"surfaces":[{"type":"RoofSurface"}],"values":[[0]]}}]}},"vertices":[[0,0,0],[1,0,0],[0,1,0]]}
+        \\
+    ;
+    const input_file = try createFileTruncate(input_path);
+    try writeAll(input_file, input);
+    closeFile(input_file);
+
+    const reader = try CityJSONSeqReader.init(allocator, input_path);
+    defer reader.deinit();
+    try std.testing.expectEqual(@as(c_int, 1), cityjsonseq_next(reader));
+    const writer = try CityJSONSeqWriter.init(allocator, reader, output_path);
+
+    const vertices = [_]f64{
+        0, 0, 2, 1, 0, 2, 0, 1, 2,
+        2, 0, 3, 3, 0, 3, 2, 1, 3,
+    };
+    const surface_ring_counts = [_]u32{ 1, 1 };
+    const ring_vertex_counts = [_]u32{ 3, 3 };
+    const boundary_indices = [_]u32{ 0, 1, 2, 3, 4, 5 };
+    const semantic_types = [_]u8{ SemanticOuterCeilingSurface, SemanticOuterCeilingSurface };
+    const group_indices = [_]u32{ 0, 1 };
+    const group_offsets = [_]u32{ 0, 1, 2 };
+    const attribute_names = [_][*c]const u8{ "underpass_id", "underpass_id" };
+    const attribute_name_lens = [_]usize{ 12, 12 };
+    const attribute_types = [_]u8{ SOURCE_ATTRIBUTE_INTEGER64, SOURCE_ATTRIBUTE_INTEGER64 };
+    const attribute_integer_values = [_]i64{ 101, 202 };
+    const attribute_real_values = [_]f64{ 0, 0 };
+    const attribute_string_values = [_][*c]const u8{ "", "" };
+    const attribute_string_value_lens = [_]usize{ 0, 0 };
+    const grouped_attributes = SourceAttributes{
+        .names = &attribute_names,
+        .name_lens = &attribute_name_lens,
+        .types = &attribute_types,
+        .integer_values = &attribute_integer_values,
+        .real_values = &attribute_real_values,
+        .string_values = &attribute_string_values,
+        .string_value_lens = &attribute_string_value_lens,
+        .count = 2,
+    };
+
+    try writeReplacedCurrentFeatureLinePolygonal(
+        reader,
+        writer,
+        "B",
+        &vertices,
+        &surface_ring_counts,
+        &ring_vertex_counts,
+        &boundary_indices,
+        &semantic_types,
+        null,
+        0,
+        &group_indices,
+        .{ .attributes = grouped_attributes, .offsets = &group_offsets },
+    );
+    writer.deinit();
+
+    const output_reader = try CityJSONSeqReader.init(allocator, output_path);
+    defer output_reader.deinit();
+    const feature_line = try output_reader.readNextMeaningfulLineAlloc() orelse return error.MissingFeatureLine;
+    defer allocator.free(feature_line);
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, feature_line, .{});
+    defer parsed.deinit();
+
+    const city_objects = parsed.value.object.get("CityObjects").?.object;
+    const building_part = city_objects.get("B-0").?.object;
+    try std.testing.expect(building_part.get("attributes") == null);
+    const geometry = building_part.get("geometry").?.array.items[0].object;
+    const semantics = geometry.get("semantics").?.object;
+    const surfaces = semantics.get("surfaces").?.array.items;
+    try std.testing.expectEqual(@as(usize, 2), surfaces.len);
+    try std.testing.expectEqual(@as(i64, 101), surfaces[0].object.get("underpass_id").?.integer);
+    try std.testing.expectEqual(@as(i64, 202), surfaces[1].object.get("underpass_id").?.integer);
+    const values = semantics.get("values").?.array.items[0].array.items;
+    try std.testing.expectEqual(@as(i64, 0), values[0].integer);
+    try std.testing.expectEqual(@as(i64, 1), values[1].integer);
 }
 
 test "save round-trip" {

@@ -36,6 +36,7 @@ constexpr double kSemanticNzThreshold = 0.3;
 // classified as ground; otherwise they are classified as outer ceilings.
 // Units are the same as the mesh coordinate system.
 constexpr double kGroundZTolerance = 0.5;
+constexpr double kUnderpassRoofZTolerance = 5e-2;
 struct Vec2 {
     double x = 0.0;
     double y = 0.0;
@@ -162,9 +163,14 @@ bool cycle_is_simple(
     return true;
 }
 
-void append_surface_header(PolygonalOutput& out, size_t ring_count, uint8_t semantic_type) {
+void append_surface_header(
+    PolygonalOutput& out,
+    size_t ring_count,
+    uint8_t semantic_type,
+    int32_t underpass_index) {
     out.surface_ring_counts.push_back(static_cast<uint32_t>(ring_count));
     out.surface_semantic_types.push_back(semantic_type);
+    out.surface_underpass_indices.push_back(underpass_index);
 }
 
 void append_surface_ring(PolygonalOutput& out, const std::vector<uint32_t>& ring) {
@@ -212,6 +218,83 @@ bool point_in_surface(const Vec2& p, const PreparedSourceSurface& surface) {
         }
     }
     return true;
+}
+
+bool point_on_segment(const Vec2& p, const Vec2& a, const Vec2& b) {
+    const double dx = b.x - a.x;
+    const double dy = b.y - a.y;
+    const double cross = (p.x - a.x) * dy - (p.y - a.y) * dx;
+    const double scale = std::max({1.0, std::abs(dx), std::abs(dy)});
+    if (std::abs(cross) > 1e-9 * scale) {
+        return false;
+    }
+    const double dot = (p.x - a.x) * dx + (p.y - a.y) * dy;
+    const double length_sq = dx * dx + dy * dy;
+    return dot >= -1e-9 && dot <= length_sq + 1e-9;
+}
+
+bool point_in_ogr_ring(const Vec2& p, const std::vector<std::array<double, 3>>& ring) {
+    if (ring.size() < 3) {
+        return false;
+    }
+    bool inside = false;
+    for (size_t i = 0, j = ring.size() - 1; i < ring.size(); j = i++) {
+        const Vec2 a{ring[j][0], ring[j][1]};
+        const Vec2 b{ring[i][0], ring[i][1]};
+        if (point_on_segment(p, a, b)) {
+            return true;
+        }
+        const bool intersects = ((a.y > p.y) != (b.y > p.y)) &&
+            (p.x < (b.x - a.x) * (p.y - a.y) /
+                    ((b.y - a.y) == 0.0 ? 1e-18 : (b.y - a.y)) + a.x);
+        if (intersects) {
+            inside = !inside;
+        }
+    }
+    return inside;
+}
+
+bool point_in_underpass_polygon(const Vec2& p, const ogr::LinearRing& polygon) {
+    if (!point_in_ogr_ring(p, polygon)) {
+        return false;
+    }
+    for (const auto& hole : polygon.interior_rings()) {
+        if (point_in_ogr_ring(p, hole)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+int32_t match_underpass_surface(
+    const FaceGeometry& geom,
+    uint8_t semantic_type,
+    const std::vector<UnderpassSurfaceSource>& underpasses,
+    double offset_x,
+    double offset_y) {
+    if (semantic_type != kOuterCeilingSurface) {
+        return -1;
+    }
+
+    const Vec2 world_centroid{geom.centroid.x() + offset_x, geom.centroid.y() + offset_y};
+    int32_t best_match = -1;
+    double best_z_distance = std::numeric_limits<double>::infinity();
+    for (size_t i = 0; i < underpasses.size(); ++i) {
+        const auto& underpass = underpasses[i];
+        if (underpass.polygon == nullptr) {
+            continue;
+        }
+        const double z_distance = std::abs(geom.avg_z - underpass.roof_z_local);
+        if (z_distance > kUnderpassRoofZTolerance || z_distance >= best_z_distance) {
+            continue;
+        }
+        if (!point_in_underpass_polygon(world_centroid, *underpass.polygon)) {
+            continue;
+        }
+        best_match = static_cast<int32_t>(i);
+        best_z_distance = z_distance;
+    }
+    return best_match;
 }
 
 K::Vector_3 compute_ring_normal(
@@ -635,6 +718,7 @@ bool build_polygonal_output_from_grouped_mesh(
     const Surface_mesh& mesh,
     const std::unordered_map<size_t, size_t>& face_group,
     const std::vector<std::vector<Surface_mesh::Face_index>>& groups,
+    const std::unordered_map<size_t, int32_t>& face_underpass,
     const LoadedSolidMesh& source_mesh,
     double house_min_z,
     double offset_x,
@@ -709,7 +793,9 @@ bool build_polygonal_output_from_grouped_mesh(
                 if (!cycle_is_simple(cycle, dense_vertices, choose_drop_axis(geom.unit_normal), false)) {
                     continue;
                 }
-                append_surface_header(out, 1, face_semantic.at(descriptor_id(face)));
+                const size_t face_id = descriptor_id(face);
+                append_surface_header(
+                    out, 1, face_semantic.at(face_id), face_underpass.at(face_id));
                 append_surface_ring(out, cycle);
             }
             continue;
@@ -721,7 +807,8 @@ bool build_polygonal_output_from_grouped_mesh(
             append_surface_header(
                 out,
                 surface_rings.size(),
-                face_semantic.at(descriptor_id(groups[group_id].front())));
+                face_semantic.at(descriptor_id(groups[group_id].front())),
+                face_underpass.at(descriptor_id(groups[group_id].front())));
             for (const auto& cycle : surface_rings) {
                 append_surface_ring(out, cycle);
             }
@@ -738,6 +825,7 @@ bool build_polygonal_output_from_cgal_mesh(
     const LoadedSolidMesh& source_mesh,
     double house_min_z,
     double underpass_z,
+    const std::vector<UnderpassSurfaceSource>& underpasses,
     double offset_x,
     double offset_y,
     double offset_z,
@@ -751,12 +839,17 @@ bool build_polygonal_output_from_cgal_mesh(
     const auto prepared_sources = prepare_source_surfaces(source_mesh);
     std::unordered_map<size_t, FaceGeometry> face_geometry;
     std::unordered_map<size_t, uint8_t> face_semantic;
+    std::unordered_map<size_t, int32_t> face_underpass;
     face_geometry.reserve(result_mesh.number_of_faces());
     face_semantic.reserve(result_mesh.number_of_faces());
+    face_underpass.reserve(result_mesh.number_of_faces());
     for (auto face : result_mesh.faces()) {
         auto geom = compute_face_geometry(result_mesh, face);
         const size_t face_id = descriptor_id(face);
-        face_semantic.emplace(face_id, infer_face_semantic(geom, prepared_sources, house_min_z));
+        const uint8_t semantic_type = infer_face_semantic(geom, prepared_sources, house_min_z);
+        face_semantic.emplace(face_id, semantic_type);
+        face_underpass.emplace(
+            face_id, match_underpass_surface(geom, semantic_type, underpasses, offset_x, offset_y));
         face_geometry.emplace(face_id, std::move(geom));
     }
 
@@ -796,6 +889,9 @@ bool build_polygonal_output_from_cgal_mesh(
                 if (face_semantic.at(neighbor_id) != seed_semantic) {
                     continue;
                 }
+                if (face_underpass.at(neighbor_id) != face_underpass.at(seed_id)) {
+                    continue;
+                }
                 if (!face_is_coplanar_with_group(
                         result_mesh,
                         face_geometry.at(neighbor_id),
@@ -816,6 +912,7 @@ bool build_polygonal_output_from_cgal_mesh(
         result_mesh,
         face_group,
         groups,
+        face_underpass,
         source_mesh,
         house_min_z,
         offset_x,
@@ -829,6 +926,7 @@ bool build_polygonal_output_from_manifold_meshgl(
     const LoadedSolidMesh& source_mesh,
     double house_min_z,
     double underpass_z,
+    const std::vector<UnderpassSurfaceSource>& underpasses,
     double offset_x,
     double offset_y,
     double offset_z,
@@ -869,8 +967,50 @@ bool build_polygonal_output_from_manifold_meshgl(
         source_mesh,
         house_min_z,
         underpass_z,
+        underpasses,
         offset_x,
         offset_y,
         offset_z,
         out);
+}
+
+std::vector<int32_t> match_triangle_outer_ceiling_surfaces(
+    const manifold::MeshGL& mesh,
+    const std::vector<uint8_t>& semantic_types,
+    const std::vector<UnderpassSurfaceSource>& underpasses,
+    double offset_x,
+    double offset_y) {
+    const size_t triangle_count = mesh.NumTri();
+    std::vector<int32_t> matches(triangle_count, -1);
+    if (mesh.numProp < 3 || semantic_types.size() != triangle_count) {
+        return matches;
+    }
+
+    for (size_t triangle_index = 0; triangle_index < triangle_count; ++triangle_index) {
+        const uint32_t i0 = mesh.triVerts[triangle_index * 3 + 0];
+        const uint32_t i1 = mesh.triVerts[triangle_index * 3 + 1];
+        const uint32_t i2 = mesh.triVerts[triangle_index * 3 + 2];
+        if (i0 >= mesh.NumVert() || i1 >= mesh.NumVert() || i2 >= mesh.NumVert()) {
+            continue;
+        }
+        const auto point = [&](uint32_t index) {
+            return K::Point_3(
+                mesh.vertProperties[index * mesh.numProp + 0],
+                mesh.vertProperties[index * mesh.numProp + 1],
+                mesh.vertProperties[index * mesh.numProp + 2]);
+        };
+        const K::Point_3 p0 = point(i0);
+        const K::Point_3 p1 = point(i1);
+        const K::Point_3 p2 = point(i2);
+        FaceGeometry geom;
+        geom.centroid = K::Point_3(
+            (p0.x() + p1.x() + p2.x()) / 3.0,
+            (p0.y() + p1.y() + p2.y()) / 3.0,
+            (p0.z() + p1.z() + p2.z()) / 3.0);
+        geom.avg_z = geom.centroid.z();
+        geom.unit_normal = normalize_vector(CGAL::cross_product(p1 - p0, p2 - p0));
+        matches[triangle_index] = match_underpass_surface(
+            geom, semantic_types[triangle_index], underpasses, offset_x, offset_y);
+    }
+    return matches;
 }

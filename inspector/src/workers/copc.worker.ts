@@ -50,14 +50,17 @@ function pointTargetDepth(pointBudget: number) {
   return 12;
 }
 
-function expandBounds(bounds: LoadRequest["bounds"]): Bounds {
+function expandHorizontalBounds(
+  bounds: LoadRequest["bounds"],
+  datasetBounds: Bounds,
+): Bounds {
   return [
     bounds[0][0] - 3,
     bounds[0][1] - 3,
-    bounds[0][2] - 3,
+    datasetBounds[2],
     bounds[1][0] + 3,
     bounds[1][1] + 3,
-    bounds[1][2] + 3,
+    datasetBounds[5],
   ];
 }
 
@@ -122,7 +125,7 @@ async function load(request: LoadRequest) {
     locateFile: () => new URL("/laz-perf.wasm", self.location.origin).href,
   });
   post({ type: "metadata", totalPoints: copc.header.pointCount });
-  const target = expandBounds(request.bounds);
+  const target = expandHorizontalBounds(request.bounds, copc.info.cube);
   const nodes = await discoverNodes(getter, copc, target, pointTargetDepth(request.pointBudget));
   const candidateCount = nodes.reduce((sum, record) => sum + record.node.pointCount, 0);
   const stride = Math.max(1, Math.ceil(candidateCount / request.pointBudget));
@@ -143,7 +146,7 @@ async function load(request: LoadRequest) {
       const x = getX(index);
       const y = getY(index);
       const z = getZ(index);
-      if (x < target[0] || x > target[3] || y < target[1] || y > target[4] || z < target[2] || z > target[5]) continue;
+      if (x < target[0] || x > target[3] || y < target[1] || y > target[4]) continue;
       positions.push(x - request.origin[0], y - request.origin[1], z - request.origin[2]);
       colors.push(...getColor(index));
     }
