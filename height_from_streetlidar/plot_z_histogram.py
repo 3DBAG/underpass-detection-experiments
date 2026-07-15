@@ -428,11 +428,10 @@ def write_metrics_csv(rows, output_path):
     with open(output_path, "w", newline="") as csv_file:
         writer = csv.DictWriter(
             csv_file,
+            lineterminator="\n",
             fieldnames=[
                 "identificatie",
-                "underpass_z_min",
-                "underpass_z_max",
-                "underpass_h",
+                "underpass_z",
                 "underpass_candidate_peaks",
             ],
         )

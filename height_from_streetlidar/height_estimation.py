@@ -706,9 +706,7 @@ def estimate_underpass_height_from_points(identifier, x, y, z, geometries, verbo
     }
     underpass_metrics = {
         "identificatie": bag_id,
-        "underpass_z_min": selected_peak_layers[0]["z_min"],
-        "underpass_z_max": selected_peak_layers[-1]["z_max"],
-        "underpass_h": underpass_attributes["underpass_dh"],
+        "underpass_z": selected_peak_layers[-1]["peak_center"],
         "underpass_candidate_peaks": candidate_peak_summaries,
     }
 

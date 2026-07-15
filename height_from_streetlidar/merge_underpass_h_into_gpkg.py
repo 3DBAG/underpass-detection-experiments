@@ -8,8 +8,8 @@ from pathlib import Path
 CSV_PATH = Path("underpass_heights.csv")
 GPKG_PATH = Path("/Users/ravi/git/underpass-detection-experiments/modelling_3d/sample_data/demo_ams_underpasses.gpkg")
 FEATURE_TABLE = "offset_polygons"
-TARGET_COLUMN = "underpass_h"
-SOURCE_COLUMN = "underpass_h_source"
+TARGET_COLUMN = "underpass_z"
+SOURCE_COLUMN = "underpass_source"
 RANDOM_MIN = 2.5
 RANDOM_MAX = 3.5
 RANDOM_SEED = 42
@@ -93,9 +93,9 @@ def load_underpass_values(csv_path):
     with csv_path.open(newline="") as csv_file:
         reader = csv.DictReader(csv_file)
         return {
-            row["identificatie"]: float(row["underpass_h"])
+            row["identificatie"]: float(row["underpass_z"])
             for row in reader
-            if row.get("identificatie") and row.get("underpass_h")
+            if row.get("identificatie") and row.get("underpass_z")
         }
 
 

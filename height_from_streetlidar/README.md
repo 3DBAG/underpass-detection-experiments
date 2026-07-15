@@ -24,7 +24,8 @@ The final two underpass peaks are chosen as the two peaks with the largest conti
   - exclusive cells with lower peaks masked out
   - related wall cells between adjacent peaks
 - One PNG per BAG id, named `<bag_id>_peak_grids_overlay.png`
-- A CSV summary written to `underpass_heights.csv`
+- A CSV summary written to `underpass_heights.csv`, reporting the selected
+  overhead peak elevation as `underpass_z` along with the candidate-peak details
 - A Rerun visualization sent to the viewer by default
 
 ## Example Cases
