@@ -252,6 +252,7 @@ export default function App() {
   const keyboardActionsRef = useRef<{
     toggleStatus: (status: ReviewStatus) => void;
     cycleModel: () => void;
+    centerUnderpass: () => void;
     previous: () => void;
     next: () => void;
   } | undefined>(undefined);
@@ -293,6 +294,20 @@ export default function App() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    const firstUnderpassBuilding = underpassIds?.[0];
+    if (buildingId || !firstUnderpassBuilding) return;
+
+    const url = new URL(window.location.href);
+    url.searchParams.set("building", firstUnderpassBuilding);
+    url.searchParams.delete("underpass");
+    window.history.replaceState({}, "", url);
+    setInputId(firstUnderpassBuilding);
+    setBuildingId(firstUnderpassBuilding);
+    setSelectedUnderpassId(undefined);
+    setPickedPoint(undefined);
+  }, [buildingId, underpassIds]);
 
   useEffect(() => {
     const request = ++requestRef.current;
@@ -438,10 +453,13 @@ export default function App() {
       } else if (event.key.toLowerCase() === "t") {
         event.preventDefault();
         keyboardActionsRef.current?.cycleModel();
-      } else if (event.key === "ArrowLeft") {
+      } else if (event.key.toLowerCase() === "c") {
+        event.preventDefault();
+        keyboardActionsRef.current?.centerUnderpass();
+      } else if (event.key === "ArrowLeft" || event.key.toLowerCase() === "q") {
         event.preventDefault();
         keyboardActionsRef.current?.previous();
-      } else if (event.key === "ArrowRight") {
+      } else if (event.key === "ArrowRight" || event.key.toLowerCase() === "w") {
         event.preventDefault();
         keyboardActionsRef.current?.next();
       }
@@ -645,6 +663,7 @@ export default function App() {
       if (!reviewStatusesDisabled) toggleReviewStatus(status);
     },
     cycleModel: cycleModelVisibility,
+    centerUnderpass: () => viewerRef.current?.centerSelectedUnderpass(),
     previous: () => {
       if (canGoPrevious) selectUnderpassBuilding(underpassIndex - 1);
     },
@@ -694,6 +713,8 @@ export default function App() {
                     <div><dt><kbd>3</kbd></dt><dd>Toggle PointCloud insufficient</dd></div>
                     <div><dt><kbd>4</kbd></dt><dd>Toggle Faulty underpass geometry</dd></div>
                     <div><dt><kbd>T</kbd></dt><dd>Full model → outer ceiling → hidden</dd></div>
+                    <div><dt><kbd>C</kbd></dt><dd>Center selected underpass</dd></div>
+                    <div><dt><kbd>Q</kbd><kbd>W</kbd></dt><dd>Previous / next underpass</dd></div>
                     <div><dt><kbd>←</kbd><kbd>→</kbd></dt><dd>Previous / next underpass</dd></div>
                   </dl>
                   <p className="shortcut-note">Numbered tags apply to the selected underpass. Missing peak-detection data defaults to PointCloud insufficient and remains user-overridable.</p>

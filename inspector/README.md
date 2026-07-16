@@ -16,7 +16,7 @@ The `wasmwork` serializer currently fetches every extension schema URL while fin
 
 Messages such as `Attribute identificatie not found in schema` are currently printed once for CityObjects such as `BuildingPart` that do not carry that attribute. The corresponding parent `Building` does carry it, so these messages do not prevent creation of the `identificatie` index.
 
-The manifest is ordered by building ID. It lets the browser resolve previous/next positions—including for a building entered directly—while individual buildings are still fetched through the FCB `identificatie` index.
+The manifest contains one entry per building and is ordered by the largest numeric `underpass_area` found on its `OuterCeilingSurface` records, descending. Building ID is the stable tie-breaker. This lets the browser move from buildings with the largest individual underpass to smaller ones while individual buildings are still fetched through the FCB `identificatie` index.
 
 The app vendors the generated WASM bindings from `Ylannl/flatcitybuf` branch `wasmwork`. It uses `HttpFcbReader.select_attr_query_paged` and requests one matching feature.
 
@@ -68,7 +68,7 @@ The building-level `PUT` accepts only `Highlight`; the underpass-level `PUT` acc
 
 Version 1 tag databases are migrated losslessly when first written. Highlight moves directly to the building. A status is automatically attached when the loaded building has exactly one underpass; for multi-underpass buildings it remains an unassigned legacy status until the reviewer explicitly assigns it in the UI.
 
-Review statuses can be clicked directly or toggled with `1`, `2`, `3`, and `4`. Use the left and right arrow keys to move to the previous or next underpass object. Press `T` to cycle the building display through the complete model, outer ceiling surfaces only, and no model. The `?` button in the header lists these shortcuts and explains the review tags. Keyboard shortcuts are suspended while typing in a field or adjusting a slider.
+Review statuses can be clicked directly or toggled with `1`, `2`, `3`, and `4`. Use `Q` / `W` or the left / right arrow keys to move to the previous or next underpass object. Press `C` to frame the selected underpass, or `T` to cycle the building display through the complete model, outer ceiling surfaces only, and no model. The `?` button in the header lists these shortcuts and explains the review tags. Keyboard shortcuts are suspended while typing in a field or adjusting a slider.
 
 When an underpass has no `underpass_candidate_peaks` semantic-surface attribute, it receives `PointCloud insufficient` automatically. This is a default rather than a lock: reviewers can replace or clear it, and that explicit override is retained on later loads. Existing explicit statuses are never overwritten. `Highlight` remains available independently.
 

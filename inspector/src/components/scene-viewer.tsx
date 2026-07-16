@@ -43,6 +43,8 @@ type ArcballControlsWithFocus = ArcballControls & {
 };
 
 const CAMERA_FOV = 45;
+const CAMERA_NEAR = 0.02;
+const CAMERA_MIN_DISTANCE = 0.05;
 const PICK_TOLERANCE_PX = 6;
 
 export interface PointCloudStatus {
@@ -54,6 +56,7 @@ export interface PointCloudStatus {
 
 export interface SceneViewerHandle {
   resetCamera: () => void;
+  centerSelectedUnderpass: () => void;
 }
 
 export interface PickedWorldPoint {
@@ -92,27 +95,51 @@ type CopcWorkerMessage =
   | { type: "done" }
   | { type: "error"; message: string };
 
-function frameBounds(context: SceneContext, bounds: Box3) {
+function frameBounds(
+  context: SceneContext,
+  bounds: Box3,
+  viewDirection = new Vector3(0.72, -0.92, 0.62).normalize(),
+  navigationBounds = bounds,
+  viewUp = new Vector3(0, 0, 1),
+) {
   const center = bounds.getCenter(new Vector3());
   const size = bounds.getSize(new Vector3());
   const radius = Math.max(size.length() * 0.5, 1);
+  const navigationRadius = Math.max(
+    navigationBounds.getSize(new Vector3()).length() * 0.5,
+    radius,
+  );
   const halfVerticalFov = MathUtils.degToRad(CAMERA_FOV * 0.5);
   const halfHorizontalFov = Math.atan(Math.tan(halfVerticalFov) * context.camera.aspect);
   const distance = (radius * 1.18) / Math.sin(Math.min(halfVerticalFov, halfHorizontalFov));
-  const viewDirection = new Vector3(0.72, -0.92, 0.62).normalize();
   context.camera.position.copy(center).addScaledVector(viewDirection, distance);
-  context.camera.up.set(0, 0, 1);
+  context.camera.up.copy(viewUp);
   context.camera.fov = CAMERA_FOV;
-  context.camera.near = Math.max(radius * 0.01, 0.01);
-  context.camera.far = radius * 200;
+  context.camera.near = CAMERA_NEAR;
+  context.camera.far = Math.max(navigationRadius * 200, 10_000);
   context.camera.zoom = 1;
   context.camera.updateProjectionMatrix();
   context.controls.target.copy(center);
-  context.controls.minDistance = radius * 0.15;
-  context.controls.maxDistance = radius * 100;
+  context.controls.minDistance = CAMERA_MIN_DISTANCE;
+  context.controls.maxDistance = navigationRadius * 100;
   context.controls.setCamera(context.camera);
   context.controls.saveState();
   context.render();
+}
+
+function selectedUnderpassBounds(building: BuildingScene, underpassId: string) {
+  building.group.updateWorldMatrix(true, true);
+  const bounds = new Box3();
+  building.group.children.forEach((object) => {
+    if (
+      object instanceof Mesh &&
+      object.name === OUTER_CEILING_SURFACE &&
+      object.userData.underpassId === underpassId
+    ) {
+      bounds.expandByObject(object, true);
+    }
+  });
+  return bounds.isEmpty() ? undefined : bounds;
 }
 
 function centerViewAt(context: SceneContext, point: Vector3) {
@@ -152,15 +179,39 @@ export const SceneViewer = forwardRef<SceneViewerHandle, SceneViewerProps>(
     const pointCloudVisibleRef = useRef(pointCloudVisible);
     const pointSizeRef = useRef(pointSize);
     const onPickPointRef = useRef(onPickPoint);
+    const selectedUnderpassIdRef = useRef(selectedUnderpassId);
     pointCloudVisibleRef.current = pointCloudVisible;
     pointSizeRef.current = pointSize;
     onPickPointRef.current = onPickPoint;
+    selectedUnderpassIdRef.current = selectedUnderpassId;
 
     useImperativeHandle(ref, () => ({
       resetCamera() {
         const context = contextRef.current;
         const currentBuilding = buildingRef.current;
         if (context && currentBuilding) frameBounds(context, currentBuilding.localBounds);
+      },
+      centerSelectedUnderpass() {
+        const context = contextRef.current;
+        const currentBuilding = buildingRef.current;
+        const underpassId = selectedUnderpassIdRef.current;
+        if (!context || !currentBuilding || !underpassId) return;
+        const bounds = selectedUnderpassBounds(currentBuilding, underpassId);
+        if (!bounds) return;
+
+        const directionFromTarget = context.camera
+          .getWorldDirection(new Vector3())
+          .negate();
+        const viewUp = new Vector3(0, 1, 0).applyQuaternion(
+          context.camera.quaternion,
+        );
+        frameBounds(
+          context,
+          bounds,
+          directionFromTarget,
+          currentBuilding.localBounds,
+          viewUp,
+        );
       },
     }));
 
@@ -170,7 +221,7 @@ export const SceneViewer = forwardRef<SceneViewerHandle, SceneViewerProps>(
 
       const scene = new Scene();
       scene.background = new Color(0xe8ece8);
-      const camera = new PerspectiveCamera(CAMERA_FOV, 1, 0.01, 10000);
+      const camera = new PerspectiveCamera(CAMERA_FOV, 1, CAMERA_NEAR, 10000);
       camera.up.set(0, 0, 1);
       const renderer = new WebGLRenderer({ antialias: true });
       renderer.domElement.style.cursor = "crosshair";
