@@ -123,10 +123,9 @@ const CJGeometryType = enum { MultiSurface, Solid };
 const CJObjectType = enum { Building, BuildingPart };
 
 pub const CityJSON = struct {
-
     pub const StoredCityObject = struct {
         type: CJObjectType,
-        geometries: [] StoredGeometry,
+        geometries: []StoredGeometry,
 
         pub fn init(allocator: std.mem.Allocator, object_type: CJObjectType, num_geometries: usize) !StoredCityObject {
             return StoredCityObject{
@@ -136,10 +135,10 @@ pub const CityJSON = struct {
         }
 
         pub fn deinit(self: *StoredCityObject, allocator: std.mem.Allocator) void {
-          for (self.geometries) |*geometry| {
-            geometry.deinit(allocator);
-          }
-          allocator.free(self.geometries);
+            for (self.geometries) |*geometry| {
+                geometry.deinit(allocator);
+            }
+            allocator.free(self.geometries);
         }
     };
 
@@ -195,18 +194,18 @@ pub const CityJSON = struct {
     objects: std.array_hash_map.String(StoredCityObject),
 
     pub fn init(allocator: std.mem.Allocator) !CityJSON {
-            return CityJSON{
-                .allocator = allocator,
-                // .file = undefined,
-                .objects = .empty,
-            };
+        return CityJSON{
+            .allocator = allocator,
+            // .file = undefined,
+            .objects = .empty,
+        };
     }
 
     pub fn deinit(self: *CityJSON) void {
         for (self.objects.keys(), self.objects.values()) |key, *object| {
             object.deinit(self.allocator);
             // need to add 1 to account for null terminator (needed for C api)
-            self.allocator.free(key.ptr[0..key.len + 1]);
+            self.allocator.free(key.ptr[0 .. key.len + 1]);
         }
         self.objects.deinit(self.allocator);
     }
@@ -214,7 +213,7 @@ pub const CityJSON = struct {
     /// Add a new CityObject. Returns the object index.
     pub fn addObject(self: *CityJSON, name: []const u8, object_type: CJObjectType) !usize {
         const owned_key = try self.allocator.dupeZ(u8, name);
-        errdefer self.allocator.free(owned_key.ptr[0..owned_key.len + 1]);
+        errdefer self.allocator.free(owned_key.ptr[0 .. owned_key.len + 1]);
         try self.objects.put(self.allocator, owned_key, try StoredCityObject.init(self.allocator, object_type, 0));
         return self.objects.count() - 1;
     }
@@ -367,12 +366,12 @@ pub const CityJSON = struct {
     ) !void {
         for (city_objs.map.keys(), city_objs.map.values()) |key, obj| {
             const owned_key = try self.allocator.dupeZ(u8, key);
-            errdefer self.allocator.free(owned_key.ptr[0..owned_key.len + 1]);
+            errdefer self.allocator.free(owned_key.ptr[0 .. owned_key.len + 1]);
 
             var entry = try self.objects.getOrPut(self.allocator, owned_key);
             if (entry.found_existing) {
                 // Existing entry keeps ownership of its original key allocation.
-                self.allocator.free(owned_key.ptr[0..owned_key.len + 1]);
+                self.allocator.free(owned_key.ptr[0 .. owned_key.len + 1]);
             }
 
             const new_object = try StoredCityObject.init(self.allocator, obj.type, obj.geometry.len);
@@ -762,7 +761,6 @@ pub const CityJSON = struct {
         }
         try jw.endObject();
     }
-
 };
 
 // // =============================================================================
@@ -1861,6 +1859,47 @@ fn sourceAttributesFromC(
     };
 }
 
+fn quantizedRingArea3d(
+    vertices: []const [3]i64,
+    ring_indices: []const usize,
+    scale: [3]f64,
+) !f64 {
+    if (ring_indices.len < 3) return error.InvalidReplacementGeometry;
+    const origin_index = ring_indices[0];
+    if (origin_index >= vertices.len) return error.InvalidReplacementGeometry;
+    const origin = vertices[origin_index];
+
+    var twice_area_vector = [3]f64{ 0.0, 0.0, 0.0 };
+    for (1..(ring_indices.len - 1)) |i| {
+        const current_index = ring_indices[i];
+        const next_index = ring_indices[i + 1];
+        if (current_index >= vertices.len or next_index >= vertices.len) {
+            return error.InvalidReplacementGeometry;
+        }
+        const current_coord = vertices[current_index];
+        const next_coord = vertices[next_index];
+        const current = [3]f64{
+            (@as(f64, @floatFromInt(current_coord[0])) - @as(f64, @floatFromInt(origin[0]))) * scale[0],
+            (@as(f64, @floatFromInt(current_coord[1])) - @as(f64, @floatFromInt(origin[1]))) * scale[1],
+            (@as(f64, @floatFromInt(current_coord[2])) - @as(f64, @floatFromInt(origin[2]))) * scale[2],
+        };
+        const next = [3]f64{
+            (@as(f64, @floatFromInt(next_coord[0])) - @as(f64, @floatFromInt(origin[0]))) * scale[0],
+            (@as(f64, @floatFromInt(next_coord[1])) - @as(f64, @floatFromInt(origin[1]))) * scale[1],
+            (@as(f64, @floatFromInt(next_coord[2])) - @as(f64, @floatFromInt(origin[2]))) * scale[2],
+        };
+        twice_area_vector[0] += current[1] * next[2] - current[2] * next[1];
+        twice_area_vector[1] += current[2] * next[0] - current[0] * next[2];
+        twice_area_vector[2] += current[0] * next[1] - current[1] * next[0];
+    }
+
+    return 0.5 * @sqrt(
+        twice_area_vector[0] * twice_area_vector[0] +
+            twice_area_vector[1] * twice_area_vector[1] +
+            twice_area_vector[2] * twice_area_vector[2],
+    );
+}
+
 fn writeReplacedCurrentFeatureLinePolygonal(
     reader: *CityJSONSeqReader,
     writer: *CityJSONSeqWriter,
@@ -2030,16 +2069,23 @@ fn writeReplacedCurrentFeatureLinePolygonal(
         }
     }
 
+    const no_attribute_group = std.math.maxInt(u32);
+    const surface_attribute_group_count = if (surface_attribute_groups) |groups| groups.count() else 0;
+    const surface_attribute_group_areas = try arena_alloc.alloc(f64, surface_attribute_group_count);
+    @memset(surface_attribute_group_areas, 0.0);
+
     var shell_polygons = std.json.Array.init(arena_alloc);
     var ring_cursor: usize = 0;
     var boundary_cursor: usize = 0;
-    for (surface_ring_counts) |surface_ring_count| {
+    for (surface_ring_counts, 0..) |surface_ring_count, geometry_surface_index| {
         var polygon = std.json.Array.init(arena_alloc);
-        for (0..surface_ring_count) |_| {
+        var surface_area: f64 = 0.0;
+        for (0..surface_ring_count) |surface_ring_index| {
             if (ring_cursor >= ring_vertex_counts.len) return error.InvalidReplacementGeometry;
             const ring_size = ring_vertex_counts[ring_cursor];
             ring_cursor += 1;
 
+            const ring_boundary_start = boundary_cursor;
             var ring = std.json.Array.init(arena_alloc);
             try ring.ensureTotalCapacity(ring_size);
             for (0..ring_size) |_| {
@@ -2047,7 +2093,27 @@ fn writeReplacedCurrentFeatureLinePolygonal(
                 ring.appendAssumeCapacity(.{ .integer = @intCast(remapped_boundary_indices.items[boundary_cursor]) });
                 boundary_cursor += 1;
             }
+            const ring_area = try quantizedRingArea3d(
+                new_vertices.items,
+                remapped_boundary_indices.items[ring_boundary_start..boundary_cursor],
+                reader.seq_transform.scale,
+            );
+            if (surface_ring_index == 0) {
+                surface_area += ring_area;
+            } else {
+                surface_area -= ring_area;
+            }
             try polygon.append(.{ .array = ring });
+        }
+        const attribute_group = if (surface_semantic_types[geometry_surface_index] == SemanticOuterCeilingSurface and surface_attribute_group_indices != null)
+            surface_attribute_group_indices.?[geometry_surface_index]
+        else
+            no_attribute_group;
+        if (attribute_group != no_attribute_group) {
+            if (attribute_group >= surface_attribute_group_areas.len) {
+                return error.InvalidSourceAttributeGroup;
+            }
+            surface_attribute_group_areas[attribute_group] += @max(surface_area, 0.0);
         }
         try shell_polygons.append(.{ .array = polygon });
     }
@@ -2058,7 +2124,6 @@ fn writeReplacedCurrentFeatureLinePolygonal(
     try solid_boundaries.append(.{ .array = shell_polygons });
 
     var surfaces = std.json.Array.init(arena_alloc);
-    const no_attribute_group = std.math.maxInt(u32);
     const SemanticSurfaceKey = struct {
         semantic_type: u8,
         attribute_group: u32,
@@ -2069,7 +2134,7 @@ fn writeReplacedCurrentFeatureLinePolygonal(
     defer semantic_values.deinit(arena_alloc);
 
     for (surface_semantic_types, 0..) |semantic_type, geometry_surface_index| {
-        const attribute_group = if (semantic_type == 4 and surface_attribute_group_indices != null)
+        const attribute_group = if (semantic_type == SemanticOuterCeilingSurface and surface_attribute_group_indices != null)
             surface_attribute_group_indices.?[geometry_surface_index]
         else
             no_attribute_group;
@@ -2091,6 +2156,11 @@ fn writeReplacedCurrentFeatureLinePolygonal(
                 if (try groups.group(attribute_group)) |attributes| {
                     try mergeAttributesIntoObject(arena_alloc, &surface_obj, attributes);
                 }
+                try surface_obj.put(
+                    arena_alloc,
+                    "underpass_area",
+                    .{ .float = surface_attribute_group_areas[attribute_group] },
+                );
             }
             const idx = surfaces.items.len;
             try surfaces.append(.{ .object = surface_obj });
@@ -2572,14 +2642,22 @@ test "CityJSONSeq polygonal writer attaches distinct attributes to outer ceiling
     const writer = try CityJSONSeqWriter.init(allocator, reader, output_path);
 
     const vertices = [_]f64{
-        0, 0, 2, 1, 0, 2, 0, 1, 2,
-        2, 0, 3, 3, 0, 3, 2, 1, 3,
+        0,  0,  2, 2,  0,  2, 2, 2,  2, 0, 2,  2,
+        3,  0,  2, 4,  0,  2, 3, 1,  2, 0, 4,  3,
+        3,  4,  3, 3,  7,  3, 0, 7,  3, 1, 5,  3,
+        2,  5,  3, 2,  6,  3, 1, 6,  3, 0, 10, 5,
+        10, 10, 5, 10, 20, 5, 0, 20, 5,
     };
-    const surface_ring_counts = [_]u32{ 1, 1 };
-    const ring_vertex_counts = [_]u32{ 3, 3 };
-    const boundary_indices = [_]u32{ 0, 1, 2, 3, 4, 5 };
-    const semantic_types = [_]u8{ SemanticOuterCeilingSurface, SemanticOuterCeilingSurface };
-    const group_indices = [_]u32{ 0, 1 };
+    const surface_ring_counts = [_]u32{ 1, 1, 2, 1 };
+    const ring_vertex_counts = [_]u32{ 4, 3, 4, 4, 4 };
+    const boundary_indices = [_]u32{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18 };
+    const semantic_types = [_]u8{
+        SemanticOuterCeilingSurface,
+        SemanticOuterCeilingSurface,
+        SemanticOuterCeilingSurface,
+        SemanticRoofSurface,
+    };
+    const group_indices = [_]u32{ 0, 0, 1, 0 };
     const group_offsets = [_]u32{ 0, 1, 2 };
     const attribute_names = [_][*c]const u8{ "underpass_id", "underpass_id" };
     const attribute_name_lens = [_]usize{ 12, 12 };
@@ -2628,12 +2706,28 @@ test "CityJSONSeq polygonal writer attaches distinct attributes to outer ceiling
     const geometry = building_part.get("geometry").?.array.items[0].object;
     const semantics = geometry.get("semantics").?.object;
     const surfaces = semantics.get("surfaces").?.array.items;
-    try std.testing.expectEqual(@as(usize, 2), surfaces.len);
+    try std.testing.expectEqual(@as(usize, 3), surfaces.len);
     try std.testing.expectEqual(@as(i64, 101), surfaces[0].object.get("underpass_id").?.integer);
     try std.testing.expectEqual(@as(i64, 202), surfaces[1].object.get("underpass_id").?.integer);
+    const first_area = surfaces[0].object.get("underpass_area").?;
+    const second_area = surfaces[1].object.get("underpass_area").?;
+    try std.testing.expectEqual(@as(f64, 4.5), switch (first_area) {
+        .float => |value| value,
+        .integer => |value| @as(f64, @floatFromInt(value)),
+        else => return error.InvalidJsonNumber,
+    });
+    try std.testing.expectEqual(@as(f64, 8.0), switch (second_area) {
+        .float => |value| value,
+        .integer => |value| @as(f64, @floatFromInt(value)),
+        else => return error.InvalidJsonNumber,
+    });
+    try std.testing.expectEqualStrings("RoofSurface", surfaces[2].object.get("type").?.string);
+    try std.testing.expect(surfaces[2].object.get("underpass_area") == null);
     const values = semantics.get("values").?.array.items[0].array.items;
     try std.testing.expectEqual(@as(i64, 0), values[0].integer);
-    try std.testing.expectEqual(@as(i64, 1), values[1].integer);
+    try std.testing.expectEqual(@as(i64, 0), values[1].integer);
+    try std.testing.expectEqual(@as(i64, 1), values[2].integer);
+    try std.testing.expectEqual(@as(i64, 2), values[3].integer);
 }
 
 test "save round-trip" {
