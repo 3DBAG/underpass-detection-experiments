@@ -72,7 +72,7 @@ DEFAULT_DECOMPRESSION = "xyz"
 DEFAULT_BATCH_WORKERS = 1
 
 RESULT_COLUMNS = {
-    "underpass_z": "double precision",
+    "underpass_candidate_elevations": "double precision[]",
     "underpass_source": "text",
     "underpass_status": "text",
     "underpass_candidate_peaks": "jsonb",
@@ -181,7 +181,7 @@ class HeightResult:
     status: str
     point_count: int
     laz_count: int
-    underpass_z: float | None = None
+    candidate_elevations: list[float] | None = None
     candidate_peaks: list[dict[str, object]] | None = None
     error: str | None = None
 
@@ -333,7 +333,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=[],
         help="Only process rows with this identificatie/BAG building id. Can be passed multiple times.",
     )
-    parser.add_argument("--all", action="store_true", help="Process rows even when underpass_z is already filled.")
+    parser.add_argument("--all", action="store_true", help="Process rows even when underpass_candidate_elevations is already filled.")
     parser.add_argument(
         "--plot-dir",
         type=Path,
@@ -402,7 +402,7 @@ def fetch_pending_records(conn: psycopg.Connection, args: argparse.Namespace) ->
         conditions.append(sql.SQL("underpass_status = ANY(%s::text[])"))
         params.append(args.only_status)
     elif not args.all:
-        conditions.append(sql.SQL("underpass_z IS NULL"))
+        conditions.append(sql.SQL("underpass_candidate_elevations IS NULL"))
 
     if args.only_underpass_id:
         conditions.append(sql.SQL("underpass_id = ANY(%s)"))
@@ -477,11 +477,11 @@ def fetch_table_summary(conn: psycopg.Connection, table_name: str) -> dict[str, 
                 WHERE geom IS NOT NULL
                   AND NOT ST_IsEmpty(geom)
                   AND (
-                    underpass_z IS NULL
+                    underpass_candidate_elevations IS NULL
                     OR underpass_status IN ('failed', 'no_laz_tiles', 'no_points', 'too_few_points')
                   )
             ) AS pending_rows,
-            count(*) FILTER (WHERE underpass_z IS NOT NULL) AS rows_with_height
+            count(*) FILTER (WHERE underpass_candidate_elevations IS NOT NULL) AS rows_with_elevations
         FROM {table}
         """
     ).format(table=table_identifier(table_name))
@@ -497,7 +497,7 @@ def fetch_table_summary(conn: psycopg.Connection, table_name: str) -> dict[str, 
 
     with conn.cursor() as cur:
         cur.execute(query)
-        total_rows, usable_geom_rows, pending_rows, rows_with_height = cur.fetchone()
+        total_rows, usable_geom_rows, pending_rows, rows_with_elevations = cur.fetchone()
         cur.execute(status_query)
         statuses = cur.fetchall()
 
@@ -505,7 +505,7 @@ def fetch_table_summary(conn: psycopg.Connection, table_name: str) -> dict[str, 
         "total_rows": total_rows,
         "usable_geom_rows": usable_geom_rows,
         "pending_rows": pending_rows,
-        "rows_with_height": rows_with_height,
+        "rows_with_elevations": rows_with_elevations,
         "statuses": statuses,
     }
 
@@ -539,7 +539,6 @@ def null_result_values(
         identificatie=identificatie,
         underpass_id=underpass_id,
         status=status,
-        underpass_z=None,
         point_count=point_count,
         laz_count=laz_count,
         candidate_peaks=None,
@@ -696,7 +695,7 @@ def run_height_estimation_task(task: HeightEstimationTask) -> HeightResult:
             identificatie=task.identificatie,
             underpass_id=task.underpass_id,
             status="success",
-            underpass_z=float(metrics["underpass_z"]),
+            candidate_elevations=metrics["underpass_candidate_elevations"],
             candidate_peaks=metrics["underpass_candidate_peaks"],
             point_count=task.point_count,
             laz_count=task.laz_count,
@@ -716,9 +715,9 @@ def run_height_estimation_task(task: HeightEstimationTask) -> HeightResult:
 def update_results(conn: psycopg.Connection, table_name: str, results: Iterable[HeightResult]) -> None:
     rows = [
         (
-            result.underpass_z,
             "streetlidar" if result.status == "success" else "fallback",
             result.status,
+            result.candidate_elevations,
             Jsonb(result.candidate_peaks) if result.candidate_peaks is not None else None,
             result.point_count,
             result.laz_count,
@@ -734,9 +733,9 @@ def update_results(conn: psycopg.Connection, table_name: str, results: Iterable[
     query = sql.SQL(
         """
         UPDATE {table}
-        SET underpass_z = %s,
-            underpass_source = %s,
+        SET underpass_source = %s,
             underpass_status = %s,
+            underpass_candidate_elevations = %s,
             underpass_candidate_peaks = %s,
             underpass_point_count = %s,
             underpass_laz_count = %s,
@@ -1308,14 +1307,14 @@ def main(argv: list[str] | None = None) -> int:
             f"total_rows={summary['total_rows']}, "
             f"usable_geom_rows={summary['usable_geom_rows']}, "
             f"pending_rows={summary['pending_rows']}, "
-            f"rows_with_height={summary['rows_with_height']}"
+            f"rows_with_elevations={summary['rows_with_elevations']}"
         )
         statuses = summary["statuses"]
         if statuses:
             print("Status counts:")
             for status, count in statuses:
                 print(f"  {status}: {count}")
-        print("Use --all to ignore existing underpass_z values/statuses.")
+        print("Use --all to ignore existing candidate elevations/statuses.")
         return 0
 
     print(f"Loaded {len(records)} pending underpasses from {args.table}")

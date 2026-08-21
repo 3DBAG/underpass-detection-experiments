@@ -4,7 +4,7 @@ This directory contains a Python workflow for estimating underpass height from c
 
 > The cropped point clouds were generated using the script in `../crop_las_by_polygons`:
 
-The script loops over a list of BAG cases, reads each LAS/LAZ file and its matching GeoPackage polygon, detects Z-peak candidates from a smoothed histogram, rasterizes each candidate to the XY plane at `0.5 m` resolution, and keeps only candidates whose raw histogram count is at least `5%` of the second-highest candidate raw count.
+The script loops over a list of BAG cases, reads each LAS/LAZ file and its matching GeoPackage polygon, detects Z-peak candidates from a smoothed histogram, and rasterizes each candidate to the XY plane at `0.5 m` resolution. Diagnostic plots show candidates whose raw histogram count is at least `5%` of the second-highest candidate raw count; the compact output includes all detected candidates.
 
 For each remaining candidate, the script computes:
 
@@ -13,19 +13,21 @@ For each remaining candidate, the script computes:
 - pairwise vertical-wall cells between adjacent peaks
 - a union raster of exclusive cells and related wall cells
 
-The final two underpass peaks are chosen as the two peaks with the largest contiguous area in that union raster. Each peak uses a fixed `1.0 m` vertical band centered on the selected histogram bin.
+All detected peaks are emitted in descending order of largest contiguous XY area. Ties are broken by total covered area and then by smoothed histogram count. Each peak uses a fixed `1.0 m` vertical band centered on its histogram bin.
 
 ## What The Script Produces
 
-- A histogram of Z values with raw bars, a smoothed curve, one marker and fixed `1.0 m` band per displayed peak, and a double-headed height-difference annotation for the two selected underpass peaks
+- A histogram of Z values with raw bars, a smoothed curve, and one marker and fixed `1.0 m` band per displayed peak
 - One XY raster row showing all displayed peak bands
 - One XY raster row showing the union of exclusive cells and pairwise wall cells for each displayed peak
 - Optional diagnostic rows for:
   - exclusive cells with lower peaks masked out
   - related wall cells between adjacent peaks
 - One PNG per BAG id, named `<bag_id>_peak_grids_overlay.png`
-- A CSV summary written to `underpass_heights.csv`, reporting the selected
-  overhead peak elevation as `underpass_z` along with the candidate-peak details
+- A CSV summary written to `underpass_heights.csv`, with the production field
+  `underpass_candidate_elevations` containing only the candidate elevations ordered
+  by descending largest contiguous area, plus detailed
+  `underpass_candidate_peaks` JSON for debugging
 - A Rerun visualization sent to the viewer by default
 
 ## Example Cases

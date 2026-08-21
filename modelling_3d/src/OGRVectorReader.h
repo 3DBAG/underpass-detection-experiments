@@ -59,8 +59,7 @@ class VectorReader {
     LinearRing polygon;
     std::string id;
     std::vector<SourceAttribute> source_attributes;
-    double absolute_elevation = 0.0;
-    bool has_absolute_elevation = false;
+    std::vector<double> candidate_elevations;
   };
 
   VectorReader() = default;
@@ -80,10 +79,10 @@ class VectorReader {
   // Read all polygons from the layer
   std::vector<LinearRing> read_polygons();
 
-  // Read polygons with per-feature ID and absolute underpass elevation attributes.
+  // Read polygons with per-feature ID and ranked underpass peak elevation attributes.
   std::vector<PolygonFeature> read_polygon_features(
       const std::string& id_attribute,
-      const std::string& height_attribute);
+      const std::string& elevations_attribute);
 
   // Get the number of features in the layer
   size_t get_feature_count();
@@ -106,8 +105,7 @@ class VectorReader {
   void read_polygon_feature(OGRPolygon* poPolygon,
                             const std::string& id,
                             const std::vector<SourceAttribute>& source_attributes,
-                            double absolute_elevation,
-                            bool has_absolute_elevation,
+                            const std::vector<double>& candidate_elevations,
                             std::vector<PolygonFeature>& features);
 
   GDALDatasetUniquePtr poDS_;

@@ -19,15 +19,15 @@ PEAK_BAND_WIDTH_METERS = 1
 
 # Candidate peaks with raw counts below this fraction of the second-highest
 # candidate raw count are not shown in the diagnostic plots and are not
-# considered for the final two-peak selection.
+# but all detected candidates are included in the ranked output.
 DISPLAY_PEAK_MIN_RELATIVE_RAW_COUNT = 0.05
 
-# When enabled, the selected peak is snapped from the smoothed local maximum to
+# When enabled, the candidate peak is snapped from the smoothed local maximum to
 # the highest raw histogram bin inside that smoothed peak cluster.
 SNAP_PEAK_TO_RAW_BIN_WITHIN_CLUSTER = True
 
 # A cell is treated as a vertical wall when points occupy nearly every
-# histogram bin between the two selected underpass peaks.
+# histogram bin between adjacent displayed peaks.
 VERTICAL_WALL_MIN_BIN_FRACTION = 0.85
 VERTICAL_WALL_MAX_EMPTY_RUN_BINS = 1
 
@@ -413,27 +413,12 @@ def largest_contiguous_component_area(grid, cellsize):
     return largest_component_cells * (cellsize ** 2)
 
 
-def select_underpass_peak_indices(candidate_layers, area_key="largest_component_area"):
-    if not candidate_layers:
-        return []
-
-    area_ranked_layers = sorted(
-        candidate_layers,
-        key=lambda layer: (layer[area_key], layer["area"]),
-        reverse=True,
-    )
-    selected_layers = area_ranked_layers[:2]
-
-    selected_layers.sort(key=lambda layer: layer["peak_center"])
-    return [layer["peak_idx"] for layer in selected_layers]
-
-
-def candidate_peak_summary(layer, display_order_by_peak_idx, selected_peak_indices):
+def candidate_peak_summary(layer, rank, display_order_by_peak_idx):
     display_order = display_order_by_peak_idx.get(layer["peak_idx"])
     return {
+        "rank": int(rank),
         "peak_idx": int(layer["peak_idx"]),
         "display_order": None if display_order is None else int(display_order),
-        "selected": bool(layer["peak_idx"] in selected_peak_indices),
         "elevation": float(layer["peak_center"]),
         "z_min": float(layer["z_min"]),
         "z_max": float(layer["z_max"]),
@@ -592,9 +577,6 @@ def estimate_underpass_height_from_points(identifier, x, y, z, geometries, verbo
     ]
     if not display_peak_layers and candidate_layers_by_height:
         display_peak_layers = [candidate_layers_by_height[0]]
-    if len(display_peak_layers) < 2:
-        raise ValueError("Fewer than two usable Z peaks found")
-
     if verbose:
         print(
             f"Displaying {len(display_peak_layers)} candidate peaks with raw count >= "
@@ -668,24 +650,13 @@ def estimate_underpass_height_from_points(identifier, x, y, z, geometries, verbo
             GRID_CELLSIZE,
         )
 
-    peak_indices = select_underpass_peak_indices(
-        display_peak_layers,
-        area_key="exclusive_or_wall_largest_component_area",
-    )
-    if len(peak_indices) < 2:
-        raise ValueError("Fewer than two underpass peaks selected")
-    selected_peak_layers = [
-        layer for layer in display_peak_layers
-        if layer["peak_idx"] in peak_indices
-    ]
     display_order_by_peak_idx = {
         layer["peak_idx"]: display_order
         for display_order, layer in enumerate(display_peak_layers, start=1)
     }
-    selected_peak_indices = set(peak_indices)
     candidate_peak_summaries = [
-        candidate_peak_summary(layer, display_order_by_peak_idx, selected_peak_indices)
-        for layer in candidate_layers_by_height
+        candidate_peak_summary(layer, rank, display_order_by_peak_idx)
+        for rank, layer in enumerate(ranked_candidate_layers, start=1)
     ]
 
     if verbose:
@@ -699,14 +670,11 @@ def estimate_underpass_height_from_points(identifier, x, y, z, geometries, verbo
                 f"corrected contiguous area {layer['corrected_largest_component_area']:.2f} m^2"
             )
 
-    underpass_attributes = {
-        "underpass_dh": selected_peak_layers[-1]["peak_center"] - selected_peak_layers[0]["peak_center"],
-        "underpass_top_area": selected_peak_layers[-1]["area"],
-        "underpass_bottom_area": selected_peak_layers[0]["area"],
-    }
     underpass_metrics = {
         "identificatie": bag_id,
-        "underpass_z": selected_peak_layers[-1]["peak_center"],
+        "underpass_candidate_elevations": [
+            peak["elevation"] for peak in candidate_peak_summaries
+        ],
         "underpass_candidate_peaks": candidate_peak_summaries,
     }
 
@@ -728,9 +696,7 @@ def estimate_underpass_height_from_points(identifier, x, y, z, geometries, verbo
         "candidate_layers_by_height": candidate_layers_by_height,
         "ranked_candidate_layers": ranked_candidate_layers,
         "display_peak_layers": display_peak_layers,
-        "selected_peak_layers": selected_peak_layers,
         "display_raw_count_threshold": display_raw_count_threshold,
-        "underpass_attributes": underpass_attributes,
         "underpass_metrics": underpass_metrics,
     }
 

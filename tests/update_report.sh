@@ -86,14 +86,13 @@ trap 'rm -f "$tmp_file"' EXIT
   printf '\nThe %s unprocessed/placeholder rows have underpass_source/status still null.\n\n' "$placeholder_count"
 
   printf '### Status Counts\n\n'
-  printf '| source | status | rows | z median | point median |\n'
-  printf '|---|---|---:|---:|---:|\n'
+  printf '| source | status | rows | point median |\n'
+  printf '|---|---|---:|---:|\n'
   append_query_table "
     SELECT
       coalesce(underpass_source, 'null') AS source,
       coalesce(underpass_status, 'null') AS status,
       to_char(count(*), 'FM999,999,999,999') AS rows,
-      coalesce(trim(to_char(round((percentile_cont(0.5) WITHIN GROUP (ORDER BY underpass_z))::numeric, 3), 'FM999,999,999,990.999')), 'null') AS z_median,
       coalesce(to_char(round((percentile_cont(0.5) WITHIN GROUP (ORDER BY underpass_point_count))::numeric), 'FM999,999,999,999'), 'null') AS point_median
     FROM ${TABLE_REF}
     GROUP BY underpass_source, underpass_status
@@ -194,84 +193,7 @@ trap 'rm -f "$tmp_file"' EXIT
     ORDER BY ord;
   "
 
-  printf '\n### Underpass Elevation Histogram\n\n'
-  printf 'Rows with null underpass_z are omitted from this histogram.\n\n'
-  printf '| underpass_z | rows | success | other |\n'
-  printf '|---|---:|---:|---:|\n'
-  append_query_table "
-    WITH bucketed AS (
-      SELECT
-        CASE
-          WHEN underpass_z < 1 THEN 1
-          WHEN underpass_z < 1.5 THEN 2
-          WHEN underpass_z < 2 THEN 3
-          WHEN underpass_z < 2.5 THEN 4
-          WHEN underpass_z = 2.5 THEN 5
-          WHEN underpass_z < 3 THEN 6
-          WHEN underpass_z < 3.5 THEN 7
-          WHEN underpass_z = 3.5 THEN 8
-          WHEN underpass_z < 4 THEN 9
-          WHEN underpass_z < 5 THEN 10
-          WHEN underpass_z < 10 THEN 11
-          ELSE 12
-        END AS ord,
-        CASE
-          WHEN underpass_z < 1 THEN '<1'
-          WHEN underpass_z < 1.5 THEN '1-1.5'
-          WHEN underpass_z < 2 THEN '1.5-2'
-          WHEN underpass_z < 2.5 THEN '2-2.5'
-          WHEN underpass_z = 2.5 THEN '=2.5'
-          WHEN underpass_z < 3 THEN '2.5-3'
-          WHEN underpass_z < 3.5 THEN '3-3.5'
-          WHEN underpass_z = 3.5 THEN '=3.5'
-          WHEN underpass_z < 4 THEN '3.5-4'
-          WHEN underpass_z < 5 THEN '4-5'
-          WHEN underpass_z < 10 THEN '5-10'
-          ELSE '>=10'
-        END AS bucket,
-        underpass_source = 'streetlidar' AND underpass_status = 'success' AS success
-      FROM ${TABLE_REF}
-      WHERE underpass_z IS NOT NULL
-    )
-    SELECT
-      bucket,
-      to_char(count(*), 'FM999,999,999,999'),
-      to_char(count(*) FILTER (WHERE success), 'FM999,999,999,999'),
-      to_char(count(*) FILTER (WHERE success IS NOT TRUE), 'FM999,999,999,999')
-    FROM bucketed
-    GROUP BY ord, bucket
-    ORDER BY ord;
-  "
 
-  printf '\n### Success-only underpass_z quantiles\n\n'
-  printf '| Quantile | Value |\n'
-  printf '|---|---:|\n'
-  append_query_table "
-    WITH success AS (
-      SELECT underpass_z::numeric AS value
-      FROM ${TABLE_REF}
-      WHERE underpass_source = 'streetlidar'
-        AND underpass_status = 'success'
-        AND underpass_z IS NOT NULL
-    ),
-    metrics(label, value, ord) AS (
-      SELECT 'min', min(value), 1 FROM success
-      UNION ALL SELECT 'p01', percentile_cont(0.01) WITHIN GROUP (ORDER BY value), 2 FROM success
-      UNION ALL SELECT 'p05', percentile_cont(0.05) WITHIN GROUP (ORDER BY value), 3 FROM success
-      UNION ALL SELECT 'p10', percentile_cont(0.10) WITHIN GROUP (ORDER BY value), 4 FROM success
-      UNION ALL SELECT 'p25', percentile_cont(0.25) WITHIN GROUP (ORDER BY value), 5 FROM success
-      UNION ALL SELECT 'median', percentile_cont(0.50) WITHIN GROUP (ORDER BY value), 6 FROM success
-      UNION ALL SELECT 'p75', percentile_cont(0.75) WITHIN GROUP (ORDER BY value), 7 FROM success
-      UNION ALL SELECT 'p90', percentile_cont(0.90) WITHIN GROUP (ORDER BY value), 8 FROM success
-      UNION ALL SELECT 'p95', percentile_cont(0.95) WITHIN GROUP (ORDER BY value), 9 FROM success
-      UNION ALL SELECT 'p99', percentile_cont(0.99) WITHIN GROUP (ORDER BY value), 10 FROM success
-      UNION ALL SELECT 'max', max(value), 11 FROM success
-      UNION ALL SELECT 'avg', avg(value), 12 FROM success
-    )
-    SELECT label, coalesce(trim(to_char(round(value::numeric, 3), 'FM999,999,999,990.999')), 'null')
-    FROM metrics
-    ORDER BY ord;
-  "
 } > "$tmp_file"
 
 cat "$tmp_file" >> "$REPORT_FILE"

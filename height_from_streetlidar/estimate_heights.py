@@ -15,13 +15,16 @@ def write_metrics_csv(rows, output_path):
             lineterminator="\n",
             fieldnames=[
                 "identificatie",
-                "underpass_z",
+                "underpass_candidate_elevations",
                 "underpass_candidate_peaks",
             ],
         )
         writer.writeheader()
         for row in rows:
             output_row = dict(row)
+            output_row["underpass_candidate_elevations"] = json.dumps(
+                output_row["underpass_candidate_elevations"]
+            )
             output_row["underpass_candidate_peaks"] = json.dumps(
                 output_row["underpass_candidate_peaks"]
             )

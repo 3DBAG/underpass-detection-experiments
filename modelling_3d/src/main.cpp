@@ -215,7 +215,8 @@ static SurfaceAttributeGroups surface_attribute_groups(
 // Classify each triangle by face normal orientation and Z-position.
 // ground_z: building ground level (local coords).
 // underpass_z: underpass ceiling height (local coords).
-static constexpr double kNullUnderpassHeightAboveGround = 2.5;
+static constexpr double kMinimumPeakHeightAboveFloor = 2.0;
+static constexpr double kFallbackUnderpassHeightAboveFloor = 2.5;
 static std::vector<uint8_t> classify_triangle_semantics(
     const manifold::MeshGL& mesh,
     double ground_z,
@@ -315,11 +316,17 @@ static FeatureCarveResult carve_underpasses_for_feature(
         const auto& feature = polygon_features[feature_idx];
 
         auto t_conversion_start = Clock::now();
-        // Boolean operations use coordinates relative to the shared model offset.
-        // Convert the absolute OGR elevation to that same local coordinate frame.
-        double roof_height = (feature.has_absolute_elevation && std::isfinite(feature.absolute_elevation))
-            ? feature.absolute_elevation - global_offset_z
-            : result.house_min_z + kNullUnderpassHeightAboveGround;
+        // Candidate elevations are absolute and already ranked by descending
+        // contiguous surface area. Pick the first one with enough clearance.
+        double roof_height = result.house_min_z + kFallbackUnderpassHeightAboveFloor;
+        for (double absolute_elevation : feature.candidate_elevations) {
+            const double local_elevation = absolute_elevation - global_offset_z;
+            if (std::isfinite(local_elevation) &&
+                local_elevation >= result.house_min_z + kMinimumPeakHeightAboveFloor) {
+                roof_height = local_elevation;
+                break;
+            }
+        }
         auto offset_polygon = make_offset_polygon(
             feature.polygon,
             global_offset_x,
@@ -1288,10 +1295,10 @@ int main(int argc, char* argv[]) {
 
     if (argc < 5) {
         std::cerr << "Usage: " << argv[0]
-                  << " <ogr_source> <model_input> <model_output> <absolute_underpass_elevation_attribute> [id_attribute] [method] [copy_source_attributes] [boolean_obj_output]" << std::endl;
+                  << " <ogr_source> <model_input> <model_output> <candidate_elevations_attribute> [id_attribute] [method] [copy_source_attributes] [boolean_obj_output]" << std::endl;
         std::cerr << "  model formats: .fcb (FlatCityBuf) or .jsonl (CityJSONSeq)" << std::endl;
         std::cerr << "  id_attribute default: identificatie" << std::endl;
-        std::cerr << "  missing absolute underpass elevation falls back to 2.5 m above the local ground reference" << std::endl;
+        std::cerr << "  the first ranked peak at least 2 m above the floor is used; no match falls back to 2.5 m" << std::endl;
         std::cerr << "  method: pmp (default), manifold, nef"
 #ifdef ENABLE_GEOGRAM
                   << ", geogram"
@@ -1308,7 +1315,7 @@ int main(int argc, char* argv[]) {
     const char* ogr_source_path = argv[1];
     const char* model_path = argv[2];
     const char* output_path = argv[3];
-    std::string height_attribute = argv[4];
+    std::string elevations_attribute = argv[4];
     std::string id_attribute = argc > 5 ? argv[5] : "identificatie";
     std::string method_str = argc > 6 ? argv[6] : "pmp";
     std::string copy_source_attributes_str = argc > 7 ? argv[7] : "none";
@@ -1444,7 +1451,7 @@ int main(int argc, char* argv[]) {
             "Applied OGR spatial filter from model extent XY: [{:.3f}, {:.3f}] -> [{:.3f}, {:.3f}]",
             model_extent_min[0], model_extent_min[1], model_extent_max[0], model_extent_max[1]) << std::endl;
     }
-    auto polygon_features = reader.read_polygon_features(id_attribute, height_attribute);
+    auto polygon_features = reader.read_polygon_features(id_attribute, elevations_attribute);
     auto t_ogr_read_end = Clock::now();
     log_out << std::format("Read {} OGR features", polygon_features.size()) << std::endl;
     log_out << std::format(

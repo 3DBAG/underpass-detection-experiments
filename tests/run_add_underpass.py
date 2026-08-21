@@ -48,7 +48,7 @@ import psutil
 # Prime psutil CPU measurement; first call always returns 0.0 (establishes baseline).
 psutil.cpu_percent(interval=None)
 
-HEIGHT_ATTR: str = "underpass_z"
+ELEVATIONS_ATTR: str = "underpass_candidate_elevations"
 ID_ATTR: str = "identificatie"
 METHOD: str = "manifold"
 DB_HOST: str = os.environ.get("UNDERPASS_DB_HOST", "localhost")
@@ -143,7 +143,7 @@ def build_command(executable: Path, input_file: Path, output_file: Path) -> list
         ogr_source,
         str(input_file),
         str(output_file),
-        HEIGHT_ATTR,
+        ELEVATIONS_ATTR,
         ID_ATTR,
         METHOD,
         "surface"

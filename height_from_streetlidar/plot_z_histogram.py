@@ -178,9 +178,7 @@ def plot_height_estimation_result(result, output_dir=".", write_rerun=True):
     x_edges = result["x_edges"]
     y_edges = result["y_edges"]
     display_peak_layers = result["display_peak_layers"]
-    selected_peak_layers = result["selected_peak_layers"]
     display_raw_count_threshold = result["display_raw_count_threshold"]
-    underpass_attributes = result["underpass_attributes"]
     underpass_metrics = result["underpass_metrics"]
 
     map_width = max_x - min_x
@@ -269,26 +267,6 @@ def plot_height_estimation_result(result, output_dir=".", write_rerun=True):
     ax_hist.set_title("Histogram of Z values", fontsize=13, pad=8)
     ax_hist.spines["top"].set_visible(False)
     ax_hist.spines["right"].set_visible(False)
-
-    arrow_y = counts.max() * 0.92
-    label_y = counts.max() * 0.97
-    left_peak = selected_peak_layers[0]["peak_center"]
-    right_peak = selected_peak_layers[-1]["peak_center"]
-    ax_hist.annotate(
-        "",
-        xy=(right_peak, arrow_y),
-        xytext=(left_peak, arrow_y),
-        arrowprops={"arrowstyle": "<->", "color": "black", "linewidth": 1.8},
-    )
-    ax_hist.text(
-        (left_peak + right_peak) / 2,
-        label_y,
-        f"{underpass_attributes['underpass_dh']:.2f} m",
-        ha="center",
-        va="bottom",
-        fontsize=11,
-        bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.8, "pad": 2},
-    )
 
     extent = [x_edges[0], x_edges[-1], y_edges[0], y_edges[-1]]
     for map_idx, (ax_map, layer) in enumerate(zip(peak_axes, display_peak_layers), start=1):
@@ -431,13 +409,16 @@ def write_metrics_csv(rows, output_path):
             lineterminator="\n",
             fieldnames=[
                 "identificatie",
-                "underpass_z",
+                "underpass_candidate_elevations",
                 "underpass_candidate_peaks",
             ],
         )
         writer.writeheader()
         for row in rows:
             output_row = dict(row)
+            output_row["underpass_candidate_elevations"] = json.dumps(
+                output_row["underpass_candidate_elevations"]
+            )
             output_row["underpass_candidate_peaks"] = json.dumps(
                 output_row["underpass_candidate_peaks"]
             )
