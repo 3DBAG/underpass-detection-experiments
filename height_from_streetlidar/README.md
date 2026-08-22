@@ -4,7 +4,7 @@ This directory contains a Python workflow for estimating underpass height from c
 
 > The cropped point clouds were generated using the script in `../crop_las_by_polygons`:
 
-The script loops over a list of BAG cases, reads each LAS/LAZ file and its matching GeoPackage polygon, detects Z-peak candidates from a smoothed histogram, and rasterizes each candidate to the XY plane at `0.5 m` resolution. Diagnostic plots show candidates whose raw histogram count is at least `5%` of the second-highest candidate raw count; the compact output includes all detected candidates.
+The script loops over a list of BAG cases, reads each LAS/LAZ file and its matching GeoPackage polygon, detects Z-peak candidates from a smoothed histogram, and rasterizes each candidate to the XY plane at `0.5 m` resolution. Diagnostic plots and the compact elevation output include candidates whose raw histogram count is at least `5%` of the second-highest candidate raw count. All detected candidates remain available in the detailed debug JSON.
 
 For each remaining candidate, the script computes:
 
@@ -13,7 +13,7 @@ For each remaining candidate, the script computes:
 - pairwise vertical-wall cells between adjacent peaks
 - a union raster of exclusive cells and related wall cells
 
-All detected peaks are emitted in descending order of largest contiguous XY area. Ties are broken by total covered area and then by smoothed histogram count. Each peak uses a fixed `1.0 m` vertical band centered on its histogram bin.
+Candidate peaks that pass the raw-count threshold and retain surface pixels after wall removal are emitted in the compact elevation list. They are ordered by largest contiguous corrected surface area, with wall pixels excluded. The detailed debug JSON contains all detected peaks. Ties are broken by total covered area and then by smoothed histogram count. Each peak uses a fixed `1.0 m` vertical band centered on its histogram bin.
 
 ## What The Script Produces
 
@@ -25,8 +25,8 @@ All detected peaks are emitted in descending order of largest contiguous XY area
   - related wall cells between adjacent peaks
 - One PNG per BAG id, named `<bag_id>_peak_grids_overlay.png`
 - A CSV summary written to `underpass_heights.csv`, with the production field
-  `underpass_candidate_elevations` containing only the candidate elevations ordered
-  by descending largest contiguous area, plus detailed
+  `underpass_candidate_elevations` containing only threshold-passing candidate elevations,
+  ordered by descending wall-corrected contiguous area, plus detailed
   `underpass_candidate_peaks` JSON for debugging
 - A Rerun visualization sent to the viewer by default
 

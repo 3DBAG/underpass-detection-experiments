@@ -413,11 +413,19 @@ def largest_contiguous_component_area(grid, cellsize):
     return largest_component_cells * (cellsize ** 2)
 
 
-def candidate_peak_summary(layer, rank, display_order_by_peak_idx):
-    display_order = display_order_by_peak_idx.get(layer["peak_idx"])
+def candidate_peak_summary(
+    layer, raw_surface_rank, output_rank_by_peak_idx, display_order_by_peak_idx
+):
+    peak_idx = layer["peak_idx"]
+    display_order = display_order_by_peak_idx.get(peak_idx)
+    output_rank = output_rank_by_peak_idx.get(peak_idx)
+    corrected_area = layer.get("corrected_area")
+    corrected_largest_area = layer.get("corrected_largest_component_area")
+    related_wall_area = layer.get("related_wall_area")
     return {
-        "rank": int(rank),
-        "peak_idx": int(layer["peak_idx"]),
+        "rank": None if output_rank is None else int(output_rank),
+        "raw_surface_rank": int(raw_surface_rank),
+        "peak_idx": int(peak_idx),
         "display_order": None if display_order is None else int(display_order),
         "elevation": float(layer["peak_center"]),
         "z_min": float(layer["z_min"]),
@@ -425,6 +433,15 @@ def candidate_peak_summary(layer, rank, display_order_by_peak_idx):
         "point_count": int(layer["point_count"]),
         "area_m2": float(layer["area"]),
         "largest_contiguous_area_m2": float(layer["largest_component_area"]),
+        "related_wall_area_m2": (
+            None if related_wall_area is None else float(related_wall_area)
+        ),
+        "corrected_area_m2": (
+            None if corrected_area is None else float(corrected_area)
+        ),
+        "corrected_largest_contiguous_area_m2": (
+            None if corrected_largest_area is None else float(corrected_largest_area)
+        ),
         "raw_count": int(layer["raw_count"]),
         "smoothed_count": float(layer["smoothed_count"]),
     }
@@ -645,18 +662,39 @@ def estimate_underpass_height_from_points(identifier, x, y, z, geometries, verbo
             layer["exclusive_grid"],
             0,
         )
+        layer["corrected_grid"] = corrected_grid
+        layer["corrected_area"] = np.count_nonzero(corrected_grid) * (GRID_CELLSIZE ** 2)
         layer["corrected_largest_component_area"] = largest_contiguous_component_area(
             corrected_grid,
             GRID_CELLSIZE,
         )
 
+    ranked_output_layers = sorted(
+        [
+            layer
+            for layer in display_peak_layers
+            if layer["corrected_largest_component_area"] > 0
+        ],
+        key=lambda layer: (
+            layer["corrected_largest_component_area"],
+            layer["corrected_area"],
+            layer["smoothed_count"],
+        ),
+        reverse=True,
+    )
+    output_rank_by_peak_idx = {
+        layer["peak_idx"]: rank
+        for rank, layer in enumerate(ranked_output_layers, start=1)
+    }
     display_order_by_peak_idx = {
         layer["peak_idx"]: display_order
         for display_order, layer in enumerate(display_peak_layers, start=1)
     }
     candidate_peak_summaries = [
-        candidate_peak_summary(layer, rank, display_order_by_peak_idx)
-        for rank, layer in enumerate(ranked_candidate_layers, start=1)
+        candidate_peak_summary(
+            layer, raw_surface_rank, output_rank_by_peak_idx, display_order_by_peak_idx
+        )
+        for raw_surface_rank, layer in enumerate(ranked_candidate_layers, start=1)
     ]
 
     if verbose:
@@ -673,7 +711,7 @@ def estimate_underpass_height_from_points(identifier, x, y, z, geometries, verbo
     underpass_metrics = {
         "identificatie": bag_id,
         "underpass_candidate_elevations": [
-            peak["elevation"] for peak in candidate_peak_summaries
+            float(layer["peak_center"]) for layer in ranked_output_layers
         ],
         "underpass_candidate_peaks": candidate_peak_summaries,
     }
@@ -695,6 +733,7 @@ def estimate_underpass_height_from_points(identifier, x, y, z, geometries, verbo
         "candidate_layers": separated_candidate_layers,
         "candidate_layers_by_height": candidate_layers_by_height,
         "ranked_candidate_layers": ranked_candidate_layers,
+        "ranked_output_layers": ranked_output_layers,
         "display_peak_layers": display_peak_layers,
         "display_raw_count_threshold": display_raw_count_threshold,
         "underpass_metrics": underpass_metrics,
