@@ -2,9 +2,9 @@
 set -euo pipefail
 
 INPUT_DIR="${INPUT_DIR:-/data2/rypeters/ams-run-06-30-rf/seq}"
-OUTPUT_DIR="${OUTPUT_DIR:-/data2/rypeters/ams-run-07-15-rf/seq_underpasses_manifold}"
-LOG_DIR="${LOG_DIR:-/data2/rypeters/ams-run-07-15-rf/logs_add_underpass}"
-JOBS="${JOBS:-32}"
+OUTPUT_DIR="${OUTPUT_DIR:-/data2/rypeters/ams-run-08-24-rf/seq_underpasses_manifold}"
+LOG_DIR="${LOG_DIR:-/data2/rypeters/ams-run-08-24-rf/logs_add_underpass}"
+JOBS="${JOBS:-16}"
 ADD_UNDERPASS="${ADD_UNDERPASS:-$(command -v add_underpass || true)}"
 CLEAN="${CLEAN:-1}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
