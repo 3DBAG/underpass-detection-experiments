@@ -30,8 +30,8 @@ PEAK_MIN_SEPARATION_BINS = 5
 
 # A candidate must satisfy both absolute thresholds to enter production output.
 PEAK_MIN_RAW_COUNT = 1000
-PEAK_MIN_CONTIGUOUS_AREA_M2 = 4.0
-PEAK_MIN_CONTIGUOUS_AREA_POLYGON_FRACTION = 0.05
+PEAK_MIN_MASK_AREA_M2 = 4.0
+PEAK_MIN_MASK_AREA_POLYGON_FRACTION = 0.05
 
 # Candidates must also reach this fraction of the second-highest candidate raw
 # peak-bin count to enter diagnostic plots and production output.
@@ -89,9 +89,9 @@ def relative_raw_count_threshold(
     return fraction * reference_count
 
 
-def polygon_relative_contiguous_area_threshold(
+def polygon_relative_mask_area_threshold(
     polygon_area_m2,
-    fraction=PEAK_MIN_CONTIGUOUS_AREA_POLYGON_FRACTION,
+    fraction=PEAK_MIN_MASK_AREA_POLYGON_FRACTION,
 ):
     if not np.isfinite(polygon_area_m2) or polygon_area_m2 <= 0:
         raise ValueError("Polygon area must be a positive finite number")
@@ -522,12 +522,12 @@ def estimate_underpass_height_from_points(identifier, x, y, z, geometries, verbo
         raise ValueError("No polygon geometries available for height estimation")
 
     polygon_area_m2 = float(unary_union(geometries).area)
-    polygon_relative_area_threshold_m2 = polygon_relative_contiguous_area_threshold(
+    polygon_relative_mask_area_threshold_m2 = polygon_relative_mask_area_threshold(
         polygon_area_m2
     )
-    effective_contiguous_area_threshold_m2 = max(
-        PEAK_MIN_CONTIGUOUS_AREA_M2,
-        polygon_relative_area_threshold_m2,
+    effective_mask_area_threshold_m2 = max(
+        PEAK_MIN_MASK_AREA_M2,
+        polygon_relative_mask_area_threshold_m2,
     )
 
     (
@@ -657,8 +657,7 @@ def estimate_underpass_height_from_points(identifier, x, y, z, geometries, verbo
         for layer in ranked_candidate_layers
         if (
             layer["raw_count"] >= effective_raw_count_threshold
-            and layer["largest_component_area"]
-            >= effective_contiguous_area_threshold_m2
+            and layer["area"] >= effective_mask_area_threshold_m2
         )
     ]
     display_peak_layers = sorted(
@@ -669,11 +668,11 @@ def estimate_underpass_height_from_points(identifier, x, y, z, geometries, verbo
         print(
             f"Selected {len(ranked_output_layers)} candidate peaks with raw count >= "
             f"{effective_raw_count_threshold:.1f} (max of absolute {PEAK_MIN_RAW_COUNT} "
-            f"and relative {display_raw_count_threshold:.1f}) and largest contiguous area >= "
-            f"{effective_contiguous_area_threshold_m2:.2f} m^2 (max of absolute "
-            f"{PEAK_MIN_CONTIGUOUS_AREA_M2:.2f} m^2 and "
-            f"{PEAK_MIN_CONTIGUOUS_AREA_POLYGON_FRACTION:.0%} of polygon area, "
-            f"{polygon_relative_area_threshold_m2:.2f} m^2)."
+            f"and relative {display_raw_count_threshold:.1f}) and total mask area >= "
+            f"{effective_mask_area_threshold_m2:.2f} m^2 (max of absolute "
+            f"{PEAK_MIN_MASK_AREA_M2:.2f} m^2 and "
+            f"{PEAK_MIN_MASK_AREA_POLYGON_FRACTION:.0%} of polygon area, "
+            f"{polygon_relative_mask_area_threshold_m2:.2f} m^2)."
         )
 
     output_rank_by_peak_idx = {
@@ -732,11 +731,11 @@ def estimate_underpass_height_from_points(identifier, x, y, z, geometries, verbo
         "display_peak_min_relative_raw_count": PEAK_MIN_RELATIVE_RAW_COUNT,
         "display_raw_count_threshold": display_raw_count_threshold,
         "effective_raw_count_threshold": effective_raw_count_threshold,
-        "peak_min_contiguous_area_m2": PEAK_MIN_CONTIGUOUS_AREA_M2,
+        "peak_min_mask_area_m2": PEAK_MIN_MASK_AREA_M2,
         "polygon_area_m2": polygon_area_m2,
-        "peak_min_contiguous_area_polygon_fraction": PEAK_MIN_CONTIGUOUS_AREA_POLYGON_FRACTION,
-        "polygon_relative_contiguous_area_threshold_m2": polygon_relative_area_threshold_m2,
-        "effective_contiguous_area_threshold_m2": effective_contiguous_area_threshold_m2,
+        "peak_min_mask_area_polygon_fraction": PEAK_MIN_MASK_AREA_POLYGON_FRACTION,
+        "polygon_relative_mask_area_threshold_m2": polygon_relative_mask_area_threshold_m2,
+        "effective_mask_area_threshold_m2": effective_mask_area_threshold_m2,
         "underpass_metrics": underpass_metrics,
     }
 
