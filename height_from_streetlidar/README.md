@@ -4,7 +4,7 @@ This directory contains a Python workflow for estimating underpass height from c
 
 > The cropped point clouds were generated using the script in `../crop_las_by_polygons`:
 
-The script loops over a list of BAG cases, reads each LAS/LAZ file and its matching GeoPackage polygon, detects Z-peak candidates from a smoothed histogram, and rasterizes each candidate to the XY plane at `0.5 m` resolution. Diagnostic plots and the compact elevation output include candidates whose raw histogram count is at least `5%` of the second-highest candidate raw count. All detected candidates remain available in the detailed debug JSON.
+The script loops over a list of BAG cases, reads each LAS/LAZ file and its matching GeoPackage polygon, detects Z-peak candidates from a smoothed histogram, and rasterizes each candidate to the XY plane at `0.5 m` resolution. The elevation histogram uses fixed `0.25 m` bins anchored at global elevation `0`, so its edges are always global multiples of `0.25 m`, including for negative elevations. Diagnostic plots and the compact elevation output include candidates whose raw histogram count is at least `5%` of the second-highest candidate raw count. All detected candidates remain available in the detailed debug JSON.
 
 For each remaining candidate, the script computes:
 

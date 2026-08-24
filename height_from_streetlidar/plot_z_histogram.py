@@ -8,7 +8,6 @@ from matplotlib.colors import LinearSegmentedColormap
 
 from cases import CASES
 from height_estimation import (
-    HISTOGRAM_BINS,
     estimate_underpass_height,
     iter_rings,
 )
@@ -230,7 +229,7 @@ def plot_height_estimation_result(result, output_dir=".", write_rerun=True):
 
     ax_hist.hist(
         z,
-        bins=HISTOGRAM_BINS,
+        bins=result["bin_edges"],
         color="gray",
         edgecolor="#999999",
         linewidth=0.25,

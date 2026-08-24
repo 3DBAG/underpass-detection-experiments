@@ -6,9 +6,11 @@ from shapely import wkb
 
 
 # Peak-detection and output parameters.
-# `HISTOGRAM_BINS` controls the Z histogram resolution used both for plotting
-# and for peak detection.
-HISTOGRAM_BINS = 100
+# Use fixed-width Z bins whose edges are global elevation multiples. This makes
+# a bin represent the same elevation interval in every case, independently of
+# that case's Z range.
+HISTOGRAM_BIN_WIDTH_METERS = 0.25
+HISTOGRAM_ANCHOR_ELEVATION_METERS = 0.0
 
 # XY raster cell size in meters for the per-peak occupancy grids.
 GRID_CELLSIZE = 0.5
@@ -18,8 +20,8 @@ GRID_CELLSIZE = 0.5
 PEAK_BAND_WIDTH_METERS = 1
 
 # Candidate peaks with raw counts below this fraction of the second-highest
-# candidate raw count are not shown in the diagnostic plots and are not
-# but all detected candidates are included in the ranked output.
+# candidate raw count are omitted from diagnostic plots and production output,
+# but remain available in the detailed debug output.
 DISPLAY_PEAK_MIN_RELATIVE_RAW_COUNT = 0.05
 
 # When enabled, the candidate peak is snapped from the smoothed local maximum to
@@ -32,15 +34,62 @@ VERTICAL_WALL_MIN_BIN_FRACTION = 0.85
 VERTICAL_WALL_MAX_EMPTY_RUN_BINS = 1
 
 
-def find_top_histogram_peaks(values, bins=100, smoothing_window=7, min_separation_bins=10):
-    counts, bin_edges = np.histogram(values, bins=bins)
+def anchored_histogram_bin_edges(
+    values,
+    bin_width_meters=HISTOGRAM_BIN_WIDTH_METERS,
+    anchor_elevation_meters=HISTOGRAM_ANCHOR_ELEVATION_METERS,
+):
+    values = np.asarray(values, dtype=float)
+    if values.size == 0:
+        raise ValueError("Cannot construct histogram bins without values")
+    if not np.all(np.isfinite(values)):
+        raise ValueError("Histogram values must be finite")
+    if not np.isfinite(bin_width_meters) or bin_width_meters <= 0:
+        raise ValueError("Histogram bin width must be a positive finite number")
+    if not np.isfinite(anchor_elevation_meters):
+        raise ValueError("Histogram anchor elevation must be finite")
+
+    lower_bin_idx = int(
+        np.floor((np.min(values) - anchor_elevation_meters) / bin_width_meters)
+    )
+    # Keep the upper edge strictly above the maximum. In particular, an
+    # elevation exactly on a global boundary belongs to the bin beginning at
+    # that boundary, rather than numpy.histogram's special inclusive last bin.
+    upper_bin_idx = (
+        int(np.floor((np.max(values) - anchor_elevation_meters) / bin_width_meters))
+        + 1
+    )
+
+    bin_indices = np.arange(lower_bin_idx, upper_bin_idx + 1, dtype=np.int64)
+    return anchor_elevation_meters + bin_indices * bin_width_meters
+
+
+def find_top_histogram_peaks(
+    values,
+    bin_width_meters=HISTOGRAM_BIN_WIDTH_METERS,
+    anchor_elevation_meters=HISTOGRAM_ANCHOR_ELEVATION_METERS,
+    smoothing_window=7,
+    min_separation_bins=10,
+):
+    bin_edges = anchored_histogram_bin_edges(
+        values,
+        bin_width_meters=bin_width_meters,
+        anchor_elevation_meters=anchor_elevation_meters,
+    )
+    counts, _ = np.histogram(values, bins=bin_edges)
     bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
 
     # Smooth the histogram slightly so one broad mode does not produce several
     # adjacent local maxima from binning noise.
-    kernel = np.hanning(smoothing_window)
-    kernel /= kernel.sum()
-    smoothed_counts = np.convolve(counts, kernel, mode="same")
+    effective_smoothing_window = min(smoothing_window, len(counts))
+    if effective_smoothing_window % 2 == 0:
+        effective_smoothing_window -= 1
+    if effective_smoothing_window < 3:
+        smoothed_counts = counts.astype(float)
+    else:
+        kernel = np.hanning(effective_smoothing_window)
+        kernel /= kernel.sum()
+        smoothed_counts = np.convolve(counts, kernel, mode="same")
 
     candidate_indices = []
     if len(smoothed_counts) == 1:
@@ -479,7 +528,8 @@ def estimate_underpass_height_from_points(identifier, x, y, z, geometries, verbo
         candidate_peak_indices,
     ) = find_top_histogram_peaks(
         z,
-        bins=HISTOGRAM_BINS,
+        bin_width_meters=HISTOGRAM_BIN_WIDTH_METERS,
+        anchor_elevation_meters=HISTOGRAM_ANCHOR_ELEVATION_METERS,
         smoothing_window=7,
         min_separation_bins=10,
     )
