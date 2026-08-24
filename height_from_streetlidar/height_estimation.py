@@ -9,8 +9,13 @@ from shapely import wkb
 # Use fixed-width Z bins whose edges are global elevation multiples. This makes
 # a bin represent the same elevation interval in every case, independently of
 # that case's Z range.
-HISTOGRAM_BIN_WIDTH_METERS = 0.25
+HISTOGRAM_BIN_WIDTH_METERS = 0.15
 HISTOGRAM_ANCHOR_ELEVATION_METERS = 0.0
+
+# Raw-peak diagnostic metrics use points within this radius around the refined
+# raw peak, and a narrower window of this total width around the same center.
+PEAK_METRIC_NEIGHBOURHOOD_METERS = 0.5
+PEAK_METRIC_WINDOW_WIDTH_METERS = 0.2
 
 # XY raster cell size in meters for the per-peak occupancy grids.
 GRID_CELLSIZE = 0.5
@@ -18,6 +23,8 @@ GRID_CELLSIZE = 0.5
 # Width of the Z band, centered on each selected peak, used to subset LAS
 # points for the raster outputs and reported peak windows.
 PEAK_BAND_WIDTH_METERS = 1
+
+PEAK_MIN_SEPARATION_BINS = 5
 
 # Candidate peaks with raw counts below this fraction of the second-highest
 # candidate raw count are omitted from diagnostic plots and production output,
@@ -69,7 +76,7 @@ def find_top_histogram_peaks(
     bin_width_meters=HISTOGRAM_BIN_WIDTH_METERS,
     anchor_elevation_meters=HISTOGRAM_ANCHOR_ELEVATION_METERS,
     smoothing_window=7,
-    min_separation_bins=10,
+    min_separation_bins=PEAK_MIN_SEPARATION_BINS,
 ):
     bin_edges = anchored_histogram_bin_edges(
         values,
@@ -145,6 +152,110 @@ def refine_peak_index_within_cluster(counts, smoothed_counts, peak_idx):
     max_indices = np.flatnonzero(cluster_counts == max_count) + left_idx
     refined_peak_idx = max_indices[np.argmin(np.abs(max_indices - peak_idx))]
     return refined_peak_idx
+
+
+def raw_peak_width_at_level(counts, peak_idx, level, bin_width_meters):
+    def crossing_position(direction):
+        inner_idx = peak_idx
+        while True:
+            outer_idx = inner_idx + direction
+            if 0 <= outer_idx < len(counts):
+                outer_count = float(counts[outer_idx])
+            else:
+                outer_count = 0.0
+
+            if outer_count < level:
+                inner_count = float(counts[inner_idx])
+                fraction = (inner_count - level) / (inner_count - outer_count)
+                return inner_idx + direction * fraction
+
+            inner_idx = outer_idx
+
+    left_crossing = crossing_position(-1)
+    right_crossing = crossing_position(1)
+    return (right_crossing - left_crossing) * bin_width_meters
+
+
+def raw_peak_shape_metrics(
+    values,
+    counts,
+    bin_centers,
+    peak_idx,
+    bin_width_meters=HISTOGRAM_BIN_WIDTH_METERS,
+    neighbourhood_meters=PEAK_METRIC_NEIGHBOURHOOD_METERS,
+    window_width_meters=PEAK_METRIC_WINDOW_WIDTH_METERS,
+):
+    if not np.isfinite(neighbourhood_meters) or neighbourhood_meters <= 0:
+        raise ValueError("Peak metric neighbourhood must be a positive finite number")
+    if not np.isfinite(window_width_meters) or window_width_meters <= 0:
+        raise ValueError("Peak metric window width must be a positive finite number")
+
+    half_window = window_width_meters / 2
+    if half_window >= neighbourhood_meters:
+        raise ValueError(
+            "Peak metric window half-width must be smaller than the neighbourhood"
+        )
+
+    peak_center = float(bin_centers[peak_idx])
+    distance_from_peak = np.abs(values - peak_center)
+    peak_window_point_count = int(np.count_nonzero(distance_from_peak <= half_window))
+    neighbourhood_point_count = int(
+        np.count_nonzero(distance_from_peak <= neighbourhood_meters)
+    )
+    concentration = (
+        peak_window_point_count / neighbourhood_point_count
+        if neighbourhood_point_count
+        else 0.0
+    )
+
+    max_offset = int(np.floor(neighbourhood_meters / bin_width_meters))
+    shoulder_offsets = [
+        offset
+        for offset in range(1, max_offset + 1)
+        if offset * bin_width_meters > half_window
+    ]
+    if not shoulder_offsets:
+        raise ValueError(
+            "Peak metric neighbourhood must include at least one histogram-bin "
+            "center outside the peak window"
+        )
+
+    def raw_count_or_zero(index):
+        if 0 <= index < len(counts):
+            return int(counts[index])
+        return 0
+
+    left_shoulder_counts = [
+        raw_count_or_zero(peak_idx - offset) for offset in shoulder_offsets
+    ]
+    right_shoulder_counts = [
+        raw_count_or_zero(peak_idx + offset) for offset in shoulder_offsets
+    ]
+    baseline = max(
+        float(np.median(left_shoulder_counts)),
+        float(np.median(right_shoulder_counts)),
+    )
+
+    raw_peak_count = float(counts[peak_idx])
+    local_prominence = raw_peak_count - baseline
+    relative_prominence = local_prominence / max(raw_peak_count, 1.0)
+    width_m = None
+    if local_prominence > 0:
+        half_prominence_level = baseline + 0.5 * local_prominence
+        width_m = raw_peak_width_at_level(
+            counts,
+            peak_idx,
+            half_prominence_level,
+            bin_width_meters,
+        )
+
+    return {
+        "peak_window_point_count": peak_window_point_count,
+        "local_prominence": local_prominence,
+        "relative_prominence": relative_prominence,
+        "concentration": concentration,
+        "width_m": width_m,
+    }
 
 
 def peak_band_from_center(peak_center, values_min, values_max, band_width_meters):
@@ -493,6 +604,11 @@ def candidate_peak_summary(
         ),
         "raw_count": int(layer["raw_count"]),
         "smoothed_count": float(layer["smoothed_count"]),
+        "peak_window_point_count": int(layer["peak_window_point_count"]),
+        "local_prominence": float(layer["local_prominence"]),
+        "relative_prominence": float(layer["relative_prominence"]),
+        "concentration": float(layer["concentration"]),
+        "width_m": None if layer["width_m"] is None else float(layer["width_m"]),
     }
 
 
@@ -531,7 +647,7 @@ def estimate_underpass_height_from_points(identifier, x, y, z, geometries, verbo
         bin_width_meters=HISTOGRAM_BIN_WIDTH_METERS,
         anchor_elevation_meters=HISTOGRAM_ANCHOR_ELEVATION_METERS,
         smoothing_window=7,
-        min_separation_bins=10,
+        min_separation_bins=PEAK_MIN_SEPARATION_BINS,
     )
     if not candidate_peak_indices:
         raise ValueError("No Z histogram peaks found")
@@ -585,7 +701,7 @@ def estimate_underpass_height_from_points(identifier, x, y, z, geometries, verbo
             grid_cols,
         )
         area = np.count_nonzero(grid) * (GRID_CELLSIZE ** 2)
-        return {
+        layer = {
             "peak_idx": peak_idx,
             "refined_peak_idx": refined_peak_idx,
             "peak_center": peak_center,
@@ -598,6 +714,18 @@ def estimate_underpass_height_from_points(identifier, x, y, z, geometries, verbo
             "smoothed_count": smoothed_counts[peak_idx],
             "raw_count": counts[refined_peak_idx],
         }
+        layer.update(
+            raw_peak_shape_metrics(
+                z,
+                counts,
+                bin_centers,
+                refined_peak_idx,
+                bin_width_meters=HISTOGRAM_BIN_WIDTH_METERS,
+                neighbourhood_meters=PEAK_METRIC_NEIGHBOURHOOD_METERS,
+                window_width_meters=PEAK_METRIC_WINDOW_WIDTH_METERS,
+            )
+        )
+        return layer
 
     candidate_layers_by_idx = {
         peak_idx: build_peak_layer(peak_idx)

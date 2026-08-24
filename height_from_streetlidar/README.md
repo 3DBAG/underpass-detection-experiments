@@ -15,6 +15,22 @@ For each remaining candidate, the script computes:
 
 Candidate peaks that pass the raw-count threshold and retain surface pixels after wall removal are emitted in the compact elevation list. They are ordered by largest contiguous corrected surface area, with wall pixels excluded. The detailed debug JSON contains all detected peaks. Ties are broken by total covered area and then by smoothed histogram count. Each peak uses a fixed `1.0 m` vertical band centered on its histogram bin.
 
+Each peak in the detailed debug JSON also contains raw-peak shape metrics. By
+default these use a `0.5 m` neighbourhood on each side of the refined raw peak
+and a centered `0.2 m`-wide point window:
+
+- `peak_window_point_count`: raw points inside the centered point window
+- `local_prominence`: raw peak-bin count minus the higher median count of the
+  left and right shoulder bins
+- `relative_prominence`: local prominence divided by the raw peak-bin count
+- `concentration`: window point count divided by the raw point count within
+  the full neighbourhood
+- `width_m`: interpolated raw-histogram width at half-prominence, or `null`
+  when the raw peak has no positive local prominence
+
+Configure these dimensions with `PEAK_METRIC_NEIGHBOURHOOD_METERS` and
+`PEAK_METRIC_WINDOW_WIDTH_METERS` in `height_estimation.py`.
+
 ## What The Script Produces
 
 - A histogram of Z values with raw bars, a smoothed curve, and one marker and fixed `1.0 m` band per displayed peak

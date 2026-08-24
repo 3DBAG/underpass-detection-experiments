@@ -25,10 +25,11 @@ SHOW_RELATED_WALL_ROW = False
 # Figure margins in inches. These are converted to normalized subplot
 # fractions based on the current figure size so spacing stays stable when the
 # number of columns changes.
-FIGURE_MARGIN_LEFT_INCHES = 0.9
+FIGURE_MARGIN_LEFT_INCHES = 2.75
 FIGURE_MARGIN_RIGHT_INCHES = 0.15
 FIGURE_MARGIN_BOTTOM_INCHES = 0.5
 FIGURE_MARGIN_TOP_INCHES = 0.75
+FIGURE_VERTICAL_SPACING = 0.12
 
 # Output filenames, Rerun mode, and visualization colors.
 OUTPUT_CSV_PATH = "underpass_heights.csv"
@@ -186,21 +187,26 @@ def plot_height_estimation_result(result, output_dir=".", write_rerun=True):
     map_panel_width_ratio = max(0.7, map_aspect_ratio)
     ncols = len(display_peak_layers)
     width_ratios = [map_panel_width_ratio] * ncols
-    figure_width = 5 * sum(width_ratios)
+    figure_width = (
+        5 * sum(width_ratios)
+        + FIGURE_MARGIN_LEFT_INCHES
+        + FIGURE_MARGIN_RIGHT_INCHES
+    )
     map_row_count = 2 + int(SHOW_EXCLUSIVE_ROW) + int(SHOW_RELATED_WALL_ROW)
-    total_rows = 1 + map_row_count
+    total_rows = 2 + map_row_count
     figure_height = 4.5 + 4.0 * total_rows
     fig = plt.figure(figsize=(figure_width, figure_height))
     grid_spec = fig.add_gridspec(
         total_rows,
         ncols,
         width_ratios=width_ratios,
-        height_ratios=[0.72] + [1.0] * map_row_count,
+        height_ratios=[0.72, 0.62] + [1.0] * map_row_count,
         wspace=0.06,
-        hspace=0.30,
+        hspace=FIGURE_VERTICAL_SPACING,
     )
     ax_hist = fig.add_subplot(grid_spec[0, :])
-    current_row = 1
+    ax_metrics = fig.add_subplot(grid_spec[1, :])
+    current_row = 2
     peak_axes = [fig.add_subplot(grid_spec[current_row, idx]) for idx in range(ncols)]
     current_row += 1
     if SHOW_EXCLUSIVE_ROW:
@@ -267,6 +273,72 @@ def plot_height_estimation_result(result, output_dir=".", write_rerun=True):
     ax_hist.spines["top"].set_visible(False)
     ax_hist.spines["right"].set_visible(False)
 
+    metric_rows = [
+        (
+            "Elevation (m)",
+            [f"{layer['peak_center']:.2f}" for layer in display_peak_layers],
+        ),
+        (
+            "Z band (m)",
+            [
+                f"[{layer['z_min']:.2f}, {layer['z_max']:.2f})"
+                for layer in display_peak_layers
+            ],
+        ),
+        (
+            "Window points",
+            [str(layer["peak_window_point_count"]) for layer in display_peak_layers],
+        ),
+        (
+            "Local prominence",
+            [f"{layer['local_prominence']:.1f}" for layer in display_peak_layers],
+        ),
+        (
+            "Relative prominence",
+            [f"{layer['relative_prominence']:.2f}" for layer in display_peak_layers],
+        ),
+        (
+            "Concentration",
+            [f"{layer['concentration']:.2f}" for layer in display_peak_layers],
+        ),
+        (
+            "Width (m)",
+            [
+                "n/a" if layer["width_m"] is None else f"{layer['width_m']:.2f}"
+                for layer in display_peak_layers
+            ],
+        ),
+        (
+            "Total area (m²)",
+            [
+                f"{layer['exclusive_or_wall_area']:.2f}"
+                for layer in display_peak_layers
+            ],
+        ),
+        (
+            "Largest contiguous area (m²)",
+            [
+                f"{layer['exclusive_or_wall_largest_component_area']:.2f}"
+                for layer in display_peak_layers
+            ],
+        ),
+    ]
+    metrics_table = ax_metrics.table(
+        cellText=[values for _, values in metric_rows],
+        rowLabels=[label for label, _ in metric_rows],
+        colLabels=[
+            f"Peak {peak_number}"
+            for peak_number in range(1, len(display_peak_layers) + 1)
+        ],
+        cellLoc="center",
+        rowLoc="right",
+        loc="center",
+        bbox=[0, 0, 1, 1],
+    )
+    metrics_table.auto_set_font_size(False)
+    metrics_table.set_fontsize(10)
+    ax_metrics.axis("off")
+
     extent = [x_edges[0], x_edges[-1], y_edges[0], y_edges[-1]]
     for map_idx, (ax_map, layer) in enumerate(zip(peak_axes, display_peak_layers), start=1):
         masked_grid = np.ma.masked_where(layer["grid"] == 0, layer["grid"])
@@ -281,14 +353,7 @@ def plot_height_estimation_result(result, output_dir=".", write_rerun=True):
         )
         plot_geometry_outline(ax_map, geometries)
         style_peak_map_axis(ax_map, map_idx, show_xlabel=False)
-        ax_map.set_title(
-            f"Peak {map_idx}: {layer['peak_center']:.2f} m\n"
-            f"Z range [{layer['z_min']:.2f}, {layer['z_max']:.2f})\n"
-            f"Total area {layer['area']:.2f} m^2\n"
-            f"Largest contiguous area {layer['largest_component_area']:.2f} m^2",
-            fontsize=11,
-            pad=8,
-        )
+        ax_map.set_title(f"Peak {map_idx}", fontsize=11, pad=8)
         ax_map.set_aspect("equal")
         ax_map.legend(loc="best")
 
