@@ -4,16 +4,18 @@ This directory contains a Python workflow for estimating underpass height from c
 
 > The cropped point clouds were generated using the script in `../crop_las_by_polygons`:
 
-The script loops over a list of BAG cases, reads each LAS/LAZ file and its matching GeoPackage polygon, detects Z-peak candidates from a smoothed histogram, and rasterizes each candidate to the XY plane at `0.5 m` resolution. The elevation histogram uses fixed `0.25 m` bins anchored at global elevation `0`, so its edges are always global multiples of `0.25 m`, including for negative elevations. Diagnostic plots and the compact elevation output include candidates whose raw histogram count is at least `5%` of the second-highest candidate raw count. All detected candidates remain available in the detailed debug JSON.
+The script loops over a list of BAG cases, reads each LAS/LAZ file and its matching GeoPackage polygon, detects Z-peak candidates from a smoothed histogram, and rasterizes each candidate to the XY plane at `0.5 m` resolution. The elevation histogram uses fixed-width bins anchored at global elevation `0`; configure their width with `HISTOGRAM_BIN_WIDTH_METERS`. Diagnostic plots and the compact elevation output include candidates whose raw peak-bin count is at least `1000` and whose largest contiguous raster area is at least `4 m²`. All detected candidates remain available in the detailed debug JSON.
 
-For each remaining candidate, the script computes:
+For each detected candidate, the script computes a raw occupied raster. Candidate
+peaks that pass both absolute thresholds are emitted in the compact elevation
+list, ordered by largest contiguous raw surface area. Ties are broken by total
+covered area and then by smoothed histogram count. Exclusive-pixel and
+vertical-wall masks are not applied. The detailed debug JSON contains all
+detected peaks. Each peak uses a fixed `1.0 m` vertical band centered on its
+histogram bin.
 
-- the raw occupied raster
-- an exclusive raster with lower peaks masked out
-- pairwise vertical-wall cells between adjacent peaks
-- a union raster of exclusive cells and related wall cells
-
-Candidate peaks that pass the raw-count threshold and retain surface pixels after wall removal are emitted in the compact elevation list. They are ordered by largest contiguous corrected surface area, with wall pixels excluded. The detailed debug JSON contains all detected peaks. Ties are broken by total covered area and then by smoothed histogram count. Each peak uses a fixed `1.0 m` vertical band centered on its histogram bin.
+Configure the eligibility thresholds with `PEAK_MIN_RAW_COUNT` and
+`PEAK_MIN_CONTIGUOUS_AREA_M2` in `height_estimation.py`.
 
 Each peak in the detailed debug JSON also contains raw-peak shape metrics. By
 default these use a `0.5 m` neighbourhood on each side of the refined raw peak
@@ -34,15 +36,13 @@ Configure these dimensions with `PEAK_METRIC_NEIGHBOURHOOD_METERS` and
 ## What The Script Produces
 
 - A histogram of Z values with raw bars, a smoothed curve, and one marker and fixed `1.0 m` band per displayed peak
-- One XY raster row showing all displayed peak bands
-- One XY raster row showing the union of exclusive cells and pairwise wall cells for each displayed peak
-- Optional diagnostic rows for:
-  - exclusive cells with lower peaks masked out
-  - related wall cells between adjacent peaks
+- A metrics table with one column per selected peak, ordered left-to-right by
+  elevation to match the histogram; its `Rank` row shows production area rank
+- One XY raster row showing the raw mask for each selected peak band
 - One PNG per BAG id, named `<bag_id>_peak_grids_overlay.png`
 - A CSV summary written to `underpass_heights.csv`, with the production field
   `underpass_candidate_elevations` containing only threshold-passing candidate elevations,
-  ordered by descending wall-corrected contiguous area, plus detailed
+  ordered by descending raw contiguous area, plus detailed
   `underpass_candidate_peaks` JSON for debugging
 - A Rerun visualization sent to the viewer by default
 

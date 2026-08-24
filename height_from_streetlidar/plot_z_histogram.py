@@ -18,10 +18,6 @@ from height_estimation import (
 #     rr = None
 rr = None
 
-# Optional diagnostic rows in the matplotlib output.
-SHOW_EXCLUSIVE_ROW = False
-SHOW_RELATED_WALL_ROW = False
-
 # Figure margins in inches. These are converted to normalized subplot
 # fractions based on the current figure size so spacing stays stable when the
 # number of columns changes.
@@ -178,21 +174,26 @@ def plot_height_estimation_result(result, output_dir=".", write_rerun=True):
     x_edges = result["x_edges"]
     y_edges = result["y_edges"]
     display_peak_layers = result["display_peak_layers"]
-    display_raw_count_threshold = result["display_raw_count_threshold"]
+    ranked_output_layers = result["ranked_output_layers"]
+    peak_min_raw_count = result["peak_min_raw_count"]
     underpass_metrics = result["underpass_metrics"]
+    rank_by_peak_idx = {
+        layer["peak_idx"]: rank
+        for rank, layer in enumerate(ranked_output_layers, start=1)
+    }
 
     map_width = max_x - min_x
     map_height = max_y - min_y
     map_aspect_ratio = map_width / map_height if map_height > 0 else 1.0
     map_panel_width_ratio = max(0.7, map_aspect_ratio)
-    ncols = len(display_peak_layers)
+    ncols = max(1, len(display_peak_layers))
     width_ratios = [map_panel_width_ratio] * ncols
     figure_width = (
         5 * sum(width_ratios)
         + FIGURE_MARGIN_LEFT_INCHES
         + FIGURE_MARGIN_RIGHT_INCHES
     )
-    map_row_count = 2 + int(SHOW_EXCLUSIVE_ROW) + int(SHOW_RELATED_WALL_ROW)
+    map_row_count = 1
     total_rows = 2 + map_row_count
     figure_height = 4.5 + 4.0 * total_rows
     fig = plt.figure(figsize=(figure_width, figure_height))
@@ -206,20 +207,7 @@ def plot_height_estimation_result(result, output_dir=".", write_rerun=True):
     )
     ax_hist = fig.add_subplot(grid_spec[0, :])
     ax_metrics = fig.add_subplot(grid_spec[1, :])
-    current_row = 2
-    peak_axes = [fig.add_subplot(grid_spec[current_row, idx]) for idx in range(ncols)]
-    current_row += 1
-    if SHOW_EXCLUSIVE_ROW:
-        exclusive_peak_axes = [fig.add_subplot(grid_spec[current_row, idx]) for idx in range(ncols)]
-        current_row += 1
-    else:
-        exclusive_peak_axes = []
-    if SHOW_RELATED_WALL_ROW:
-        wall_peak_axes = [fig.add_subplot(grid_spec[current_row, idx]) for idx in range(ncols)]
-        current_row += 1
-    else:
-        wall_peak_axes = []
-    combined_peak_axes = [fig.add_subplot(grid_spec[current_row, idx]) for idx in range(ncols)]
+    peak_axes = [fig.add_subplot(grid_spec[2, idx]) for idx in range(ncols)]
 
     def style_peak_map_axis(ax_map, map_idx, show_xlabel):
         if show_xlabel:
@@ -248,7 +236,7 @@ def plot_height_estimation_result(result, output_dir=".", write_rerun=True):
         label="Smoothed histogram",
     )
     ax_hist.axhline(
-        display_raw_count_threshold,
+        peak_min_raw_count,
         color="red",
         linestyle=":",
         linewidth=1.5,
@@ -274,6 +262,13 @@ def plot_height_estimation_result(result, output_dir=".", write_rerun=True):
     ax_hist.spines["right"].set_visible(False)
 
     metric_rows = [
+        (
+            "Rank",
+            [
+                str(rank_by_peak_idx[layer["peak_idx"]])
+                for layer in display_peak_layers
+            ],
+        ),
         (
             "Elevation (m)",
             [f"{layer['peak_center']:.2f}" for layer in display_peak_layers],
@@ -310,33 +305,40 @@ def plot_height_estimation_result(result, output_dir=".", write_rerun=True):
         ),
         (
             "Total area (m²)",
-            [
-                f"{layer['exclusive_or_wall_area']:.2f}"
-                for layer in display_peak_layers
-            ],
+            [f"{layer['area']:.2f}" for layer in display_peak_layers],
         ),
         (
             "Largest contiguous area (m²)",
             [
-                f"{layer['exclusive_or_wall_largest_component_area']:.2f}"
+                f"{layer['largest_component_area']:.2f}"
                 for layer in display_peak_layers
             ],
         ),
     ]
-    metrics_table = ax_metrics.table(
-        cellText=[values for _, values in metric_rows],
-        rowLabels=[label for label, _ in metric_rows],
-        colLabels=[
-            f"Peak {peak_number}"
-            for peak_number in range(1, len(display_peak_layers) + 1)
-        ],
-        cellLoc="center",
-        rowLoc="right",
-        loc="center",
-        bbox=[0, 0, 1, 1],
-    )
-    metrics_table.auto_set_font_size(False)
-    metrics_table.set_fontsize(10)
+    if display_peak_layers:
+        metrics_table = ax_metrics.table(
+            cellText=[values for _, values in metric_rows],
+            rowLabels=[label for label, _ in metric_rows],
+            colLabels=[
+                f"Peak {peak_number}"
+                for peak_number in range(1, len(display_peak_layers) + 1)
+            ],
+            cellLoc="center",
+            rowLoc="right",
+            loc="center",
+            bbox=[0, 0, 1, 1],
+        )
+        metrics_table.auto_set_font_size(False)
+        metrics_table.set_fontsize(10)
+    else:
+        ax_metrics.text(
+            0.5,
+            0.5,
+            "No peaks passed the raw-count and contiguous-area thresholds",
+            ha="center",
+            va="center",
+            fontsize=11,
+        )
     ax_metrics.axis("off")
 
     extent = [x_edges[0], x_edges[-1], y_edges[0], y_edges[-1]]
@@ -352,88 +354,21 @@ def plot_height_estimation_result(result, output_dir=".", write_rerun=True):
             interpolation="nearest",
         )
         plot_geometry_outline(ax_map, geometries)
-        style_peak_map_axis(ax_map, map_idx, show_xlabel=False)
+        style_peak_map_axis(ax_map, map_idx, show_xlabel=True)
         ax_map.set_title(f"Peak {map_idx}", fontsize=11, pad=8)
         ax_map.set_aspect("equal")
         ax_map.legend(loc="best")
 
-    if SHOW_EXCLUSIVE_ROW:
-        for map_idx, (ax_map, layer) in enumerate(zip(exclusive_peak_axes, display_peak_layers), start=1):
-            masked_grid = np.ma.masked_where(layer["exclusive_grid"] == 0, layer["exclusive_grid"])
-            ax_map.set_facecolor("#f3f3f3")
-            ax_map.imshow(
-                masked_grid,
-                origin="lower",
-                extent=extent,
-                cmap=peak_fill_cmap(map_idx),
-                alpha=0.9,
-                interpolation="nearest",
-            )
-            plot_geometry_outline(ax_map, geometries)
-            style_peak_map_axis(ax_map, map_idx, show_xlabel=False)
-            ax_map.set_title(
-                "Masking cells occupied by lower peaks except Peak 1\n"
-                f"Total area {layer['exclusive_area']:.2f} m^2\n"
-                f"Largest contiguous area {layer['exclusive_largest_component_area']:.2f} m^2",
-                fontsize=11,
-                pad=8,
-            )
-            ax_map.set_aspect("equal")
-            ax_map.legend(loc="best")
-
-    if SHOW_RELATED_WALL_ROW:
-        for map_idx, (ax_map, layer) in enumerate(zip(wall_peak_axes, display_peak_layers), start=1):
-            masked_grid = np.ma.masked_where(layer["related_wall_grid"] == 0, layer["related_wall_grid"])
-            if map_idx == 1:
-                wall_title_line = "Walls between Peak 1 and Peak 2"
-            elif map_idx == len(display_peak_layers):
-                wall_title_line = f"Walls between Peak {map_idx - 1} and Peak {map_idx}"
-            else:
-                wall_title_line = (
-                    f"Walls between Peaks {map_idx - 1}/{map_idx} and Peaks {map_idx}/{map_idx + 1}"
-                )
-            ax_map.set_facecolor("#f3f3f3")
-            ax_map.imshow(
-                masked_grid,
-                origin="lower",
-                extent=extent,
-                cmap=peak_fill_cmap(map_idx),
-                alpha=0.95,
-                interpolation="nearest",
-            )
-            plot_geometry_outline(ax_map, geometries)
-            style_peak_map_axis(ax_map, map_idx, show_xlabel=False)
-            ax_map.set_title(
-                f"{wall_title_line}\n"
-                f"Related wall area {layer['related_wall_area']:.2f} m^2",
-                fontsize=11,
-                pad=8,
-            )
-            ax_map.set_aspect("equal")
-            ax_map.legend(loc="best")
-
-    for map_idx, (ax_map, layer) in enumerate(zip(combined_peak_axes, display_peak_layers), start=1):
-        masked_grid = np.ma.masked_where(layer["exclusive_or_wall_grid"] == 0, layer["exclusive_or_wall_grid"])
-        ax_map.set_facecolor("#f3f3f3")
-        ax_map.imshow(
-            masked_grid,
-            origin="lower",
-            extent=extent,
-            cmap=peak_fill_cmap(map_idx),
-            alpha=0.95,
-            interpolation="nearest",
+    if not display_peak_layers:
+        peak_axes[0].text(
+            0.5,
+            0.5,
+            "No peak rasters to display",
+            ha="center",
+            va="center",
+            transform=peak_axes[0].transAxes,
         )
-        plot_geometry_outline(ax_map, geometries)
-        style_peak_map_axis(ax_map, map_idx, show_xlabel=True)
-        ax_map.set_title(
-            "Union of exclusive and pairwise wall cells\n"
-            f"Total area {layer['exclusive_or_wall_area']:.2f} m^2\n"
-            f"Largest contiguous area {layer['exclusive_or_wall_largest_component_area']:.2f} m^2",
-            fontsize=11,
-            pad=8,
-        )
-        ax_map.set_aspect("equal")
-        ax_map.legend(loc="best")
+        peak_axes[0].axis("off")
 
     fig.suptitle(bag_id, fontsize=15, y=0.985)
     fig.subplots_adjust(

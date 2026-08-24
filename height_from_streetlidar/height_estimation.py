@@ -26,19 +26,13 @@ PEAK_BAND_WIDTH_METERS = 1
 
 PEAK_MIN_SEPARATION_BINS = 5
 
-# Candidate peaks with raw counts below this fraction of the second-highest
-# candidate raw count are omitted from diagnostic plots and production output,
-# but remain available in the detailed debug output.
-DISPLAY_PEAK_MIN_RELATIVE_RAW_COUNT = 0.05
+# A candidate must satisfy both absolute thresholds to enter production output.
+PEAK_MIN_RAW_COUNT = 1000
+PEAK_MIN_CONTIGUOUS_AREA_M2 = 4.0
 
 # When enabled, the candidate peak is snapped from the smoothed local maximum to
 # the highest raw histogram bin inside that smoothed peak cluster.
 SNAP_PEAK_TO_RAW_BIN_WITHIN_CLUSTER = True
-
-# A cell is treated as a vertical wall when points occupy nearly every
-# histogram bin between adjacent displayed peaks.
-VERTICAL_WALL_MIN_BIN_FRACTION = 0.85
-VERTICAL_WALL_MAX_EMPTY_RUN_BINS = 1
 
 
 def anchored_histogram_bin_edges(
@@ -372,14 +366,12 @@ def build_grid(x, y, x_edges, y_edges):
     return grid.T
 
 
-def precompute_point_bin_indices(x, y, z, x_edges, y_edges, bin_edges):
+def precompute_point_grid_indices(x, y, x_edges, y_edges):
     rows = len(y_edges) - 1
     cols = len(x_edges) - 1
 
     x_idx = np.searchsorted(x_edges, x, side="right") - 1
     y_idx = np.searchsorted(y_edges, y, side="right") - 1
-    z_idx = np.searchsorted(bin_edges, z, side="right") - 1
-
     # Match numpy.histogram2d edge semantics: include points exactly on the
     # final edge in the last bin.
     grid_x_idx = np.where((x_idx == cols) & (x == x_edges[-1]), cols - 1, x_idx)
@@ -392,143 +384,13 @@ def precompute_point_bin_indices(x, y, z, x_edges, y_edges, bin_edges):
         & (grid_y_idx < rows)
     )
     flat_cell_idx = grid_y_idx * cols + grid_x_idx
-    return rows, cols, flat_cell_idx, valid, x_idx, y_idx, z_idx
+    return rows, cols, flat_cell_idx, valid
 
 
 def build_grid_from_precomputed_indices(flat_cell_idx, valid_xy, z_mask, rows, cols):
     valid = valid_xy & z_mask
     grid = np.bincount(flat_cell_idx[valid], minlength=rows * cols).reshape(rows, cols)
     return grid.astype(float)
-
-
-def build_vertical_wall_mask(
-    x,
-    y,
-    z,
-    x_edges,
-    y_edges,
-    bin_edges,
-    lower_peak_idx,
-    upper_peak_idx,
-    min_bin_fraction,
-    max_empty_run_bins,
-):
-    rows = len(y_edges) - 1
-    cols = len(x_edges) - 1
-    wall_mask = np.zeros((rows, cols), dtype=bool)
-
-    if rows == 0 or cols == 0:
-        return wall_mask
-
-    start_idx = min(lower_peak_idx, upper_peak_idx)
-    stop_idx = max(lower_peak_idx, upper_peak_idx)
-    if stop_idx <= start_idx:
-        return wall_mask
-
-    x_idx = np.searchsorted(x_edges, x, side="right") - 1
-    y_idx = np.searchsorted(y_edges, y, side="right") - 1
-    z_idx = np.searchsorted(bin_edges, z, side="right") - 1
-
-    bin_count = len(bin_edges) - 1
-    valid = (
-        (x_idx >= 0)
-        & (x_idx < cols)
-        & (y_idx >= 0)
-        & (y_idx < rows)
-        & (z_idx >= start_idx)
-        & (z_idx <= stop_idx)
-        & (z_idx < bin_count)
-    )
-    if not np.any(valid):
-        return wall_mask
-
-    interval_bin_count = stop_idx - start_idx + 1
-    occupied_bins = np.zeros((rows * cols, interval_bin_count), dtype=bool)
-    flat_cell_idx = y_idx[valid] * cols + x_idx[valid]
-    interval_z_idx = z_idx[valid] - start_idx
-    occupied_bins[flat_cell_idx, interval_z_idx] = True
-
-    occupied_fraction = occupied_bins.mean(axis=1)
-    endpoint_hits = occupied_bins[:, 0] & occupied_bins[:, -1]
-
-    empty_bins = ~occupied_bins
-    padded_empty_bins = np.pad(empty_bins.astype(np.int16), ((0, 0), (1, 1)), constant_values=0)
-    transitions = np.diff(padded_empty_bins, axis=1)
-    run_starts = transitions == 1
-    run_stops = transitions == -1
-    run_lengths = np.where(run_stops)[1] - np.where(run_starts)[1]
-    max_empty_run = np.zeros(rows * cols, dtype=int)
-    if len(run_lengths) > 0:
-        np.maximum.at(max_empty_run, np.where(run_starts)[0], run_lengths)
-
-    wall_mask.flat[:] = (
-        endpoint_hits
-        & (occupied_fraction >= min_bin_fraction)
-        & (max_empty_run <= max_empty_run_bins)
-    )
-    return wall_mask
-
-
-def build_vertical_wall_mask_from_precomputed_indices(
-    rows,
-    cols,
-    x_idx,
-    y_idx,
-    z_idx,
-    bin_edges,
-    lower_peak_idx,
-    upper_peak_idx,
-    min_bin_fraction,
-    max_empty_run_bins,
-):
-    wall_mask = np.zeros((rows, cols), dtype=bool)
-
-    if rows == 0 or cols == 0:
-        return wall_mask
-
-    start_idx = min(lower_peak_idx, upper_peak_idx)
-    stop_idx = max(lower_peak_idx, upper_peak_idx)
-    if stop_idx <= start_idx:
-        return wall_mask
-
-    bin_count = len(bin_edges) - 1
-    valid = (
-        (x_idx >= 0)
-        & (x_idx < cols)
-        & (y_idx >= 0)
-        & (y_idx < rows)
-        & (z_idx >= start_idx)
-        & (z_idx <= stop_idx)
-        & (z_idx < bin_count)
-    )
-    if not np.any(valid):
-        return wall_mask
-
-    interval_bin_count = stop_idx - start_idx + 1
-    occupied_bins = np.zeros((rows * cols, interval_bin_count), dtype=bool)
-    flat_cell_idx = y_idx[valid] * cols + x_idx[valid]
-    interval_z_idx = z_idx[valid] - start_idx
-    occupied_bins[flat_cell_idx, interval_z_idx] = True
-
-    occupied_fraction = occupied_bins.mean(axis=1)
-    endpoint_hits = occupied_bins[:, 0] & occupied_bins[:, -1]
-
-    empty_bins = ~occupied_bins
-    padded_empty_bins = np.pad(empty_bins.astype(np.int16), ((0, 0), (1, 1)), constant_values=0)
-    transitions = np.diff(padded_empty_bins, axis=1)
-    run_starts = transitions == 1
-    run_stops = transitions == -1
-    run_lengths = np.where(run_stops)[1] - np.where(run_starts)[1]
-    max_empty_run = np.zeros(rows * cols, dtype=int)
-    if len(run_lengths) > 0:
-        np.maximum.at(max_empty_run, np.where(run_starts)[0], run_lengths)
-
-    wall_mask.flat[:] = (
-        endpoint_hits
-        & (occupied_fraction >= min_bin_fraction)
-        & (max_empty_run <= max_empty_run_bins)
-    )
-    return wall_mask
 
 
 def band_mask(values, value_min, value_max):
@@ -579,9 +441,6 @@ def candidate_peak_summary(
     peak_idx = layer["peak_idx"]
     display_order = display_order_by_peak_idx.get(peak_idx)
     output_rank = output_rank_by_peak_idx.get(peak_idx)
-    corrected_area = layer.get("corrected_area")
-    corrected_largest_area = layer.get("corrected_largest_component_area")
-    related_wall_area = layer.get("related_wall_area")
     return {
         "rank": None if output_rank is None else int(output_rank),
         "raw_surface_rank": int(raw_surface_rank),
@@ -593,15 +452,6 @@ def candidate_peak_summary(
         "point_count": int(layer["point_count"]),
         "area_m2": float(layer["area"]),
         "largest_contiguous_area_m2": float(layer["largest_component_area"]),
-        "related_wall_area_m2": (
-            None if related_wall_area is None else float(related_wall_area)
-        ),
-        "corrected_area_m2": (
-            None if corrected_area is None else float(corrected_area)
-        ),
-        "corrected_largest_contiguous_area_m2": (
-            None if corrected_largest_area is None else float(corrected_largest_area)
-        ),
         "raw_count": int(layer["raw_count"]),
         "smoothed_count": float(layer["smoothed_count"]),
         "peak_window_point_count": int(layer["peak_window_point_count"]),
@@ -666,16 +516,11 @@ def estimate_underpass_height_from_points(identifier, x, y, z, geometries, verbo
         grid_cols,
         flat_grid_cell_idx,
         valid_grid_xy,
-        wall_x_idx,
-        wall_y_idx,
-        wall_z_idx,
-    ) = precompute_point_bin_indices(
+    ) = precompute_point_grid_indices(
         x,
         y,
-        z,
         x_edges,
         y_edges,
-        bin_edges,
     )
 
     z_min_all = np.min(z)
@@ -742,7 +587,6 @@ def estimate_underpass_height_from_points(identifier, x, y, z, geometries, verbo
         key=lambda layer: (layer["largest_component_area"], layer["area"], layer["smoothed_count"]),
         reverse=True,
     )
-
     if verbose:
         print(f"Number of points: {len(z)}")
         print(f"Z range: [{z_min_all:.2f}, {z_max_all:.2f}]")
@@ -756,110 +600,25 @@ def estimate_underpass_height_from_points(identifier, x, y, z, geometries, verbo
                 f"smoothed count {layer['smoothed_count']:.1f}, raw count {layer['raw_count']}"
             )
 
-    candidate_raw_counts = sorted((layer["raw_count"] for layer in separated_candidate_layers), reverse=True)
-    if len(candidate_raw_counts) >= 2:
-        display_raw_count_threshold = (
-            DISPLAY_PEAK_MIN_RELATIVE_RAW_COUNT * candidate_raw_counts[1]
-        )
-    elif candidate_raw_counts:
-        display_raw_count_threshold = DISPLAY_PEAK_MIN_RELATIVE_RAW_COUNT * candidate_raw_counts[0]
-    else:
-        display_raw_count_threshold = 0.0
-    display_peak_layers = [
+    ranked_output_layers = [
         layer
-        for layer in candidate_layers_by_height
-        if layer["raw_count"] >= display_raw_count_threshold
+        for layer in ranked_candidate_layers
+        if (
+            layer["raw_count"] >= PEAK_MIN_RAW_COUNT
+            and layer["largest_component_area"] >= PEAK_MIN_CONTIGUOUS_AREA_M2
+        )
     ]
-    if not display_peak_layers and candidate_layers_by_height:
-        display_peak_layers = [candidate_layers_by_height[0]]
+    display_peak_layers = sorted(
+        ranked_output_layers,
+        key=lambda layer: layer["peak_center"],
+    )
     if verbose:
         print(
-            f"Displaying {len(display_peak_layers)} candidate peaks with raw count >= "
-            f"{display_raw_count_threshold:.1f} "
-            f"(5% of second-highest candidate raw count)."
+            f"Selected {len(ranked_output_layers)} candidate peaks with raw count >= "
+            f"{PEAK_MIN_RAW_COUNT} and largest contiguous area >= "
+            f"{PEAK_MIN_CONTIGUOUS_AREA_M2:.2f} m^2."
         )
 
-    occupied_by_lower_non_floor_peaks = np.zeros_like(display_peak_layers[0]["grid"], dtype=bool)
-    for display_peak_idx, layer in sorted(
-        enumerate(display_peak_layers, start=1),
-        key=lambda item: item[1]["peak_center"],
-    ):
-        if display_peak_idx == 1:
-            exclusive_grid = layer["grid"]
-        else:
-            exclusive_grid = np.where(occupied_by_lower_non_floor_peaks, 0, layer["grid"])
-        layer["exclusive_grid"] = exclusive_grid
-        layer["exclusive_area"] = np.count_nonzero(exclusive_grid) * (GRID_CELLSIZE ** 2)
-        layer["exclusive_largest_component_area"] = largest_contiguous_component_area(
-            exclusive_grid,
-            GRID_CELLSIZE,
-        )
-        if display_peak_idx != 1:
-            occupied_by_lower_non_floor_peaks |= layer["grid"] > 0
-    pairwise_wall_masks = []
-    for upper_peak_idx in range(1, len(display_peak_layers)):
-        lower_layer = display_peak_layers[upper_peak_idx - 1]
-        upper_layer = display_peak_layers[upper_peak_idx]
-        pairwise_wall_masks.append(
-            build_vertical_wall_mask_from_precomputed_indices(
-                grid_rows,
-                grid_cols,
-                wall_x_idx,
-                wall_y_idx,
-                wall_z_idx,
-                bin_edges,
-                lower_layer["refined_peak_idx"],
-                upper_layer["refined_peak_idx"],
-                min_bin_fraction=VERTICAL_WALL_MIN_BIN_FRACTION,
-                max_empty_run_bins=VERTICAL_WALL_MAX_EMPTY_RUN_BINS,
-            )
-        )
-    for display_peak_idx, layer in enumerate(display_peak_layers, start=1):
-        related_wall_mask = np.zeros_like(layer["grid"], dtype=bool)
-        if display_peak_idx > 1:
-            related_wall_mask |= pairwise_wall_masks[display_peak_idx - 2]
-        if display_peak_idx < len(display_peak_layers):
-            related_wall_mask |= pairwise_wall_masks[display_peak_idx - 1]
-        layer["related_wall_grid"] = related_wall_mask.astype(float)
-        layer["related_wall_area"] = np.count_nonzero(related_wall_mask) * (GRID_CELLSIZE ** 2)
-    for layer in display_peak_layers:
-        exclusive_or_wall_grid = np.where(
-            (layer["exclusive_grid"] > 0) | (layer["related_wall_grid"] > 0),
-            np.maximum(layer["exclusive_grid"], layer["related_wall_grid"]),
-            0,
-        )
-        layer["exclusive_or_wall_grid"] = exclusive_or_wall_grid
-        layer["exclusive_or_wall_area"] = np.count_nonzero(exclusive_or_wall_grid) * (GRID_CELLSIZE ** 2)
-        layer["exclusive_or_wall_largest_component_area"] = largest_contiguous_component_area(
-            exclusive_or_wall_grid,
-            GRID_CELLSIZE,
-        )
-
-        corrected_grid = np.where(
-            (layer["exclusive_grid"] > 0) & (layer["related_wall_grid"] == 0),
-            layer["exclusive_grid"],
-            0,
-        )
-        layer["corrected_grid"] = corrected_grid
-        layer["corrected_area"] = np.count_nonzero(corrected_grid) * (GRID_CELLSIZE ** 2)
-        layer["corrected_largest_component_area"] = largest_contiguous_component_area(
-            corrected_grid,
-            GRID_CELLSIZE,
-        )
-
-    ranked_output_layers = sorted(
-        [
-            layer
-            for layer in display_peak_layers
-            if layer["corrected_largest_component_area"] > 0
-        ],
-        key=lambda layer: (
-            layer["corrected_largest_component_area"],
-            layer["corrected_area"],
-            layer["smoothed_count"],
-        ),
-        reverse=True,
-    )
     output_rank_by_peak_idx = {
         layer["peak_idx"]: rank
         for rank, layer in enumerate(ranked_output_layers, start=1)
@@ -882,8 +641,7 @@ def estimate_underpass_height_from_points(identifier, x, y, z, geometries, verbo
                 f"Z range [{layer['z_min']:.2f}, {layer['z_max']:.2f}), "
                 f"points {layer['point_count']}, "
                 f"area {layer['area']:.2f} m^2, "
-                f"largest contiguous area {layer['largest_component_area']:.2f} m^2, "
-                f"corrected contiguous area {layer['corrected_largest_component_area']:.2f} m^2"
+                f"largest contiguous area {layer['largest_component_area']:.2f} m^2"
             )
 
     underpass_metrics = {
@@ -913,7 +671,8 @@ def estimate_underpass_height_from_points(identifier, x, y, z, geometries, verbo
         "ranked_candidate_layers": ranked_candidate_layers,
         "ranked_output_layers": ranked_output_layers,
         "display_peak_layers": display_peak_layers,
-        "display_raw_count_threshold": display_raw_count_threshold,
+        "peak_min_raw_count": PEAK_MIN_RAW_COUNT,
+        "peak_min_contiguous_area_m2": PEAK_MIN_CONTIGUOUS_AREA_M2,
         "underpass_metrics": underpass_metrics,
     }
 
