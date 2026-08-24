@@ -175,7 +175,7 @@ def plot_height_estimation_result(result, output_dir=".", write_rerun=True):
     y_edges = result["y_edges"]
     display_peak_layers = result["display_peak_layers"]
     ranked_output_layers = result["ranked_output_layers"]
-    peak_min_raw_count = result["peak_min_raw_count"]
+    effective_raw_count_threshold = result["effective_raw_count_threshold"]
     underpass_metrics = result["underpass_metrics"]
     rank_by_peak_idx = {
         layer["peak_idx"]: rank
@@ -236,7 +236,7 @@ def plot_height_estimation_result(result, output_dir=".", write_rerun=True):
         label="Smoothed histogram",
     )
     ax_hist.axhline(
-        peak_min_raw_count,
+        effective_raw_count_threshold,
         color="red",
         linestyle=":",
         linewidth=1.5,

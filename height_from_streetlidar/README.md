@@ -4,7 +4,7 @@ This directory contains a Python workflow for estimating underpass height from c
 
 > The cropped point clouds were generated using the script in `../crop_las_by_polygons`:
 
-The script loops over a list of BAG cases, reads each LAS/LAZ file and its matching GeoPackage polygon, detects Z-peak candidates from a smoothed histogram, and rasterizes each candidate to the XY plane at `0.5 m` resolution. The elevation histogram uses fixed-width bins anchored at global elevation `0`; configure their width with `HISTOGRAM_BIN_WIDTH_METERS`. Diagnostic plots and the compact elevation output include candidates whose raw peak-bin count is at least `1000` and whose largest contiguous raster area is at least `4 m²`. All detected candidates remain available in the detailed debug JSON.
+The script loops over a list of BAG cases, reads each LAS/LAZ file and its matching GeoPackage polygon, detects Z-peak candidates from a smoothed histogram, and rasterizes each candidate to the XY plane at `0.5 m` resolution. The elevation histogram uses fixed-width bins anchored at global elevation `0`; configure their width with `HISTOGRAM_BIN_WIDTH_METERS`. Diagnostic plots and the compact elevation output include candidates whose raw peak-bin count is at least `1000`, whose raw count is also at least `5%` of the second-highest candidate raw count, and whose largest contiguous raster area is at least both `4 m²` and `5%` of the polygon area. All detected candidates remain available in the detailed debug JSON.
 
 For each detected candidate, the script computes a raw occupied raster. Candidate
 peaks that pass both absolute thresholds are emitted in the compact elevation
@@ -14,8 +14,9 @@ vertical-wall masks are not applied. The detailed debug JSON contains all
 detected peaks. Each peak uses a fixed `1.0 m` vertical band centered on its
 histogram bin.
 
-Configure the eligibility thresholds with `PEAK_MIN_RAW_COUNT` and
-`PEAK_MIN_CONTIGUOUS_AREA_M2` in `height_estimation.py`.
+Configure the eligibility thresholds with `PEAK_MIN_RAW_COUNT`,
+`DISPLAY_PEAK_MIN_RELATIVE_RAW_COUNT`, `PEAK_MIN_CONTIGUOUS_AREA_M2`, and
+`PEAK_MIN_CONTIGUOUS_AREA_POLYGON_FRACTION` in `height_estimation.py`.
 
 Each peak in the detailed debug JSON also contains raw-peak shape metrics. By
 default these use a `0.5 m` neighbourhood on each side of the refined raw peak

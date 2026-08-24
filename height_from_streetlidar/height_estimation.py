@@ -3,6 +3,7 @@ import numpy as np
 import sqlite3
 from pathlib import Path
 from shapely import wkb
+from shapely.ops import unary_union
 
 
 # Peak-detection and output parameters.
@@ -24,11 +25,17 @@ GRID_CELLSIZE = 0.5
 # points for the raster outputs and reported peak windows.
 PEAK_BAND_WIDTH_METERS = 1
 
+# Minimum separtion between subsequent peaks
 PEAK_MIN_SEPARATION_BINS = 5
 
 # A candidate must satisfy both absolute thresholds to enter production output.
 PEAK_MIN_RAW_COUNT = 1000
 PEAK_MIN_CONTIGUOUS_AREA_M2 = 4.0
+PEAK_MIN_CONTIGUOUS_AREA_POLYGON_FRACTION = 0.05
+
+# Candidates must also reach this fraction of the second-highest candidate raw
+# peak-bin count to enter diagnostic plots and production output.
+PEAK_MIN_RELATIVE_RAW_COUNT = 0.05
 
 # When enabled, the candidate peak is snapped from the smoothed local maximum to
 # the highest raw histogram bin inside that smoothed peak cluster.
@@ -63,6 +70,34 @@ def anchored_histogram_bin_edges(
 
     bin_indices = np.arange(lower_bin_idx, upper_bin_idx + 1, dtype=np.int64)
     return anchor_elevation_meters + bin_indices * bin_width_meters
+
+
+def relative_raw_count_threshold(
+    candidate_raw_counts,
+    fraction=PEAK_MIN_RELATIVE_RAW_COUNT,
+):
+    if not np.isfinite(fraction) or fraction < 0:
+        raise ValueError("Relative raw-count fraction must be finite and non-negative")
+
+    ranked_counts = sorted(candidate_raw_counts, reverse=True)
+    if len(ranked_counts) >= 2:
+        reference_count = ranked_counts[1]
+    elif ranked_counts:
+        reference_count = ranked_counts[0]
+    else:
+        return 0.0
+    return fraction * reference_count
+
+
+def polygon_relative_contiguous_area_threshold(
+    polygon_area_m2,
+    fraction=PEAK_MIN_CONTIGUOUS_AREA_POLYGON_FRACTION,
+):
+    if not np.isfinite(polygon_area_m2) or polygon_area_m2 <= 0:
+        raise ValueError("Polygon area must be a positive finite number")
+    if not np.isfinite(fraction) or not 0 <= fraction <= 1:
+        raise ValueError("Polygon-area fraction must be between 0 and 1")
+    return fraction * polygon_area_m2
 
 
 def find_top_histogram_peaks(
@@ -486,6 +521,15 @@ def estimate_underpass_height_from_points(identifier, x, y, z, geometries, verbo
     if not geometries:
         raise ValueError("No polygon geometries available for height estimation")
 
+    polygon_area_m2 = float(unary_union(geometries).area)
+    polygon_relative_area_threshold_m2 = polygon_relative_contiguous_area_threshold(
+        polygon_area_m2
+    )
+    effective_contiguous_area_threshold_m2 = max(
+        PEAK_MIN_CONTIGUOUS_AREA_M2,
+        polygon_relative_area_threshold_m2,
+    )
+
     (
         counts,
         bin_edges,
@@ -600,12 +644,21 @@ def estimate_underpass_height_from_points(identifier, x, y, z, geometries, verbo
                 f"smoothed count {layer['smoothed_count']:.1f}, raw count {layer['raw_count']}"
             )
 
+    display_raw_count_threshold = relative_raw_count_threshold(
+        layer["raw_count"] for layer in separated_candidate_layers
+    )
+    effective_raw_count_threshold = max(
+        PEAK_MIN_RAW_COUNT,
+        display_raw_count_threshold,
+    )
+
     ranked_output_layers = [
         layer
         for layer in ranked_candidate_layers
         if (
-            layer["raw_count"] >= PEAK_MIN_RAW_COUNT
-            and layer["largest_component_area"] >= PEAK_MIN_CONTIGUOUS_AREA_M2
+            layer["raw_count"] >= effective_raw_count_threshold
+            and layer["largest_component_area"]
+            >= effective_contiguous_area_threshold_m2
         )
     ]
     display_peak_layers = sorted(
@@ -615,8 +668,12 @@ def estimate_underpass_height_from_points(identifier, x, y, z, geometries, verbo
     if verbose:
         print(
             f"Selected {len(ranked_output_layers)} candidate peaks with raw count >= "
-            f"{PEAK_MIN_RAW_COUNT} and largest contiguous area >= "
-            f"{PEAK_MIN_CONTIGUOUS_AREA_M2:.2f} m^2."
+            f"{effective_raw_count_threshold:.1f} (max of absolute {PEAK_MIN_RAW_COUNT} "
+            f"and relative {display_raw_count_threshold:.1f}) and largest contiguous area >= "
+            f"{effective_contiguous_area_threshold_m2:.2f} m^2 (max of absolute "
+            f"{PEAK_MIN_CONTIGUOUS_AREA_M2:.2f} m^2 and "
+            f"{PEAK_MIN_CONTIGUOUS_AREA_POLYGON_FRACTION:.0%} of polygon area, "
+            f"{polygon_relative_area_threshold_m2:.2f} m^2)."
         )
 
     output_rank_by_peak_idx = {
@@ -672,7 +729,14 @@ def estimate_underpass_height_from_points(identifier, x, y, z, geometries, verbo
         "ranked_output_layers": ranked_output_layers,
         "display_peak_layers": display_peak_layers,
         "peak_min_raw_count": PEAK_MIN_RAW_COUNT,
+        "display_peak_min_relative_raw_count": PEAK_MIN_RELATIVE_RAW_COUNT,
+        "display_raw_count_threshold": display_raw_count_threshold,
+        "effective_raw_count_threshold": effective_raw_count_threshold,
         "peak_min_contiguous_area_m2": PEAK_MIN_CONTIGUOUS_AREA_M2,
+        "polygon_area_m2": polygon_area_m2,
+        "peak_min_contiguous_area_polygon_fraction": PEAK_MIN_CONTIGUOUS_AREA_POLYGON_FRACTION,
+        "polygon_relative_contiguous_area_threshold_m2": polygon_relative_area_threshold_m2,
+        "effective_contiguous_area_threshold_m2": effective_contiguous_area_threshold_m2,
         "underpass_metrics": underpass_metrics,
     }
 
