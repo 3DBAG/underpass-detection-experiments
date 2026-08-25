@@ -4,6 +4,8 @@ took around 59 min with
 RAYON_NUM_THREADS=3 python run_streetlidar_heights.py --within-index-extent     --grid-cell-size 500     --batch-workers 16     --pip-workers 5     --height-workers 1     --laz-backend lazrs-parallel     --decompression xyz
 ```
 
+Mapterhorn terrain filtering is enabled by default. The runner uses zoom 14, the polygon pixel P90 and a ±2 m peak exclusion distance, with a persistent tile cache at `/data2/rypeters/amsterdam_data/terrain/mapterhorn`. Use `--no-terrain` only for an intentional legacy run; terrain sampling failures otherwise fail the affected row rather than emitting unfiltered peaks.
+
 
 ## add_underpasses run results
 

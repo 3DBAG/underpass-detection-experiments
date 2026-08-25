@@ -6,6 +6,8 @@ This directory contains a Python workflow for estimating underpass height from c
 
 The script loops over a list of BAG cases, reads each LAS/LAZ file and its matching GeoPackage polygon, detects Z-peak candidates from a smoothed histogram, and rasterizes each candidate to the XY plane at `0.5 m` resolution. The elevation histogram uses fixed-width bins anchored at global elevation `0`; configure their width with `HISTOGRAM_BIN_WIDTH_METERS`. Diagnostic plots and the compact elevation output include candidates whose raw peak-bin count is at least `1000`, whose raw count is also at least `5%` of the second-highest candidate raw count, and whose total raster mask area is at least both `4 m²` and `5%` of the polygon area. All detected candidates remain available in the detailed debug JSON.
 
+The PostGIS street-lidar runner also samples the Mapterhorn AHN5 5 m filled DTM at zoom 14. It transforms each original underpass polygon from RD New to Web Mercator, decodes every intersecting Terrarium pixel whose centre falls inside the polygon, and uses the 90th-percentile pixel elevation as the NAP terrain reference. Peaks within an absolute 2 m of that reference are excluded. Very small polygons with no enclosed pixel centre fall back to all intersecting pixels. Downloaded WebP tiles are cached persistently and terrain sampling details are stored under `underpass_metadata.terrain`.
+
 For each detected candidate, the script computes a raw occupied raster. Candidate
 peaks that pass both absolute thresholds are emitted in the compact elevation
 list, ordered by largest contiguous raw surface area. Ties are broken by total
@@ -20,7 +22,7 @@ Configure the eligibility thresholds with `PEAK_MIN_RAW_COUNT`,
 
 ## What The Script Produces
 
-- A histogram of Z values with raw bars, a smoothed curve, and one marker and fixed `1.0 m` band per displayed peak
+- A histogram of Z values with raw bars, a smoothed curve, the Mapterhorn P90 terrain reference and ±2 m exclusion band, and one marker and fixed `1.0 m` band per displayed peak
 - A metrics table with one column per selected peak, ordered left-to-right by
   elevation to match the histogram; its `Rank` row shows production area rank
 - One XY raster row showing the raw mask for each selected peak band
@@ -114,7 +116,7 @@ nix develop -c python3 plot_z_histogram.py
 Use Python 3. Then install the required packages:
 
 ```bash
-python3 -m pip install laspy matplotlib numpy shapely
+python3 -m pip install laspy matplotlib numpy pillow pyproj shapely
 ```
 
 Rerun visualization is optional:

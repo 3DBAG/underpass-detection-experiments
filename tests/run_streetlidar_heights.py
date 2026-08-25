@@ -56,6 +56,12 @@ from crop_las_by_polygons import (  # noqa: E402
     stream_points_for_features,
 )
 from height_estimation import gpkg_blob_to_geometry, estimate_underpass_height_from_points  # noqa: E402
+from mapterhorn_terrain import (  # noqa: E402
+    MAPTERHORN_TILE_URL_TEMPLATE,
+    MAPTERHORN_ZOOM,
+    TERRAIN_PERCENTILE,
+    sample_polygon_terrain,
+)
 
 DEFAULT_INDEX_PATH = Path("/data2/rypeters/amsterdam_data/2025/pointcloud/ams_index.gpkg")
 DEFAULT_POINTCLOUD_ROOT = Path("/data2/rypeters/amsterdam_data/2025/pointcloud")
@@ -70,6 +76,9 @@ DEFAULT_PIP_WORKERS = max(1, min(4, os.cpu_count() or 1))
 DEFAULT_LAZ_BACKEND = "lazrs-parallel"
 DEFAULT_DECOMPRESSION = "xyz"
 DEFAULT_BATCH_WORKERS = 1
+DEFAULT_TERRAIN_CACHE_DIR = Path("/data2/rypeters/amsterdam_data/terrain/mapterhorn")
+DEFAULT_TERRAIN_REQUEST_TIMEOUT_S = 30.0
+DEFAULT_TERRAIN_PEAK_EXCLUSION_DISTANCE_M = 2.0
 
 RESULT_COLUMNS = {
     "underpass_candidate_elevations": "double precision[]",
@@ -180,6 +189,7 @@ class HeightResult:
     laz_count: int
     candidate_elevations: list[float] | None = None
     candidate_peaks: list[dict[str, object]] | None = None
+    terrain: dict[str, object] | None = None
     error: str | None = None
 
 
@@ -195,6 +205,9 @@ class HeightEstimationTask:
     point_count: int
     laz_count: int
     error_text: str | None
+    terrain_elevation: float | None
+    terrain_metadata: dict[str, object] | None
+    terrain_peak_exclusion_distance_m: float
     plot_dir: Path | None
     plot_rerun: bool
 
@@ -308,6 +321,42 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Only process rows with this existing underpass_status. Can be passed multiple times.",
     )
     parser.add_argument("--polygon-buffer", type=float, default=POLYGON_BUFFER_DISTANCE)
+    parser.add_argument(
+        "--terrain",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Sample Mapterhorn terrain and filter peaks near the terrain elevation.",
+    )
+    parser.add_argument(
+        "--terrain-url-template",
+        default=MAPTERHORN_TILE_URL_TEMPLATE,
+        help="XYZ URL template for 512 px Terrarium-encoded Mapterhorn WebP tiles.",
+    )
+    parser.add_argument("--terrain-zoom", type=int, default=MAPTERHORN_ZOOM)
+    parser.add_argument(
+        "--terrain-percentile",
+        type=float,
+        default=TERRAIN_PERCENTILE,
+        help="Polygon terrain-pixel percentile used as the reference elevation.",
+    )
+    parser.add_argument(
+        "--terrain-peak-exclusion-distance",
+        type=float,
+        default=DEFAULT_TERRAIN_PEAK_EXCLUSION_DISTANCE_M,
+        help="Disqualify peaks within this absolute distance of terrain elevation.",
+    )
+    parser.add_argument(
+        "--terrain-cache-dir",
+        type=Path,
+        default=DEFAULT_TERRAIN_CACHE_DIR,
+        help="Persistent cache for downloaded Mapterhorn WebP tiles.",
+    )
+    parser.add_argument(
+        "--terrain-request-timeout",
+        type=float,
+        default=DEFAULT_TERRAIN_REQUEST_TIMEOUT_S,
+        help="Per-attempt Mapterhorn HTTP timeout in seconds.",
+    )
     parser.add_argument(
         "--bbox",
         type=float,
@@ -639,6 +688,11 @@ def run_height_estimation_task(task: HeightEstimationTask) -> HeightResult:
             task.z,
             [task.crop_geometry],
             verbose=False,
+            terrain_elevation=task.terrain_elevation,
+            terrain_metadata=task.terrain_metadata,
+            terrain_peak_exclusion_distance_meters=(
+                task.terrain_peak_exclusion_distance_m
+            ),
         )
         metrics = estimate["underpass_metrics"]
         result_error = task.error_text
@@ -694,6 +748,7 @@ def run_height_estimation_task(task: HeightEstimationTask) -> HeightResult:
             status="success",
             candidate_elevations=metrics["underpass_candidate_elevations"],
             candidate_peaks=metrics["underpass_metadata"]["candidate_peaks"],
+            terrain=metrics["underpass_metadata"].get("terrain"),
             point_count=task.point_count,
             laz_count=task.laz_count,
             error=result_error,
@@ -715,6 +770,8 @@ def result_metadata(result: HeightResult) -> dict[str, object]:
         "point_count": result.point_count,
         "laz_count": result.laz_count,
     }
+    if result.terrain is not None:
+        metadata["terrain"] = result.terrain
     if result.error is not None:
         metadata["error"] = result.error
     return metadata
@@ -990,6 +1047,7 @@ def estimate_batch_results(
     height_workers: int,
     plot_dir: Path | None,
     plot_rerun: bool,
+    args: argparse.Namespace,
 ) -> list[HeightResult]:
     results: list[HeightResult] = []
     tasks: list[HeightEstimationTask] = []
@@ -1039,6 +1097,35 @@ def estimate_batch_results(
             )
             continue
 
+        terrain_elevation = None
+        terrain_metadata = None
+        if args.terrain:
+            try:
+                terrain_geometry = polygonal_geometry(record.geometry)
+                terrain_sample = sample_polygon_terrain(
+                    terrain_geometry,
+                    zoom=args.terrain_zoom,
+                    percentile=args.terrain_percentile,
+                    url_template=args.terrain_url_template,
+                    cache_dir=args.terrain_cache_dir,
+                    timeout_s=args.terrain_request_timeout,
+                )
+                terrain_elevation = terrain_sample.elevation_m_nap
+                terrain_metadata = terrain_sample.metadata(
+                    args.terrain_zoom, args.terrain_percentile
+                )
+            except Exception as exc:
+                results.append(
+                    null_result(
+                        record,
+                        status="failed",
+                        point_count=accumulator.point_count,
+                        laz_count=existing_laz_count,
+                        error=f"Terrain sampling failed: {short_error(exc)}",
+                    )
+                )
+                continue
+
         x, y, z = accumulator.arrays()
         tasks.append(
             HeightEstimationTask(
@@ -1052,6 +1139,11 @@ def estimate_batch_results(
                 point_count=accumulator.point_count,
                 laz_count=existing_laz_count,
                 error_text="; ".join(record_errors)[:1000] if record_errors else None,
+                terrain_elevation=terrain_elevation,
+                terrain_metadata=terrain_metadata,
+                terrain_peak_exclusion_distance_m=(
+                    args.terrain_peak_exclusion_distance
+                ),
                 plot_dir=plot_dir,
                 plot_rerun=plot_rerun,
             )
@@ -1138,6 +1230,7 @@ def process_batch(
             args.height_workers,
             args.plot_dir,
             args.plot_rerun,
+            args,
         )
         timing.height_estimation_s += time.perf_counter() - t0
     finally:
@@ -1278,6 +1371,14 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("--pip-workers must be positive")
     if args.min_points < 0:
         raise ValueError("--min-points cannot be negative")
+    if args.terrain_zoom < 0:
+        raise ValueError("--terrain-zoom cannot be negative")
+    if not 0.0 <= args.terrain_percentile <= 100.0:
+        raise ValueError("--terrain-percentile must be between 0 and 100")
+    if args.terrain_peak_exclusion_distance < 0:
+        raise ValueError("--terrain-peak-exclusion-distance cannot be negative")
+    if args.terrain_request_timeout <= 0:
+        raise ValueError("--terrain-request-timeout must be positive")
     if args.max_points_per_underpass <= 0:
         args.max_points_per_underpass = None
     if args.crop_output_dir is None:
@@ -1335,6 +1436,14 @@ def main(argv: list[str] | None = None) -> int:
         f"using {args.grid_cell_size:g} m grid cells and max {args.batch_size} underpasses per batch"
     )
     print(f"LAZ backend: {args.laz_backend}; decompression: {args.decompression}")
+    if args.terrain:
+        print(
+            f"Terrain: Mapterhorn z{args.terrain_zoom}, "
+            f"P{args.terrain_percentile:g}, exclude ±"
+            f"{args.terrain_peak_exclusion_distance:g} m, cache={args.terrain_cache_dir}"
+        )
+    else:
+        print("Terrain filtering disabled")
     if args.crop_output_dir is not None:
         source_decompression = "all" if args.write_cropped else args.decompression
         print(

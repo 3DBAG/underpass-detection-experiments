@@ -177,6 +177,8 @@ def plot_height_estimation_result(result, output_dir=".", write_rerun=True):
     ranked_output_layers = result["ranked_output_layers"]
     effective_raw_count_threshold = result["effective_raw_count_threshold"]
     underpass_metrics = result["underpass_metrics"]
+    terrain_elevation = result.get("terrain_elevation")
+    terrain_exclusion_distance = result.get("terrain_peak_exclusion_distance_meters", 2.0)
     rank_by_peak_idx = {
         layer["peak_idx"]: rank
         for rank, layer in enumerate(ranked_output_layers, start=1)
@@ -242,6 +244,20 @@ def plot_height_estimation_result(result, output_dir=".", write_rerun=True):
         linewidth=1.5,
         alpha=0.85,
     )
+    if terrain_elevation is not None:
+        ax_hist.axvspan(
+            terrain_elevation - terrain_exclusion_distance,
+            terrain_elevation + terrain_exclusion_distance,
+            color="#8c564b",
+            alpha=0.08,
+        )
+        ax_hist.axvline(
+            terrain_elevation,
+            color="#8c564b",
+            linestyle="-.",
+            linewidth=2.0,
+            label=f"Terrain P90 ({terrain_elevation:.2f} m NAP)",
+        )
     for i, layer in enumerate(display_peak_layers, start=1):
         ax_hist.axvline(
             layer["peak_center"],
@@ -260,6 +276,7 @@ def plot_height_estimation_result(result, output_dir=".", write_rerun=True):
     ax_hist.set_title("Histogram of Z values", fontsize=13, pad=8)
     ax_hist.spines["top"].set_visible(False)
     ax_hist.spines["right"].set_visible(False)
+    ax_hist.legend(loc="best")
 
     metric_rows = [
         (

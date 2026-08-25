@@ -63,6 +63,8 @@
               py.lazrs
               py.matplotlib
               py.numpy
+              py.pillow
+              py.pyproj
               py.psycopg
               py.shapely
               py3dtilesWithLas

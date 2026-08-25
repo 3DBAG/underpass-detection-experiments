@@ -32,6 +32,10 @@ PEAK_MIN_MASK_AREA_POLYGON_FRACTION = 0.20
 # peak-bin count to enter diagnostic plots and production output.
 PEAK_MIN_RELATIVE_RAW_COUNT = 0.05
 
+# Peaks close to the reference terrain elevation are treated as terrain rather
+# than an underpass surface.
+TERRAIN_PEAK_EXCLUSION_DISTANCE_METERS = 2.0
+
 # When enabled, the candidate peak is snapped from the smoothed local maximum to
 # the highest raw histogram bin inside that smoothed peak cluster.
 SNAP_PEAK_TO_RAW_BIN_WITHIN_CLUSTER = True
@@ -378,7 +382,31 @@ def candidate_peak_summary(layer, output_rank_by_peak_idx):
     }
 
 
-def estimate_underpass_height_from_points(identifier, x, y, z, geometries, verbose=True):
+def peak_is_within_terrain_exclusion(
+    peak_elevation,
+    terrain_elevation,
+    exclusion_distance_meters=TERRAIN_PEAK_EXCLUSION_DISTANCE_METERS,
+):
+    if terrain_elevation is None:
+        return False
+    if not np.isfinite(terrain_elevation):
+        raise ValueError("Terrain elevation must be finite")
+    if not np.isfinite(exclusion_distance_meters) or exclusion_distance_meters < 0:
+        raise ValueError("Terrain peak-exclusion distance must be finite and non-negative")
+    return abs(float(peak_elevation) - float(terrain_elevation)) <= exclusion_distance_meters
+
+
+def estimate_underpass_height_from_points(
+    identifier,
+    x,
+    y,
+    z,
+    geometries,
+    verbose=True,
+    terrain_elevation=None,
+    terrain_metadata=None,
+    terrain_peak_exclusion_distance_meters=TERRAIN_PEAK_EXCLUSION_DISTANCE_METERS,
+):
     bag_id = str(identifier)
 
     if verbose:
@@ -501,6 +529,23 @@ def estimate_underpass_height_from_points(identifier, x, y, z, geometries, verbo
         key=lambda layer: (layer["largest_component_area"], layer["area"], layer["smoothed_count"]),
         reverse=True,
     )
+    terrain_disqualified_layers = [
+        layer
+        for layer in separated_candidate_layers
+        if peak_is_within_terrain_exclusion(
+            layer["peak_center"],
+            terrain_elevation,
+            terrain_peak_exclusion_distance_meters,
+        )
+    ]
+    terrain_disqualified_peak_indices = {
+        layer["peak_idx"] for layer in terrain_disqualified_layers
+    }
+    terrain_eligible_layers = [
+        layer
+        for layer in separated_candidate_layers
+        if layer["peak_idx"] not in terrain_disqualified_peak_indices
+    ]
     if verbose:
         print(f"Number of points: {len(z)}")
         print(f"Z range: [{z_min_all:.2f}, {z_max_all:.2f}]")
@@ -515,7 +560,7 @@ def estimate_underpass_height_from_points(identifier, x, y, z, geometries, verbo
             )
 
     display_raw_count_threshold = relative_raw_count_threshold(
-        layer["raw_count"] for layer in separated_candidate_layers
+        layer["raw_count"] for layer in terrain_eligible_layers
     )
     effective_raw_count_threshold = max(
         PEAK_MIN_RAW_COUNT,
@@ -526,7 +571,8 @@ def estimate_underpass_height_from_points(identifier, x, y, z, geometries, verbo
         layer
         for layer in ranked_candidate_layers
         if (
-            layer["raw_count"] >= effective_raw_count_threshold
+            layer["peak_idx"] not in terrain_disqualified_peak_indices
+            and layer["raw_count"] >= effective_raw_count_threshold
             and layer["area"] >= effective_mask_area_threshold_m2
         )
     ]
@@ -544,6 +590,12 @@ def estimate_underpass_height_from_points(identifier, x, y, z, geometries, verbo
             f"{PEAK_MIN_MASK_AREA_POLYGON_FRACTION:.0%} of polygon area, "
             f"{polygon_relative_mask_area_threshold_m2:.2f} m^2)."
         )
+        if terrain_elevation is not None:
+            print(
+                f"Terrain reference: {terrain_elevation:.2f} m NAP; disqualified "
+                f"{len(terrain_disqualified_layers)} peaks within "
+                f"{terrain_peak_exclusion_distance_meters:.2f} m."
+            )
 
     output_rank_by_peak_idx = {
         layer["peak_idx"]: rank
@@ -564,14 +616,29 @@ def estimate_underpass_height_from_points(identifier, x, y, z, geometries, verbo
                 f"largest contiguous area {layer['largest_component_area']:.2f} m^2"
             )
 
+    output_terrain_metadata = None
+    if terrain_elevation is not None:
+        output_terrain_metadata = dict(terrain_metadata or {})
+        output_terrain_metadata["elevation_m_nap"] = float(terrain_elevation)
+        output_terrain_metadata["peak_exclusion_distance_m"] = float(
+            terrain_peak_exclusion_distance_meters
+        )
+        output_terrain_metadata["disqualified_peak_count"] = len(
+            terrain_disqualified_layers
+        )
+
+    underpass_metadata = {
+        "candidate_peaks": candidate_peak_summaries,
+    }
+    if output_terrain_metadata is not None:
+        underpass_metadata["terrain"] = output_terrain_metadata
+
     underpass_metrics = {
         "identificatie": bag_id,
         "underpass_candidate_elevations": [
             float(layer["peak_center"]) for layer in ranked_output_layers
         ],
-        "underpass_metadata": {
-            "candidate_peaks": candidate_peak_summaries,
-        },
+        "underpass_metadata": underpass_metadata,
     }
 
     return {
@@ -591,6 +658,7 @@ def estimate_underpass_height_from_points(identifier, x, y, z, geometries, verbo
         "candidate_layers": separated_candidate_layers,
         "candidate_layers_by_height": candidate_layers_by_height,
         "ranked_candidate_layers": ranked_candidate_layers,
+        "terrain_disqualified_layers": terrain_disqualified_layers,
         "ranked_output_layers": ranked_output_layers,
         "display_peak_layers": display_peak_layers,
         "peak_min_raw_count": PEAK_MIN_RAW_COUNT,
@@ -602,6 +670,10 @@ def estimate_underpass_height_from_points(identifier, x, y, z, geometries, verbo
         "peak_min_mask_area_polygon_fraction": PEAK_MIN_MASK_AREA_POLYGON_FRACTION,
         "polygon_relative_mask_area_threshold_m2": polygon_relative_mask_area_threshold_m2,
         "effective_mask_area_threshold_m2": effective_mask_area_threshold_m2,
+        "terrain_elevation": None if terrain_elevation is None else float(terrain_elevation),
+        "terrain_peak_exclusion_distance_meters": float(
+            terrain_peak_exclusion_distance_meters
+        ),
         "underpass_metrics": underpass_metrics,
     }
 

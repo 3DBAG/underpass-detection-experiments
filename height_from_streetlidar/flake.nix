@@ -16,6 +16,8 @@
             laspy
             matplotlib
             numpy
+            pillow
+            pyproj
             rerun-sdk
             shapely
           ]);
