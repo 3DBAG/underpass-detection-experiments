@@ -81,7 +81,8 @@ DEFAULT_TERRAIN_REQUEST_TIMEOUT_S = 30.0
 DEFAULT_TERRAIN_PEAK_EXCLUSION_DISTANCE_M = 2.0
 
 RESULT_COLUMNS = {
-    "underpass_candidate_elevations": "double precision[]",
+    "underpass_candidate_elevations": "double precision",
+    "underpass_confidence": "double precision",
     "underpass_source": "text",
     "underpass_status": "text",
     "underpass_metadata": "jsonb",
@@ -187,7 +188,8 @@ class HeightResult:
     status: str
     point_count: int
     laz_count: int
-    candidate_elevations: list[float] | None = None
+    candidate_elevation: float | None = None
+    confidence: float | None = None
     candidate_peaks: list[dict[str, object]] | None = None
     terrain: dict[str, object] | None = None
     error: str | None = None
@@ -379,7 +381,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=[],
         help="Only process rows with this identificatie/BAG building id. Can be passed multiple times.",
     )
-    parser.add_argument("--all", action="store_true", help="Process rows even when underpass_candidate_elevations is already filled.")
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help=(
+            "Process all usable rows, including successful rows whose "
+            "underpass_confidence is already filled."
+        ),
+    )
     parser.add_argument(
         "--plot-dir",
         type=Path,
@@ -448,7 +457,12 @@ def fetch_pending_records(conn: psycopg.Connection, args: argparse.Namespace) ->
         conditions.append(sql.SQL("underpass_status = ANY(%s::text[])"))
         params.append(args.only_status)
     elif not args.all:
-        conditions.append(sql.SQL("underpass_candidate_elevations IS NULL"))
+        conditions.append(
+            sql.SQL(
+                "(underpass_status IS DISTINCT FROM 'success' "
+                "OR underpass_confidence IS NULL)"
+            )
+        )
 
     if args.only_underpass_id:
         conditions.append(sql.SQL("underpass_id = ANY(%s)"))
@@ -523,11 +537,12 @@ def fetch_table_summary(conn: psycopg.Connection, table_name: str) -> dict[str, 
                 WHERE geom IS NOT NULL
                   AND NOT ST_IsEmpty(geom)
                   AND (
-                    underpass_candidate_elevations IS NULL
-                    OR underpass_status IN ('failed', 'no_laz_tiles', 'no_points', 'too_few_points')
+                    underpass_status IS DISTINCT FROM 'success'
+                    OR underpass_confidence IS NULL
                   )
             ) AS pending_rows,
-            count(*) FILTER (WHERE underpass_candidate_elevations IS NOT NULL) AS rows_with_elevations
+            count(*) FILTER (WHERE underpass_candidate_elevations IS NOT NULL) AS rows_with_elevations,
+            count(*) FILTER (WHERE underpass_confidence IS NOT NULL) AS rows_with_confidence
         FROM {table}
         """
     ).format(table=table_identifier(table_name))
@@ -543,7 +558,13 @@ def fetch_table_summary(conn: psycopg.Connection, table_name: str) -> dict[str, 
 
     with conn.cursor() as cur:
         cur.execute(query)
-        total_rows, usable_geom_rows, pending_rows, rows_with_elevations = cur.fetchone()
+        (
+            total_rows,
+            usable_geom_rows,
+            pending_rows,
+            rows_with_elevations,
+            rows_with_confidence,
+        ) = cur.fetchone()
         cur.execute(status_query)
         statuses = cur.fetchall()
 
@@ -552,6 +573,7 @@ def fetch_table_summary(conn: psycopg.Connection, table_name: str) -> dict[str, 
         "usable_geom_rows": usable_geom_rows,
         "pending_rows": pending_rows,
         "rows_with_elevations": rows_with_elevations,
+        "rows_with_confidence": rows_with_confidence,
         "statuses": statuses,
     }
 
@@ -746,7 +768,8 @@ def run_height_estimation_task(task: HeightEstimationTask) -> HeightResult:
             identificatie=task.identificatie,
             underpass_id=task.underpass_id,
             status="success",
-            candidate_elevations=metrics["underpass_candidate_elevations"],
+            candidate_elevation=metrics["underpass_candidate_elevations"],
+            confidence=metrics["underpass_confidence"],
             candidate_peaks=metrics["underpass_metadata"]["candidate_peaks"],
             terrain=metrics["underpass_metadata"].get("terrain"),
             point_count=task.point_count,
@@ -782,7 +805,8 @@ def update_results(conn: psycopg.Connection, table_name: str, results: Iterable[
         (
             "streetlidar" if result.status == "success" else "fallback",
             result.status,
-            result.candidate_elevations,
+            result.candidate_elevation,
+            result.confidence,
             Jsonb(result_metadata(result)),
             result.identificatie,
             result.underpass_id,
@@ -798,6 +822,7 @@ def update_results(conn: psycopg.Connection, table_name: str, results: Iterable[
         SET underpass_source = %s,
             underpass_status = %s,
             underpass_candidate_elevations = %s,
+            underpass_confidence = %s,
             underpass_metadata = %s,
             underpass_updated_at = now()
         WHERE identificatie = %s
@@ -1410,14 +1435,15 @@ def main(argv: list[str] | None = None) -> int:
             f"total_rows={summary['total_rows']}, "
             f"usable_geom_rows={summary['usable_geom_rows']}, "
             f"pending_rows={summary['pending_rows']}, "
-            f"rows_with_elevations={summary['rows_with_elevations']}"
+            f"rows_with_elevations={summary['rows_with_elevations']}, "
+            f"rows_with_confidence={summary['rows_with_confidence']}"
         )
         statuses = summary["statuses"]
         if statuses:
             print("Status counts:")
             for status, count in statuses:
                 print(f"  {status}: {count}")
-        print("Use --all to ignore existing candidate elevations/statuses.")
+        print("Use --all to reprocess successful rows with confidence already filled.")
         return 0
 
     print(f"Loaded {len(records)} pending underpasses from {args.table}")

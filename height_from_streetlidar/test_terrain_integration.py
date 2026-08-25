@@ -98,19 +98,58 @@ class TerrainPeakFilterTests(unittest.TestCase):
             x,
             y,
             z,
-            [box(0.0, 0.0, 2.0, 2.0)],
+            [box(0.0, 0.0, 4.0, 4.0)],
             verbose=False,
             terrain_elevation=1.0,
             terrain_metadata={"percentile": 90.0},
             terrain_peak_exclusion_distance_meters=2.0,
         )
 
-        elevations = result["underpass_metrics"]["underpass_candidate_elevations"]
-        self.assertEqual(len(elevations), 1)
-        self.assertAlmostEqual(elevations[0], 5.025)
+        elevation = result["underpass_metrics"]["underpass_candidate_elevations"]
+        self.assertAlmostEqual(elevation, 5.025)
+        self.assertAlmostEqual(
+            result["underpass_metrics"]["underpass_confidence"],
+            0.25,
+        )
+
+        clamped_result = estimate_underpass_height_from_points(
+            "test-clamped-confidence",
+            x,
+            y,
+            z,
+            [box(0.0, 0.0, 1.8, 1.8)],
+            verbose=False,
+            terrain_elevation=1.0,
+            terrain_metadata={"percentile": 90.0},
+            terrain_peak_exclusion_distance_meters=2.0,
+        )
+        self.assertEqual(
+            clamped_result["underpass_metrics"]["underpass_confidence"],
+            1.0,
+        )
+
         terrain = result["underpass_metrics"]["underpass_metadata"]["terrain"]
         self.assertEqual(terrain["disqualified_peak_count"], 1)
         self.assertEqual(terrain["peak_exclusion_distance_m"], 2.0)
+
+        no_peak_result = estimate_underpass_height_from_points(
+            "test-no-peak",
+            x,
+            y,
+            z,
+            [box(0.0, 0.0, 4.0, 4.0)],
+            verbose=False,
+            terrain_elevation=1.0,
+            terrain_metadata={"percentile": 90.0},
+            terrain_peak_exclusion_distance_meters=10.0,
+        )
+        self.assertIsNone(
+            no_peak_result["underpass_metrics"]["underpass_candidate_elevations"]
+        )
+        self.assertEqual(
+            no_peak_result["underpass_metrics"]["underpass_confidence"],
+            0.0,
+        )
 
         from plot_z_histogram import plot_height_estimation_result
 
@@ -154,6 +193,10 @@ class TwoPhaseSelectionTests(unittest.TestCase):
         self.assertEqual(len(result["phase_one_layers"]), 2)
         self.assertEqual(len(result["display_peak_layers"]), 2)
         self.assertEqual(len(result["ranked_output_layers"]), 1)
+        self.assertAlmostEqual(
+            result["underpass_metrics"]["underpass_candidate_elevations"],
+            5.025,
+        )
 
         lower_layer, upper_layer = result["display_peak_layers"]
         self.assertEqual(np.count_nonzero(lower_layer["lower_peak_masked_grid"]), 16)

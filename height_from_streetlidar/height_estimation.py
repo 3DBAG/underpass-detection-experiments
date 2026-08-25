@@ -679,11 +679,25 @@ def estimate_underpass_height_from_points(
     if output_terrain_metadata is not None:
         underpass_metadata["terrain"] = output_terrain_metadata
 
+    rank_one_layer = ranked_output_layers[0] if ranked_output_layers else None
     underpass_metrics = {
         "identificatie": bag_id,
-        "underpass_candidate_elevations": [
-            float(layer["peak_center"]) for layer in ranked_output_layers
-        ],
+        "underpass_candidate_elevations": (
+            float(rank_one_layer["peak_center"])
+            if rank_one_layer is not None
+            else None
+        ),
+        "underpass_confidence": (
+            min(
+                1.0,
+                max(
+                    0.0,
+                    float(rank_one_layer["lower_peak_masked_area"] / polygon_area_m2),
+                ),
+            )
+            if rank_one_layer is not None
+            else 0.0
+        ),
         "underpass_metadata": underpass_metadata,
     }
 

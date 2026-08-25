@@ -22,8 +22,6 @@
 #include <ogrsf_frmts.h>
 
 #include <algorithm>
-#include <charconv>
-#include <cctype>
 #include <cmath>
 #include <iomanip>
 #include <iostream>
@@ -74,8 +72,6 @@ std::string quote_qualified_name(std::string_view name) {
 }
 
 std::string make_pg_bbox_query(OGRLayer* layer,
-                               const std::string& id_attribute,
-                               const std::string& elevations_attribute,
                                double min_x,
                                double min_y,
                                double max_x,
@@ -98,91 +94,23 @@ std::string make_pg_bbox_query(OGRLayer* layer,
 
   std::ostringstream sql;
   sql << std::setprecision(17);
-  sql << "SELECT " << quote_identifier(id_attribute) << ", "
-      << quote_identifier(elevations_attribute) << ", " << quote_identifier(geom_col)
-      << " FROM " << quote_qualified_name(layer_name) << " WHERE "
+  sql << "SELECT * FROM " << quote_qualified_name(layer_name) << " WHERE "
       << quote_identifier(geom_col) << " && ST_MakeEnvelope(" << min_x << ", "
       << min_y << ", " << max_x << ", " << max_y << ")";
   return sql.str();
 }
 
-std::vector<double> parse_candidate_elevations(std::string_view value) {
-  std::vector<double> elevations;
-  size_t pos = 0;
-  while (pos < value.size()) {
-    const char ch = value[pos];
-    if (!(ch == '-' || ch == '.' || (ch >= '0' && ch <= '9'))) {
-      ++pos;
-      continue;
-    }
-
-    double elevation = 0.0;
-    const char* begin = value.data() + pos;
-    const char* end = value.data() + value.size();
-    const auto [parsed_end, error] = std::from_chars(begin, end, elevation);
-    if (error == std::errc() && parsed_end != begin) {
-      if (std::isfinite(elevation)) {
-        elevations.push_back(elevation);
-      }
-      pos = static_cast<size_t>(parsed_end - value.data());
-    } else {
-      ++pos;
-    }
-  }
-  return elevations;
-}
-
-std::vector<double> read_candidate_elevations(const OGRFeature& feature, int field_idx) {
+std::optional<double> read_candidate_elevation(const OGRFeature& feature, int field_idx) {
   const OGRFieldDefn* field = feature.GetFieldDefnRef(field_idx);
-  if (field == nullptr) {
-    return {};
+  if (field == nullptr ||
+      (field->GetType() != OFTReal && field->GetType() != OFTInteger &&
+       field->GetType() != OFTInteger64)) {
+    return std::nullopt;
   }
 
-  int count = 0;
-  std::vector<double> elevations;
-  switch (field->GetType()) {
-    case OFTRealList: {
-      const double* values = feature.GetFieldAsDoubleList(field_idx, &count);
-      if (values != nullptr && count > 0) {
-        elevations.assign(values, values + count);
-      }
-      break;
-    }
-    case OFTIntegerList: {
-      const int* values = feature.GetFieldAsIntegerList(field_idx, &count);
-      if (values != nullptr && count > 0) {
-        elevations.reserve(count);
-        for (int i = 0; i < count; ++i) {
-          elevations.push_back(values[i]);
-        }
-      }
-      break;
-    }
-    case OFTInteger64List: {
-      const GIntBig* values = feature.GetFieldAsInteger64List(field_idx, &count);
-      if (values != nullptr && count > 0) {
-        elevations.reserve(count);
-        for (int i = 0; i < count; ++i) {
-          elevations.push_back(static_cast<double>(values[i]));
-        }
-      }
-      break;
-    }
-    case OFTReal:
-    case OFTInteger:
-    case OFTInteger64:
-      elevations.push_back(feature.GetFieldAsDouble(field_idx));
-      break;
-    default:
-      elevations = parse_candidate_elevations(feature.GetFieldAsString(field_idx));
-      break;
-  }
-
-  elevations.erase(
-      std::remove_if(elevations.begin(), elevations.end(),
-                     [](double elevation) { return !std::isfinite(elevation); }),
-      elevations.end());
-  return elevations;
+  const double elevation = feature.GetFieldAsDouble(field_idx);
+  return std::isfinite(elevation) ? std::optional<double>(elevation)
+                                  : std::nullopt;
 }
 
 }  // namespace
@@ -315,7 +243,7 @@ void VectorReader::read_polygon_feature(
     OGRPolygon* poPolygon,
     const std::string& id,
     const std::vector<SourceAttribute>& source_attributes,
-    const std::vector<double>& candidate_elevations,
+    std::optional<double> candidate_elevation,
     std::vector<PolygonFeature>& features) {
   if (poPolygon == nullptr) {
     return;
@@ -360,7 +288,7 @@ void VectorReader::read_polygon_feature(
   feature.polygon = std::move(polygon);
   feature.id = id;
   feature.source_attributes = source_attributes;
-  feature.candidate_elevations = candidate_elevations;
+  feature.candidate_elevation = candidate_elevation;
   features.push_back(std::move(feature));
 }
 
@@ -402,7 +330,7 @@ std::vector<LinearRing> VectorReader::read_polygons() {
 
 std::vector<VectorReader::PolygonFeature> VectorReader::read_polygon_features(
     const std::string& id_attribute,
-    const std::string& elevations_attribute) {
+    const std::string& elevation_attribute) {
   if (poLayer_ == nullptr) {
     throw std::runtime_error("[VectorReader] Layer is not open");
   }
@@ -414,8 +342,6 @@ std::vector<VectorReader::PolygonFeature> VectorReader::read_polygon_features(
       poDS_->GetDriver()->GetDescription() != nullptr &&
       std::string_view(poDS_->GetDriver()->GetDescription()) == "PostgreSQL") {
     const std::string sql = make_pg_bbox_query(poLayer_,
-                                               id_attribute,
-                                               elevations_attribute,
                                                spatial_filter_extent_[0],
                                                spatial_filter_extent_[1],
                                                spatial_filter_extent_[3],
@@ -442,10 +368,10 @@ std::vector<VectorReader::PolygonFeature> VectorReader::read_polygon_features(
       id = poFeature->GetFieldAsString(id_field_idx);
     }
 
-    std::vector<double> candidate_elevations;
-    int elevations_field_idx = poFeature->GetFieldIndex(elevations_attribute.c_str());
-    if (elevations_field_idx >= 0 && poFeature->IsFieldSetAndNotNull(elevations_field_idx)) {
-      candidate_elevations = read_candidate_elevations(*poFeature, elevations_field_idx);
+    std::optional<double> candidate_elevation;
+    int elevation_field_idx = poFeature->GetFieldIndex(elevation_attribute.c_str());
+    if (elevation_field_idx >= 0 && poFeature->IsFieldSetAndNotNull(elevation_field_idx)) {
+      candidate_elevation = read_candidate_elevation(*poFeature, elevation_field_idx);
     }
 
     std::vector<SourceAttribute> source_attributes;
@@ -495,7 +421,7 @@ std::vector<VectorReader::PolygonFeature> VectorReader::read_polygon_features(
           poPolygon,
           id,
           source_attributes,
-          candidate_elevations,
+          candidate_elevation,
           features);
     } else if (wkbFlatten(poGeometry->getGeometryType()) == wkbMultiPolygon) {
       OGRMultiPolygon* poMultiPolygon = poGeometry->toMultiPolygon();
@@ -505,7 +431,7 @@ std::vector<VectorReader::PolygonFeature> VectorReader::read_polygon_features(
             *poly_it,
             id,
             source_attributes,
-            candidate_elevations,
+            candidate_elevation,
             features);
       }
     }

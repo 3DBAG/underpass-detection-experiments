@@ -1,6 +1,6 @@
 # add_underpass
 
-A program to carve out underpasses from 2.5D building models by using boolean mesh operations. 2D underpass polygons are read from an OGR source together with candidate elevations ranked by contiguous surface area. The first candidate at least 2 m above the building floor is used as the underpass ceiling; if none qualifies, the extrusion falls back to 2.5 m above the floor. Then the boolean mesh difference between 2.5D building model and extruded underpass polygons is computed.
+A program to carve out underpasses from 2.5D building models by using boolean mesh operations. 2D underpass polygons are read from an OGR source together with the absolute elevation of the rank-1 StreetLidar peak. The candidate is used as the underpass ceiling when it is at least 2 m above the building floor; a missing or invalid candidate falls back to 2.5 m above the floor. Then the boolean mesh difference between 2.5D building model and extruded underpass polygons is computed.
 
 ### Limitations
 - Mesh processing:
@@ -86,14 +86,14 @@ With PostgreSQL/PostGIS as OGR source:
   underpass_candidate_elevations identificatie manifold
 ```
 
-Arguments: `<ogr_source> <model_input> <model_output> <candidate_elevations_attr> [id_attr] [method] [copy_source_attributes] [boolean_obj_output]`
+Arguments: `<ogr_source> <model_input> <model_output> <candidate_elevation_attr> [id_attr] [method] [copy_source_attributes] [boolean_obj_output]`
 
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `ogr_source` | — | Input OGR datasource path that contains 2D underpass polygons |
 | `model_input` | — | Input path with 2.5D building model (`.fcb` or `.jsonl`). Use `-` only for FCB stdin. |
 | `model_output` | — | Output path (`.fcb` or `.jsonl`). Use `-` only for FCB stdout. |
-| `candidate_elevations_attr` | — | OGR numeric attribute or ordered numeric-list attribute containing candidate absolute elevations |
+| `candidate_elevation_attr` | — | Nullable OGR numeric attribute containing the rank-1 peak's absolute elevation |
 | `id_attr` | `identificatie` | OGR Feature ID attribute name. This is used to match with ID of the building models. |
 | `method` | `pmp` | Boolean method: `manifold`, `nef`, `pmp`, or `geogram` |
 | `copy_source_attributes` | `none` | Copy OGR attributes to `feature`, `parent`, or `none`; use `surface` with CityJSONSeq to attach each OGR feature's attributes and the generated `OuterCeilingSurface` geometry's computed `underpass_area` |

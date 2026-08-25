@@ -453,15 +453,13 @@ def write_metrics_csv(rows, output_path):
             fieldnames=[
                 "identificatie",
                 "underpass_candidate_elevations",
+                "underpass_confidence",
                 "underpass_metadata",
             ],
         )
         writer.writeheader()
         for row in rows:
             output_row = dict(row)
-            output_row["underpass_candidate_elevations"] = json.dumps(
-                output_row["underpass_candidate_elevations"]
-            )
             output_row["underpass_metadata"] = json.dumps(
                 output_row["underpass_metadata"]
             )

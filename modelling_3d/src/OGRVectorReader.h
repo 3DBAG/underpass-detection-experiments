@@ -11,6 +11,7 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -59,7 +60,7 @@ class VectorReader {
     LinearRing polygon;
     std::string id;
     std::vector<SourceAttribute> source_attributes;
-    std::vector<double> candidate_elevations;
+    std::optional<double> candidate_elevation;
   };
 
   VectorReader() = default;
@@ -79,10 +80,10 @@ class VectorReader {
   // Read all polygons from the layer
   std::vector<LinearRing> read_polygons();
 
-  // Read polygons with per-feature ID and ranked underpass peak elevation attributes.
+  // Read polygons with per-feature ID and rank-1 underpass peak elevation.
   std::vector<PolygonFeature> read_polygon_features(
       const std::string& id_attribute,
-      const std::string& elevations_attribute);
+      const std::string& elevation_attribute);
 
   // Get the number of features in the layer
   size_t get_feature_count();
@@ -105,7 +106,7 @@ class VectorReader {
   void read_polygon_feature(OGRPolygon* poPolygon,
                             const std::string& id,
                             const std::vector<SourceAttribute>& source_attributes,
-                            const std::vector<double>& candidate_elevations,
+                            std::optional<double> candidate_elevation,
                             std::vector<PolygonFeature>& features);
 
   GDALDatasetUniquePtr poDS_;

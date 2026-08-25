@@ -1,5 +1,4 @@
 import csv
-import json
 import sqlite3
 import struct
 from pathlib import Path
@@ -9,6 +8,7 @@ CSV_PATH = Path("underpass_heights.csv")
 GPKG_PATH = Path("/Users/ravi/git/underpass-detection-experiments/modelling_3d/sample_data/demo_ams_underpasses.gpkg")
 FEATURE_TABLE = "offset_polygons"
 TARGET_COLUMN = "underpass_candidate_elevations"
+CONFIDENCE_COLUMN = "underpass_confidence"
 DEBUG_COLUMN = "underpass_metadata"
 SOURCE_COLUMN = "underpass_source"
 
@@ -92,17 +92,20 @@ def load_underpass_values(csv_path):
     with csv_path.open(newline="") as csv_file:
         for row in csv.DictReader(csv_file):
             identificatie = row.get("identificatie")
-            encoded_elevations = row.get("underpass_candidate_elevations")
-            if not identificatie or not encoded_elevations:
+            encoded_elevation = row.get("underpass_candidate_elevations")
+            if not identificatie or not encoded_elevation:
                 continue
-            elevations = json.loads(encoded_elevations)
-            if not isinstance(elevations, (int, float, list)):
-                raise ValueError(
-                    f"Candidate elevations for {identificatie} are not a number or list"
-                )
+            elevation = float(encoded_elevation)
+            encoded_confidence = row.get("underpass_confidence")
+            confidence = (
+                float(encoded_confidence)
+                if encoded_confidence not in (None, "")
+                else None
+            )
             encoded_metadata = row.get("underpass_metadata")
             values[identificatie] = (
-                json.dumps(elevations, separators=(",", ":")),
+                elevation,
+                confidence,
                 encoded_metadata or None,
             )
     return values
@@ -124,9 +127,27 @@ def ensure_text_column(con, table_name, column_name):
         )
 
 
+def ensure_real_column(con, table_name, column_name):
+    columns = {
+        row[1]: row[2].upper()
+        for row in con.execute(f'pragma table_info("{table_name}")')
+    }
+
+    if column_name not in columns:
+        con.execute(f'alter table "{table_name}" add column "{column_name}" REAL')
+        return
+
+    if columns[column_name] not in {"REAL", "DOUBLE", "DOUBLE PRECISION", "FLOAT"}:
+        raise ValueError(
+            f'Column "{column_name}" already exists in "{table_name}" with non-numeric type '
+            f'{columns[column_name]!r}'
+        )
+
+
 def merge_underpass_values(gpkg_path, underpass_values):
     with connect_gpkg(gpkg_path) as con:
-        ensure_text_column(con, FEATURE_TABLE, TARGET_COLUMN)
+        ensure_real_column(con, FEATURE_TABLE, TARGET_COLUMN)
+        ensure_real_column(con, FEATURE_TABLE, CONFIDENCE_COLUMN)
         ensure_text_column(con, FEATURE_TABLE, DEBUG_COLUMN)
         ensure_text_column(con, FEATURE_TABLE, SOURCE_COLUMN)
 
@@ -139,18 +160,19 @@ def merge_underpass_values(gpkg_path, underpass_values):
         fallback_rows = 0
         for fid, identificatie in rows:
             if identificatie in underpass_values:
-                value, debug_value = underpass_values[identificatie]
+                value, confidence, debug_value = underpass_values[identificatie]
                 source = "streetlidar"
                 matched_rows += 1
             else:
                 value = None
+                confidence = None
                 debug_value = None
                 source = "fallback"
                 fallback_rows += 1
-            updates.append((value, debug_value, source, fid))
+            updates.append((value, confidence, debug_value, source, fid))
 
         con.executemany(
-            f'update "{FEATURE_TABLE}" set "{TARGET_COLUMN}" = ?, "{DEBUG_COLUMN}" = ?, "{SOURCE_COLUMN}" = ? where fid = ?',
+            f'update "{FEATURE_TABLE}" set "{TARGET_COLUMN}" = ?, "{CONFIDENCE_COLUMN}" = ?, "{DEBUG_COLUMN}" = ?, "{SOURCE_COLUMN}" = ? where fid = ?',
             updates,
         )
         con.commit()
@@ -163,7 +185,7 @@ def main():
     total_rows, matched_rows, fallback_rows = merge_underpass_values(
         GPKG_PATH, underpass_values
     )
-    print(f"Loaded {len(underpass_values)} elevation lists from {CSV_PATH}")
+    print(f"Loaded {len(underpass_values)} rank-1 elevations from {CSV_PATH}")
     print(f"Updated {total_rows} rows in {GPKG_PATH}")
     print(f"Rows using CSV elevations: {matched_rows}")
     print(f"Rows using modeller fallback: {fallback_rows}")

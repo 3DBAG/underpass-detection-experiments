@@ -41,8 +41,11 @@ Configure the eligibility thresholds with `PEAK_MIN_RAW_COUNT`,
 - A figure title containing the case identifier and polygon area
 - One PNG per BAG id, named `<bag_id>_peak_grids_overlay.png`
 - A CSV summary written to `underpass_heights.csv`, with the production field
-  `underpass_candidate_elevations` containing only threshold-passing candidate elevations,
-  ordered by descending masked contiguous area, plus detailed
+  `underpass_candidate_elevations` containing the rank-1 selected peak as one
+  absolute elevation (or empty when no peak passes phase 2), and
+  `underpass_confidence`, defined as that peak's total lower-peak-masked area
+  divided by polygon area and clamped to `[0.0, 1.0]` (`0.0` when no peak is
+  selected), plus detailed
   `underpass_metadata` JSON for debugging
 - A Rerun visualization sent to the viewer by default
 
