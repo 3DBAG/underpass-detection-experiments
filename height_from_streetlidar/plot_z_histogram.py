@@ -281,29 +281,6 @@ def plot_height_estimation_result(result, output_dir=".", write_rerun=True):
             ],
         ),
         (
-            "Window points",
-            [str(layer["peak_window_point_count"]) for layer in display_peak_layers],
-        ),
-        (
-            "Local prominence",
-            [f"{layer['local_prominence']:.1f}" for layer in display_peak_layers],
-        ),
-        (
-            "Relative prominence",
-            [f"{layer['relative_prominence']:.2f}" for layer in display_peak_layers],
-        ),
-        (
-            "Concentration",
-            [f"{layer['concentration']:.2f}" for layer in display_peak_layers],
-        ),
-        (
-            "Width (m)",
-            [
-                "n/a" if layer["width_m"] is None else f"{layer['width_m']:.2f}"
-                for layer in display_peak_layers
-            ],
-        ),
-        (
             "Total area (m²)",
             [f"{layer['area']:.2f}" for layer in display_peak_layers],
         ),
@@ -409,7 +386,7 @@ def write_metrics_csv(rows, output_path):
             fieldnames=[
                 "identificatie",
                 "underpass_candidate_elevations",
-                "underpass_candidate_peaks",
+                "underpass_metadata",
             ],
         )
         writer.writeheader()
@@ -418,8 +395,8 @@ def write_metrics_csv(rows, output_path):
             output_row["underpass_candidate_elevations"] = json.dumps(
                 output_row["underpass_candidate_elevations"]
             )
-            output_row["underpass_candidate_peaks"] = json.dumps(
-                output_row["underpass_candidate_peaks"]
+            output_row["underpass_metadata"] = json.dumps(
+                output_row["underpass_metadata"]
             )
             writer.writerow(output_row)
 

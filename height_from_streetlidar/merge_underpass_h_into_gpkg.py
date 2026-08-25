@@ -9,7 +9,7 @@ CSV_PATH = Path("underpass_heights.csv")
 GPKG_PATH = Path("/Users/ravi/git/underpass-detection-experiments/modelling_3d/sample_data/demo_ams_underpasses.gpkg")
 FEATURE_TABLE = "offset_polygons"
 TARGET_COLUMN = "underpass_candidate_elevations"
-DEBUG_COLUMN = "underpass_candidate_peaks"
+DEBUG_COLUMN = "underpass_metadata"
 SOURCE_COLUMN = "underpass_source"
 
 
@@ -100,10 +100,10 @@ def load_underpass_values(csv_path):
                 raise ValueError(
                     f"Candidate elevations for {identificatie} are not a number or list"
                 )
-            encoded_peaks = row.get("underpass_candidate_peaks")
+            encoded_metadata = row.get("underpass_metadata")
             values[identificatie] = (
                 json.dumps(elevations, separators=(",", ":")),
-                encoded_peaks or None,
+                encoded_metadata or None,
             )
     return values
 

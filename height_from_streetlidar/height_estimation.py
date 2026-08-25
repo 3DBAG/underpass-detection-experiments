@@ -13,11 +13,6 @@ from shapely.ops import unary_union
 HISTOGRAM_BIN_WIDTH_METERS = 0.15
 HISTOGRAM_ANCHOR_ELEVATION_METERS = 0.0
 
-# Raw-peak diagnostic metrics use points within this radius around the refined
-# raw peak, and a narrower window of this total width around the same center.
-PEAK_METRIC_NEIGHBOURHOOD_METERS = 0.5
-PEAK_METRIC_WINDOW_WIDTH_METERS = 0.2
-
 # XY raster cell size in meters for the per-peak occupancy grids.
 GRID_CELLSIZE = 0.5
 
@@ -31,7 +26,7 @@ PEAK_MIN_SEPARATION_BINS = 5
 # A candidate must satisfy both absolute thresholds to enter production output.
 PEAK_MIN_RAW_COUNT = 1000
 PEAK_MIN_MASK_AREA_M2 = 4.0
-PEAK_MIN_MASK_AREA_POLYGON_FRACTION = 0.05
+PEAK_MIN_MASK_AREA_POLYGON_FRACTION = 0.20
 
 # Candidates must also reach this fraction of the second-highest candidate raw
 # peak-bin count to enter diagnostic plots and production output.
@@ -181,110 +176,6 @@ def refine_peak_index_within_cluster(counts, smoothed_counts, peak_idx):
     max_indices = np.flatnonzero(cluster_counts == max_count) + left_idx
     refined_peak_idx = max_indices[np.argmin(np.abs(max_indices - peak_idx))]
     return refined_peak_idx
-
-
-def raw_peak_width_at_level(counts, peak_idx, level, bin_width_meters):
-    def crossing_position(direction):
-        inner_idx = peak_idx
-        while True:
-            outer_idx = inner_idx + direction
-            if 0 <= outer_idx < len(counts):
-                outer_count = float(counts[outer_idx])
-            else:
-                outer_count = 0.0
-
-            if outer_count < level:
-                inner_count = float(counts[inner_idx])
-                fraction = (inner_count - level) / (inner_count - outer_count)
-                return inner_idx + direction * fraction
-
-            inner_idx = outer_idx
-
-    left_crossing = crossing_position(-1)
-    right_crossing = crossing_position(1)
-    return (right_crossing - left_crossing) * bin_width_meters
-
-
-def raw_peak_shape_metrics(
-    values,
-    counts,
-    bin_centers,
-    peak_idx,
-    bin_width_meters=HISTOGRAM_BIN_WIDTH_METERS,
-    neighbourhood_meters=PEAK_METRIC_NEIGHBOURHOOD_METERS,
-    window_width_meters=PEAK_METRIC_WINDOW_WIDTH_METERS,
-):
-    if not np.isfinite(neighbourhood_meters) or neighbourhood_meters <= 0:
-        raise ValueError("Peak metric neighbourhood must be a positive finite number")
-    if not np.isfinite(window_width_meters) or window_width_meters <= 0:
-        raise ValueError("Peak metric window width must be a positive finite number")
-
-    half_window = window_width_meters / 2
-    if half_window >= neighbourhood_meters:
-        raise ValueError(
-            "Peak metric window half-width must be smaller than the neighbourhood"
-        )
-
-    peak_center = float(bin_centers[peak_idx])
-    distance_from_peak = np.abs(values - peak_center)
-    peak_window_point_count = int(np.count_nonzero(distance_from_peak <= half_window))
-    neighbourhood_point_count = int(
-        np.count_nonzero(distance_from_peak <= neighbourhood_meters)
-    )
-    concentration = (
-        peak_window_point_count / neighbourhood_point_count
-        if neighbourhood_point_count
-        else 0.0
-    )
-
-    max_offset = int(np.floor(neighbourhood_meters / bin_width_meters))
-    shoulder_offsets = [
-        offset
-        for offset in range(1, max_offset + 1)
-        if offset * bin_width_meters > half_window
-    ]
-    if not shoulder_offsets:
-        raise ValueError(
-            "Peak metric neighbourhood must include at least one histogram-bin "
-            "center outside the peak window"
-        )
-
-    def raw_count_or_zero(index):
-        if 0 <= index < len(counts):
-            return int(counts[index])
-        return 0
-
-    left_shoulder_counts = [
-        raw_count_or_zero(peak_idx - offset) for offset in shoulder_offsets
-    ]
-    right_shoulder_counts = [
-        raw_count_or_zero(peak_idx + offset) for offset in shoulder_offsets
-    ]
-    baseline = max(
-        float(np.median(left_shoulder_counts)),
-        float(np.median(right_shoulder_counts)),
-    )
-
-    raw_peak_count = float(counts[peak_idx])
-    local_prominence = raw_peak_count - baseline
-    relative_prominence = local_prominence / max(raw_peak_count, 1.0)
-    width_m = None
-    if local_prominence > 0:
-        half_prominence_level = baseline + 0.5 * local_prominence
-        width_m = raw_peak_width_at_level(
-            counts,
-            peak_idx,
-            half_prominence_level,
-            bin_width_meters,
-        )
-
-    return {
-        "peak_window_point_count": peak_window_point_count,
-        "local_prominence": local_prominence,
-        "relative_prominence": relative_prominence,
-        "concentration": concentration,
-        "width_m": width_m,
-    }
 
 
 def peak_band_from_center(peak_center, values_min, values_max, band_width_meters):
@@ -470,17 +361,12 @@ def largest_contiguous_component_area(grid, cellsize):
     return largest_component_cells * (cellsize ** 2)
 
 
-def candidate_peak_summary(
-    layer, raw_surface_rank, output_rank_by_peak_idx, display_order_by_peak_idx
-):
+def candidate_peak_summary(layer, output_rank_by_peak_idx):
     peak_idx = layer["peak_idx"]
-    display_order = display_order_by_peak_idx.get(peak_idx)
     output_rank = output_rank_by_peak_idx.get(peak_idx)
     return {
         "rank": None if output_rank is None else int(output_rank),
-        "raw_surface_rank": int(raw_surface_rank),
         "peak_idx": int(peak_idx),
-        "display_order": None if display_order is None else int(display_order),
         "elevation": float(layer["peak_center"]),
         "z_min": float(layer["z_min"]),
         "z_max": float(layer["z_max"]),
@@ -489,11 +375,6 @@ def candidate_peak_summary(
         "largest_contiguous_area_m2": float(layer["largest_component_area"]),
         "raw_count": int(layer["raw_count"]),
         "smoothed_count": float(layer["smoothed_count"]),
-        "peak_window_point_count": int(layer["peak_window_point_count"]),
-        "local_prominence": float(layer["local_prominence"]),
-        "relative_prominence": float(layer["relative_prominence"]),
-        "concentration": float(layer["concentration"]),
-        "width_m": None if layer["width_m"] is None else float(layer["width_m"]),
     }
 
 
@@ -603,17 +484,6 @@ def estimate_underpass_height_from_points(identifier, x, y, z, geometries, verbo
             "smoothed_count": smoothed_counts[peak_idx],
             "raw_count": counts[refined_peak_idx],
         }
-        layer.update(
-            raw_peak_shape_metrics(
-                z,
-                counts,
-                bin_centers,
-                refined_peak_idx,
-                bin_width_meters=HISTOGRAM_BIN_WIDTH_METERS,
-                neighbourhood_meters=PEAK_METRIC_NEIGHBOURHOOD_METERS,
-                window_width_meters=PEAK_METRIC_WINDOW_WIDTH_METERS,
-            )
-        )
         return layer
 
     candidate_layers_by_idx = {
@@ -679,15 +549,9 @@ def estimate_underpass_height_from_points(identifier, x, y, z, geometries, verbo
         layer["peak_idx"]: rank
         for rank, layer in enumerate(ranked_output_layers, start=1)
     }
-    display_order_by_peak_idx = {
-        layer["peak_idx"]: display_order
-        for display_order, layer in enumerate(display_peak_layers, start=1)
-    }
     candidate_peak_summaries = [
-        candidate_peak_summary(
-            layer, raw_surface_rank, output_rank_by_peak_idx, display_order_by_peak_idx
-        )
-        for raw_surface_rank, layer in enumerate(ranked_candidate_layers, start=1)
+        candidate_peak_summary(layer, output_rank_by_peak_idx)
+        for layer in ranked_candidate_layers
     ]
 
     if verbose:
@@ -705,7 +569,9 @@ def estimate_underpass_height_from_points(identifier, x, y, z, geometries, verbo
         "underpass_candidate_elevations": [
             float(layer["peak_center"]) for layer in ranked_output_layers
         ],
-        "underpass_candidate_peaks": candidate_peak_summaries,
+        "underpass_metadata": {
+            "candidate_peaks": candidate_peak_summaries,
+        },
     }
 
     return {

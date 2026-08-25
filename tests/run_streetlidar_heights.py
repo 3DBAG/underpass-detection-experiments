@@ -75,10 +75,7 @@ RESULT_COLUMNS = {
     "underpass_candidate_elevations": "double precision[]",
     "underpass_source": "text",
     "underpass_status": "text",
-    "underpass_candidate_peaks": "jsonb",
-    "underpass_point_count": "integer",
-    "underpass_laz_count": "integer",
-    "underpass_error": "text",
+    "underpass_metadata": "jsonb",
     "underpass_updated_at": "timestamptz",
 }
 
@@ -650,7 +647,7 @@ def run_height_estimation_task(task: HeightEstimationTask) -> HeightResult:
             try:
                 task.plot_dir.mkdir(parents=True, exist_ok=True)
                 with candidate_peaks_path.open("w", encoding="utf-8") as peaks_file:
-                    json.dump(metrics["underpass_candidate_peaks"], peaks_file, indent=2)
+                    json.dump(metrics["underpass_metadata"]["candidate_peaks"], peaks_file, indent=2)
                     peaks_file.write("\n")
                 print(f"Saved candidate peaks to {candidate_peaks_path}", flush=True)
             except Exception as exc:
@@ -696,7 +693,7 @@ def run_height_estimation_task(task: HeightEstimationTask) -> HeightResult:
             underpass_id=task.underpass_id,
             status="success",
             candidate_elevations=metrics["underpass_candidate_elevations"],
-            candidate_peaks=metrics["underpass_candidate_peaks"],
+            candidate_peaks=metrics["underpass_metadata"]["candidate_peaks"],
             point_count=task.point_count,
             laz_count=task.laz_count,
             error=result_error,
@@ -712,16 +709,24 @@ def run_height_estimation_task(task: HeightEstimationTask) -> HeightResult:
         )
 
 
+def result_metadata(result: HeightResult) -> dict[str, object]:
+    metadata: dict[str, object] = {
+        "candidate_peaks": result.candidate_peaks,
+        "point_count": result.point_count,
+        "laz_count": result.laz_count,
+    }
+    if result.error is not None:
+        metadata["error"] = result.error
+    return metadata
+
+
 def update_results(conn: psycopg.Connection, table_name: str, results: Iterable[HeightResult]) -> None:
     rows = [
         (
             "streetlidar" if result.status == "success" else "fallback",
             result.status,
             result.candidate_elevations,
-            Jsonb(result.candidate_peaks) if result.candidate_peaks is not None else None,
-            result.point_count,
-            result.laz_count,
-            result.error,
+            Jsonb(result_metadata(result)),
             result.identificatie,
             result.underpass_id,
         )
@@ -736,10 +741,7 @@ def update_results(conn: psycopg.Connection, table_name: str, results: Iterable[
         SET underpass_source = %s,
             underpass_status = %s,
             underpass_candidate_elevations = %s,
-            underpass_candidate_peaks = %s,
-            underpass_point_count = %s,
-            underpass_laz_count = %s,
-            underpass_error = %s,
+            underpass_metadata = %s,
             underpass_updated_at = now()
         WHERE identificatie = %s
           AND underpass_id = %s
@@ -899,7 +901,7 @@ def build_batch_inputs(
                         status="no_laz_tiles",
                         point_count=0,
                         laz_count=0,
-                        error="No street-lidar tiles intersect the underpass polygon",
+                        error=None,
                     )
                 )
                 continue
@@ -1008,7 +1010,7 @@ def estimate_batch_results(
                     status="too_many_points",
                     point_count=accumulator.point_count,
                     laz_count=existing_laz_count,
-                    error=f"Selected more than {max_points_per_underpass} points",
+                    error=None,
                 )
             )
             continue
@@ -1020,7 +1022,7 @@ def estimate_batch_results(
                     status="no_points",
                     point_count=0,
                     laz_count=existing_laz_count,
-                    error="; ".join(record_errors)[:1000] if record_errors else "No points inside polygon",
+                    error="; ".join(record_errors)[:1000] if record_errors else None,
                 )
             )
             continue
@@ -1032,7 +1034,7 @@ def estimate_batch_results(
                     status="too_few_points",
                     point_count=accumulator.point_count,
                     laz_count=existing_laz_count,
-                    error=f"Only {accumulator.point_count} points inside polygon; minimum is {min_points}",
+                    error=None,
                 )
             )
             continue

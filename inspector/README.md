@@ -70,7 +70,7 @@ Version 1 tag databases are migrated losslessly when first written. Highlight mo
 
 Review statuses can be clicked directly or toggled with `1`, `2`, `3`, and `4`. Use `Q` / `W` or the left / right arrow keys to move to the previous or next underpass object. Press `C` to frame the selected underpass, or `T` to cycle the building display through the complete model, outer ceiling surfaces only, and no model. The `?` button in the header lists these shortcuts and explains the review tags. Keyboard shortcuts are suspended while typing in a field or adjusting a slider.
 
-When an underpass has no `underpass_candidate_peaks` semantic-surface attribute, it receives `PointCloud insufficient` automatically. This is a default rather than a lock: reviewers can replace or clear it, and that explicit override is retained on later loads. Existing explicit statuses are never overwritten. `Highlight` remains available independently.
+When an underpass has no `underpass_metadata` semantic-surface attribute, it receives `PointCloud insufficient` automatically. This is a default rather than a lock: reviewers can replace or clear it, and that explicit override is retained on later loads. Existing explicit statuses are never overwritten. `Highlight` remains available independently.
 
 Picking is always active: click the model or point cloud to inspect world coordinates and matching semantic-surface attributes. Dragging still rotates the view without producing a pick.
 

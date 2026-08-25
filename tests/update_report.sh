@@ -93,7 +93,7 @@ trap 'rm -f "$tmp_file"' EXIT
       coalesce(underpass_source, 'null') AS source,
       coalesce(underpass_status, 'null') AS status,
       to_char(count(*), 'FM999,999,999,999') AS rows,
-      coalesce(to_char(round((percentile_cont(0.5) WITHIN GROUP (ORDER BY underpass_point_count))::numeric), 'FM999,999,999,999'), 'null') AS point_median
+      coalesce(to_char(round((percentile_cont(0.5) WITHIN GROUP (ORDER BY (underpass_metadata->>'point_count')::bigint))::numeric), 'FM999,999,999,999'), 'null') AS point_median
     FROM ${TABLE_REF}
     GROUP BY underpass_source, underpass_status
     ORDER BY count(*) DESC, source, status;
@@ -107,14 +107,14 @@ trap 'rm -f "$tmp_file"' EXIT
       SELECT
         coalesce(underpass_status, 'null') AS status,
         CASE
-          WHEN underpass_error ~ '^Only [0-9]+ points inside polygon; minimum is [0-9]+$'
-            THEN regexp_replace(underpass_error, '^Only [0-9]+ points inside polygon; minimum is ([0-9]+)$', 'Too few points inside polygon <\1')
-          WHEN underpass_error ~ '^Selected more than [0-9]+ points$'
-            THEN regexp_replace(underpass_error, '^Selected more than ([0-9]+) points$', 'Selected more than \1 points')
-          ELSE coalesce(nullif(underpass_error, ''), 'null')
+          WHEN (underpass_metadata->>'error') ~ '^Only [0-9]+ points inside polygon; minimum is [0-9]+$'
+            THEN regexp_replace((underpass_metadata->>'error'), '^Only [0-9]+ points inside polygon; minimum is ([0-9]+)$', 'Too few points inside polygon <\1')
+          WHEN (underpass_metadata->>'error') ~ '^Selected more than [0-9]+ points$'
+            THEN regexp_replace((underpass_metadata->>'error'), '^Selected more than ([0-9]+) points$', 'Selected more than \1 points')
+          ELSE coalesce(nullif((underpass_metadata->>'error'), ''), 'null')
         END AS error_group
       FROM ${TABLE_REF}
-      WHERE underpass_error IS NOT NULL OR underpass_status <> 'success'
+      WHERE (underpass_metadata->>'error') IS NOT NULL OR underpass_status <> 'success'
     )
     SELECT status, error_group, to_char(count(*), 'FM999,999,999,999') AS rows
     FROM grouped
@@ -129,25 +129,25 @@ trap 'rm -f "$tmp_file"' EXIT
     WITH bucketed AS (
       SELECT
         CASE
-          WHEN underpass_point_count IS NULL THEN 1
-          WHEN underpass_point_count = 0 THEN 2
-          WHEN underpass_point_count BETWEEN 1 AND 99 THEN 3
-          WHEN underpass_point_count BETWEEN 100 AND 999 THEN 4
-          WHEN underpass_point_count BETWEEN 1000 AND 9999 THEN 5
-          WHEN underpass_point_count BETWEEN 10000 AND 99999 THEN 6
-          WHEN underpass_point_count BETWEEN 100000 AND 999999 THEN 7
-          WHEN underpass_point_count BETWEEN 1000000 AND 4999999 THEN 8
+          WHEN (underpass_metadata->>'point_count')::bigint IS NULL THEN 1
+          WHEN (underpass_metadata->>'point_count')::bigint = 0 THEN 2
+          WHEN (underpass_metadata->>'point_count')::bigint BETWEEN 1 AND 99 THEN 3
+          WHEN (underpass_metadata->>'point_count')::bigint BETWEEN 100 AND 999 THEN 4
+          WHEN (underpass_metadata->>'point_count')::bigint BETWEEN 1000 AND 9999 THEN 5
+          WHEN (underpass_metadata->>'point_count')::bigint BETWEEN 10000 AND 99999 THEN 6
+          WHEN (underpass_metadata->>'point_count')::bigint BETWEEN 100000 AND 999999 THEN 7
+          WHEN (underpass_metadata->>'point_count')::bigint BETWEEN 1000000 AND 4999999 THEN 8
           ELSE 9
         END AS ord,
         CASE
-          WHEN underpass_point_count IS NULL THEN 'null'
-          WHEN underpass_point_count = 0 THEN '0'
-          WHEN underpass_point_count BETWEEN 1 AND 99 THEN '1-99'
-          WHEN underpass_point_count BETWEEN 100 AND 999 THEN '100-999'
-          WHEN underpass_point_count BETWEEN 1000 AND 9999 THEN '1k-10k'
-          WHEN underpass_point_count BETWEEN 10000 AND 99999 THEN '10k-100k'
-          WHEN underpass_point_count BETWEEN 100000 AND 999999 THEN '100k-1M'
-          WHEN underpass_point_count BETWEEN 1000000 AND 4999999 THEN '1M-5M'
+          WHEN (underpass_metadata->>'point_count')::bigint IS NULL THEN 'null'
+          WHEN (underpass_metadata->>'point_count')::bigint = 0 THEN '0'
+          WHEN (underpass_metadata->>'point_count')::bigint BETWEEN 1 AND 99 THEN '1-99'
+          WHEN (underpass_metadata->>'point_count')::bigint BETWEEN 100 AND 999 THEN '100-999'
+          WHEN (underpass_metadata->>'point_count')::bigint BETWEEN 1000 AND 9999 THEN '1k-10k'
+          WHEN (underpass_metadata->>'point_count')::bigint BETWEEN 10000 AND 99999 THEN '10k-100k'
+          WHEN (underpass_metadata->>'point_count')::bigint BETWEEN 100000 AND 999999 THEN '100k-1M'
+          WHEN (underpass_metadata->>'point_count')::bigint BETWEEN 1000000 AND 4999999 THEN '1M-5M'
           ELSE '>=5M'
         END AS bucket,
         underpass_source = 'streetlidar' AND underpass_status = 'success' AS success
@@ -168,11 +168,11 @@ trap 'rm -f "$tmp_file"' EXIT
   printf '|---|---:|\n'
   append_query_table "
     WITH success AS (
-      SELECT underpass_point_count::numeric AS value
+      SELECT (underpass_metadata->>'point_count')::bigint::numeric AS value
       FROM ${TABLE_REF}
       WHERE underpass_source = 'streetlidar'
         AND underpass_status = 'success'
-        AND underpass_point_count IS NOT NULL
+        AND (underpass_metadata->>'point_count')::bigint IS NOT NULL
     ),
     metrics(label, value, ord) AS (
       SELECT 'min', min(value), 1 FROM success
