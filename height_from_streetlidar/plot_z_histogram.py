@@ -177,12 +177,16 @@ def plot_height_estimation_result(result, output_dir=".", write_rerun=True):
     ranked_output_layers = result["ranked_output_layers"]
     effective_raw_count_threshold = result["effective_raw_count_threshold"]
     underpass_metrics = result["underpass_metrics"]
+    polygon_area_m2 = result["polygon_area_m2"]
     terrain_elevation = result.get("terrain_elevation")
     terrain_exclusion_distance = result.get("terrain_peak_exclusion_distance_meters", 2.0)
     rank_by_peak_idx = {
         layer["peak_idx"]: rank
         for rank, layer in enumerate(ranked_output_layers, start=1)
     }
+    def format_area_with_polygon_fraction(area_m2):
+        return f"{area_m2:.2f} ({area_m2 / polygon_area_m2:.1%})"
+
 
     map_width = max_x - min_x
     map_height = max_y - min_y
@@ -195,7 +199,7 @@ def plot_height_estimation_result(result, output_dir=".", write_rerun=True):
         + FIGURE_MARGIN_LEFT_INCHES
         + FIGURE_MARGIN_RIGHT_INCHES
     )
-    map_row_count = 1
+    map_row_count = 2
     total_rows = 2 + map_row_count
     figure_height = 4.5 + 4.0 * total_rows
     fig = plt.figure(figsize=(figure_width, figure_height))
@@ -209,7 +213,8 @@ def plot_height_estimation_result(result, output_dir=".", write_rerun=True):
     )
     ax_hist = fig.add_subplot(grid_spec[0, :])
     ax_metrics = fig.add_subplot(grid_spec[1, :])
-    peak_axes = [fig.add_subplot(grid_spec[2, idx]) for idx in range(ncols)]
+    raw_peak_axes = [fig.add_subplot(grid_spec[2, idx]) for idx in range(ncols)]
+    masked_peak_axes = [fig.add_subplot(grid_spec[3, idx]) for idx in range(ncols)]
 
     def style_peak_map_axis(ax_map, map_idx, show_xlabel):
         if show_xlabel:
@@ -282,7 +287,7 @@ def plot_height_estimation_result(result, output_dir=".", write_rerun=True):
         (
             "Rank",
             [
-                str(rank_by_peak_idx[layer["peak_idx"]])
+                str(rank_by_peak_idx.get(layer["peak_idx"], "Not selected"))
                 for layer in display_peak_layers
             ],
         ),
@@ -298,13 +303,22 @@ def plot_height_estimation_result(result, output_dir=".", write_rerun=True):
             ],
         ),
         (
-            "Total area (m²)",
-            [f"{layer['area']:.2f}" for layer in display_peak_layers],
+            "Raw peak count (Z band)",
+            [str(layer["point_count"]) for layer in display_peak_layers],
         ),
         (
-            "Largest contiguous area (m²)",
+            "Masked area (m²)",
             [
-                f"{layer['largest_component_area']:.2f}"
+                format_area_with_polygon_fraction(layer["lower_peak_masked_area"])
+                for layer in display_peak_layers
+            ],
+        ),
+        (
+            "Masked contiguous area (m²)",
+            [
+                format_area_with_polygon_fraction(
+                    layer["lower_peak_masked_largest_component_area"]
+                )
                 for layer in display_peak_layers
             ],
         ),
@@ -328,7 +342,7 @@ def plot_height_estimation_result(result, output_dir=".", write_rerun=True):
         ax_metrics.text(
             0.5,
             0.5,
-            "No peaks passed the raw-count and contiguous-area thresholds",
+            "No peaks passed terrain and histogram-count selection",
             ha="center",
             va="center",
             fontsize=11,
@@ -336,8 +350,35 @@ def plot_height_estimation_result(result, output_dir=".", write_rerun=True):
     ax_metrics.axis("off")
 
     extent = [x_edges[0], x_edges[-1], y_edges[0], y_edges[-1]]
-    for map_idx, (ax_map, layer) in enumerate(zip(peak_axes, display_peak_layers), start=1):
-        masked_grid = np.ma.masked_where(layer["grid"] == 0, layer["grid"])
+    for map_idx, (ax_map, layer) in enumerate(zip(raw_peak_axes, display_peak_layers), start=1):
+        masked_grid = np.ma.masked_where(
+            layer["grid"] == 0,
+            layer["grid"],
+        )
+        ax_map.set_facecolor("#f3f3f3")
+        ax_map.imshow(
+            masked_grid,
+            origin="lower",
+            extent=extent,
+            cmap=peak_fill_cmap(map_idx),
+            alpha=0.9,
+            interpolation="nearest",
+        )
+        plot_geometry_outline(ax_map, geometries)
+        style_peak_map_axis(ax_map, map_idx, show_xlabel=False)
+        ax_map.set_title(
+            f"Peak {map_idx}\nRaw peak mask",
+            fontsize=11,
+            pad=8,
+        )
+        ax_map.set_aspect("equal")
+        ax_map.legend(loc="best")
+
+    for map_idx, (ax_map, layer) in enumerate(zip(masked_peak_axes, display_peak_layers), start=1):
+        masked_grid = np.ma.masked_where(
+            layer["lower_peak_masked_grid"] == 0,
+            layer["lower_peak_masked_grid"],
+        )
         ax_map.set_facecolor("#f3f3f3")
         ax_map.imshow(
             masked_grid,
@@ -349,22 +390,31 @@ def plot_height_estimation_result(result, output_dir=".", write_rerun=True):
         )
         plot_geometry_outline(ax_map, geometries)
         style_peak_map_axis(ax_map, map_idx, show_xlabel=True)
-        ax_map.set_title(f"Peak {map_idx}", fontsize=11, pad=8)
+        ax_map.set_title(
+            f"Peak {map_idx}\nLower peaks masked",
+            fontsize=11,
+            pad=8,
+        )
         ax_map.set_aspect("equal")
         ax_map.legend(loc="best")
 
     if not display_peak_layers:
-        peak_axes[0].text(
-            0.5,
-            0.5,
-            "No peak rasters to display",
-            ha="center",
-            va="center",
-            transform=peak_axes[0].transAxes,
-        )
-        peak_axes[0].axis("off")
+        for ax_map in (raw_peak_axes[0], masked_peak_axes[0]):
+            ax_map.text(
+                0.5,
+                0.5,
+                "No peak rasters to display",
+                ha="center",
+                va="center",
+                transform=ax_map.transAxes,
+            )
+            ax_map.axis("off")
 
-    fig.suptitle(bag_id, fontsize=15, y=0.985)
+    fig.suptitle(
+        f"{bag_id} — polygon area {polygon_area_m2:.2f} m²",
+        fontsize=15,
+        y=0.985,
+    )
     fig.subplots_adjust(
         left=FIGURE_MARGIN_LEFT_INCHES / figure_width,
         right=1 - (FIGURE_MARGIN_RIGHT_INCHES / figure_width),

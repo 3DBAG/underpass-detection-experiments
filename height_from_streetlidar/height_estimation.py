@@ -20,16 +20,17 @@ GRID_CELLSIZE = 0.5
 # points for the raster outputs and reported peak windows.
 PEAK_BAND_WIDTH_METERS = 1
 
-# Minimum separtion between subsequent peaks
+# Minimum separation between subsequent peaks.
 PEAK_MIN_SEPARATION_BINS = 5
 
-# A candidate must satisfy both absolute thresholds to enter production output.
+# Phase 1 applies the raw-count threshold. Phase 2 applies both masked-area
+# thresholds to the cumulative lower-peak-masked raster.
 PEAK_MIN_RAW_COUNT = 1000
 PEAK_MIN_MASK_AREA_M2 = 4.0
 PEAK_MIN_MASK_AREA_POLYGON_FRACTION = 0.20
 
-# Candidates must also reach this fraction of the second-highest candidate raw
-# peak-bin count to enter diagnostic plots and production output.
+# Phase-1 candidates must also reach this fraction of the second-highest
+# terrain-eligible candidate raw peak-bin count.
 PEAK_MIN_RELATIVE_RAW_COUNT = 0.05
 
 # Peaks close to the reference terrain elevation are treated as terrain rather
@@ -365,9 +366,37 @@ def largest_contiguous_component_area(grid, cellsize):
     return largest_component_cells * (cellsize ** 2)
 
 
+def add_lower_peak_masked_grids(peak_layers, cellsize=GRID_CELLSIZE):
+    """Add rasters with cells occupied by every lower peak removed."""
+    if not peak_layers:
+        return
+
+    occupied_by_lower_peaks = np.zeros_like(
+        peak_layers[0]["grid"],
+        dtype=bool,
+    )
+    for layer in sorted(peak_layers, key=lambda item: item["peak_center"]):
+        lower_peak_masked_grid = np.where(
+            occupied_by_lower_peaks,
+            0,
+            layer["grid"],
+        )
+        layer["lower_peak_masked_grid"] = lower_peak_masked_grid
+        layer["lower_peak_masked_area"] = np.count_nonzero(
+            lower_peak_masked_grid
+        ) * (cellsize ** 2)
+        layer["lower_peak_masked_largest_component_area"] = (
+            largest_contiguous_component_area(lower_peak_masked_grid, cellsize)
+        )
+
+        occupied_by_lower_peaks |= layer["grid"] > 0
+
+
 def candidate_peak_summary(layer, output_rank_by_peak_idx):
     peak_idx = layer["peak_idx"]
     output_rank = output_rank_by_peak_idx.get(peak_idx)
+    masked_area = layer.get("lower_peak_masked_area")
+    masked_largest_area = layer.get("lower_peak_masked_largest_component_area")
     return {
         "rank": None if output_rank is None else int(output_rank),
         "peak_idx": int(peak_idx),
@@ -375,8 +404,10 @@ def candidate_peak_summary(layer, output_rank_by_peak_idx):
         "z_min": float(layer["z_min"]),
         "z_max": float(layer["z_max"]),
         "point_count": int(layer["point_count"]),
-        "area_m2": float(layer["area"]),
-        "largest_contiguous_area_m2": float(layer["largest_component_area"]),
+        "area_m2": None if masked_area is None else float(masked_area),
+        "largest_contiguous_area_m2": (
+            None if masked_largest_area is None else float(masked_largest_area)
+        ),
         "raw_count": int(layer["raw_count"]),
         "smoothed_count": float(layer["smoothed_count"]),
     }
@@ -479,7 +510,7 @@ def estimate_underpass_height_from_points(
     z_min_all = np.min(z)
     z_max_all = np.max(z)
 
-    def build_peak_layer(peak_idx):
+    def build_peak_candidate(peak_idx):
         refined_peak_idx = peak_idx
         if SNAP_PEAK_TO_RAW_BIN_WITHIN_CLUSTER:
             refined_peak_idx = refine_peak_index_within_cluster(counts, smoothed_counts, peak_idx)
@@ -491,31 +522,19 @@ def estimate_underpass_height_from_points(
             PEAK_BAND_WIDTH_METERS,
         )
         mask = band_mask(z, z_min, z_max)
-        grid = build_grid_from_precomputed_indices(
-            flat_grid_cell_idx,
-            valid_grid_xy,
-            mask,
-            grid_rows,
-            grid_cols,
-        )
-        area = np.count_nonzero(grid) * (GRID_CELLSIZE ** 2)
-        layer = {
+        return {
             "peak_idx": peak_idx,
             "refined_peak_idx": refined_peak_idx,
             "peak_center": peak_center,
             "z_min": z_min,
             "z_max": z_max,
             "point_count": np.count_nonzero(mask),
-            "grid": grid,
-            "area": area,
-            "largest_component_area": largest_contiguous_component_area(grid, GRID_CELLSIZE),
             "smoothed_count": smoothed_counts[peak_idx],
             "raw_count": counts[refined_peak_idx],
         }
-        return layer
 
     candidate_layers_by_idx = {
-        peak_idx: build_peak_layer(peak_idx)
+        peak_idx: build_peak_candidate(peak_idx)
         for peak_idx in candidate_peak_indices
     }
     separated_candidate_layers = [
@@ -524,11 +543,6 @@ def estimate_underpass_height_from_points(
     ]
     candidate_layers_by_height = sorted(separated_candidate_layers, key=lambda layer: layer["peak_center"])
 
-    ranked_candidate_layers = sorted(
-        separated_candidate_layers,
-        key=lambda layer: (layer["largest_component_area"], layer["area"], layer["smoothed_count"]),
-        reverse=True,
-    )
     terrain_disqualified_layers = [
         layer
         for layer in separated_candidate_layers
@@ -546,18 +560,6 @@ def estimate_underpass_height_from_points(
         for layer in separated_candidate_layers
         if layer["peak_idx"] not in terrain_disqualified_peak_indices
     ]
-    if verbose:
-        print(f"Number of points: {len(z)}")
-        print(f"Z range: [{z_min_all:.2f}, {z_max_all:.2f}]")
-        print(f"Z mean: {np.mean(z):.2f}, std: {np.std(z):.2f}")
-        print("Candidate peaks ranked by largest contiguous XY area:")
-        for i, layer in enumerate(ranked_candidate_layers, start=1):
-            print(
-                f"  Candidate {i}: z ~= {layer['peak_center']:.2f} m, "
-                f"largest contiguous area {layer['largest_component_area']:.2f} m^2, "
-                f"covered area {layer['area']:.2f} m^2, "
-                f"smoothed count {layer['smoothed_count']:.1f}, raw count {layer['raw_count']}"
-            )
 
     display_raw_count_threshold = relative_raw_count_threshold(
         layer["raw_count"] for layer in terrain_eligible_layers
@@ -567,25 +569,68 @@ def estimate_underpass_height_from_points(
         display_raw_count_threshold,
     )
 
+    phase_one_layers = [
+        layer
+        for layer in terrain_eligible_layers
+        if layer["raw_count"] >= effective_raw_count_threshold
+    ]
+
+    def rasterize_peak_layer(layer):
+        mask = band_mask(z, layer["z_min"], layer["z_max"])
+        grid = build_grid_from_precomputed_indices(
+            flat_grid_cell_idx,
+            valid_grid_xy,
+            mask,
+            grid_rows,
+            grid_cols,
+        )
+        layer["grid"] = grid
+        layer["area"] = np.count_nonzero(grid) * (GRID_CELLSIZE ** 2)
+        layer["largest_component_area"] = largest_contiguous_component_area(
+            grid,
+            GRID_CELLSIZE,
+        )
+
+    for layer in phase_one_layers:
+        rasterize_peak_layer(layer)
+
+    display_peak_layers = sorted(
+        phase_one_layers, key=lambda layer: layer["peak_center"]
+    )
+    add_lower_peak_masked_grids(display_peak_layers)
+    ranked_phase_one_layers = sorted(
+        phase_one_layers,
+        key=lambda layer: (
+            layer["lower_peak_masked_largest_component_area"],
+            layer["lower_peak_masked_area"],
+            layer["smoothed_count"],
+        ),
+        reverse=True,
+    )
     ranked_output_layers = [
         layer
-        for layer in ranked_candidate_layers
-        if (
-            layer["peak_idx"] not in terrain_disqualified_peak_indices
-            and layer["raw_count"] >= effective_raw_count_threshold
-            and layer["area"] >= effective_mask_area_threshold_m2
-        )
+        for layer in ranked_phase_one_layers
+        if layer["lower_peak_masked_area"] >= effective_mask_area_threshold_m2
     ]
-    display_peak_layers = sorted(
-        ranked_output_layers,
-        key=lambda layer: layer["peak_center"],
-    )
+    phase_one_peak_indices = {layer["peak_idx"] for layer in phase_one_layers}
+    ranked_candidate_layers = ranked_phase_one_layers + [
+        layer
+        for layer in candidate_layers_by_height
+        if layer["peak_idx"] not in phase_one_peak_indices
+    ]
+
     if verbose:
+        print(f"Number of points: {len(z)}")
+        print(f"Z range: [{z_min_all:.2f}, {z_max_all:.2f}]")
+        print(f"Z mean: {np.mean(z):.2f}, std: {np.std(z):.2f}")
         print(
-            f"Selected {len(ranked_output_layers)} candidate peaks with raw count >= "
-            f"{effective_raw_count_threshold:.1f} (max of absolute {PEAK_MIN_RAW_COUNT} "
-            f"and relative {display_raw_count_threshold:.1f}) and total mask area >= "
-            f"{effective_mask_area_threshold_m2:.2f} m^2 (max of absolute "
+            f"Phase 1 retained {len(phase_one_layers)} terrain-eligible peaks with "
+            f"raw count >= {effective_raw_count_threshold:.1f} (max of absolute "
+            f"{PEAK_MIN_RAW_COUNT} and relative {display_raw_count_threshold:.1f})."
+        )
+        print(
+            f"Phase 2 selected {len(ranked_output_layers)} peaks with lower-peak-masked "
+            f"area >= {effective_mask_area_threshold_m2:.2f} m^2 (max of absolute "
             f"{PEAK_MIN_MASK_AREA_M2:.2f} m^2 and "
             f"{PEAK_MIN_MASK_AREA_POLYGON_FRACTION:.0%} of polygon area, "
             f"{polygon_relative_mask_area_threshold_m2:.2f} m^2)."
@@ -613,7 +658,8 @@ def estimate_underpass_height_from_points(
                 f"Z range [{layer['z_min']:.2f}, {layer['z_max']:.2f}), "
                 f"points {layer['point_count']}, "
                 f"area {layer['area']:.2f} m^2, "
-                f"largest contiguous area {layer['largest_component_area']:.2f} m^2"
+                f"largest contiguous area {layer['largest_component_area']:.2f} m^2, "
+                f"lower-peak-masked area {layer['lower_peak_masked_area']:.2f} m^2"
             )
 
     output_terrain_metadata = None
@@ -659,6 +705,8 @@ def estimate_underpass_height_from_points(
         "candidate_layers_by_height": candidate_layers_by_height,
         "ranked_candidate_layers": ranked_candidate_layers,
         "terrain_disqualified_layers": terrain_disqualified_layers,
+        "phase_one_layers": phase_one_layers,
+        "ranked_phase_one_layers": ranked_phase_one_layers,
         "ranked_output_layers": ranked_output_layers,
         "display_peak_layers": display_peak_layers,
         "peak_min_raw_count": PEAK_MIN_RAW_COUNT,

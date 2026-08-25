@@ -9,7 +9,10 @@ from shapely.geometry import box
 from shapely.ops import transform
 
 import mapterhorn_terrain
-from height_estimation import estimate_underpass_height_from_points
+from height_estimation import (
+    add_lower_peak_masked_grids,
+    estimate_underpass_height_from_points,
+)
 
 
 def encode_terrarium(height):
@@ -118,6 +121,92 @@ class TerrainPeakFilterTests(unittest.TestCase):
             self.assertTrue(
                 (Path(output_dir) / "test_peak_grids_overlay.png").is_file()
             )
+
+
+class TwoPhaseSelectionTests(unittest.TestCase):
+    def test_phase_two_rejection_remains_in_plot(self):
+        cell_centers = np.array([0.25, 0.75, 1.25, 1.75])
+        grid_x, grid_y = np.meshgrid(cell_centers, cell_centers)
+        surface_x = np.repeat(grid_x.ravel(), 100)
+        surface_y = np.repeat(grid_y.ravel(), 100)
+        x = np.tile(surface_x, 3)
+        y = np.tile(surface_y, 3)
+        z = np.concatenate(
+            (
+                np.full(surface_x.size, 1.0),
+                np.full(surface_x.size, 5.0),
+                np.full(surface_x.size, 9.0),
+            )
+        )
+
+        result = estimate_underpass_height_from_points(
+            "two-phase",
+            x,
+            y,
+            z,
+            [box(0.0, 0.0, 2.0, 2.0)],
+            verbose=False,
+            terrain_elevation=1.0,
+            terrain_metadata={"percentile": 90.0},
+        )
+
+        self.assertEqual(len(result["terrain_disqualified_layers"]), 1)
+        self.assertEqual(len(result["phase_one_layers"]), 2)
+        self.assertEqual(len(result["display_peak_layers"]), 2)
+        self.assertEqual(len(result["ranked_output_layers"]), 1)
+
+        lower_layer, upper_layer = result["display_peak_layers"]
+        self.assertEqual(np.count_nonzero(lower_layer["lower_peak_masked_grid"]), 16)
+        self.assertEqual(np.count_nonzero(upper_layer["lower_peak_masked_grid"]), 0)
+
+        summaries = result["underpass_metrics"]["underpass_metadata"]["candidate_peaks"]
+        phase_one_summaries = [
+            summary for summary in summaries if summary["area_m2"] is not None
+        ]
+        self.assertEqual(
+            [summary["rank"] for summary in phase_one_summaries],
+            [1, None],
+        )
+
+        from plot_z_histogram import plot_height_estimation_result
+
+        with TemporaryDirectory() as output_dir:
+            plot_height_estimation_result(result, output_dir, write_rerun=False)
+            self.assertTrue(
+                (Path(output_dir) / "two-phase_peak_grids_overlay.png").is_file()
+            )
+
+
+class LowerPeakMaskTests(unittest.TestCase):
+    def test_masks_every_lower_peak(self):
+        lowest_grid = np.array([[1.0, 1.0, 0.0, 0.0]])
+        middle_grid = np.array([[1.0, 0.0, 1.0, 0.0]])
+        upper_grid = np.array([[1.0, 1.0, 1.0, 1.0]])
+        layers = [
+            {"peak_center": 5.0, "grid": upper_grid},
+            {"peak_center": 1.0, "grid": lowest_grid},
+            {"peak_center": 3.0, "grid": middle_grid},
+        ]
+
+        add_lower_peak_masked_grids(layers, cellsize=0.5)
+
+        np.testing.assert_array_equal(
+            layers[1]["lower_peak_masked_grid"],
+            lowest_grid,
+        )
+        np.testing.assert_array_equal(
+            layers[2]["lower_peak_masked_grid"],
+            np.array([[0.0, 0.0, 1.0, 0.0]]),
+        )
+        np.testing.assert_array_equal(
+            layers[0]["lower_peak_masked_grid"],
+            np.array([[0.0, 0.0, 0.0, 1.0]]),
+        )
+        self.assertAlmostEqual(layers[0]["lower_peak_masked_area"], 0.25)
+        self.assertAlmostEqual(
+            layers[0]["lower_peak_masked_largest_component_area"],
+            0.25,
+        )
 
 
 if __name__ == "__main__":

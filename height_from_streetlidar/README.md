@@ -4,17 +4,26 @@ This directory contains a Python workflow for estimating underpass height from c
 
 > The cropped point clouds were generated using the script in `../crop_las_by_polygons`:
 
-The script loops over a list of BAG cases, reads each LAS/LAZ file and its matching GeoPackage polygon, detects Z-peak candidates from a smoothed histogram, and rasterizes each candidate to the XY plane at `0.5 m` resolution. The elevation histogram uses fixed-width bins anchored at global elevation `0`; configure their width with `HISTOGRAM_BIN_WIDTH_METERS`. Diagnostic plots and the compact elevation output include candidates whose raw peak-bin count is at least `1000`, whose raw count is also at least `5%` of the second-highest candidate raw count, and whose total raster mask area is at least both `4 m²` and `5%` of the polygon area. All detected candidates remain available in the detailed debug JSON.
+The script loops over a list of BAG cases, reads each LAS/LAZ file and its matching
+GeoPackage polygon, and detects Z-peak candidates from a smoothed histogram. The
+elevation histogram uses fixed-width bins anchored at global elevation `0`;
+configure their width with `HISTOGRAM_BIN_WIDTH_METERS`. After terrain rejection,
+phase 1 applies the absolute and relative histogram-count thresholds. Phase 2
+rasterizes and applies the lower-peak-masked area threshold.
 
 The PostGIS street-lidar runner also samples the Mapterhorn AHN5 5 m filled DTM at zoom 14. It transforms each original underpass polygon from RD New to Web Mercator, decodes every intersecting Terrarium pixel whose centre falls inside the polygon, and uses the 90th-percentile pixel elevation as the NAP terrain reference. Peaks within an absolute 2 m of that reference are excluded. Very small polygons with no enclosed pixel centre fall back to all intersecting pixels. Downloaded WebP tiles are cached persistently and terrain sampling details are stored under `underpass_metadata.terrain`.
 
-For each detected candidate, the script computes a raw occupied raster. Candidate
-peaks that pass both absolute thresholds are emitted in the compact elevation
-list, ordered by largest contiguous raw surface area. Ties are broken by total
-covered area and then by smoothed histogram count. Exclusive-pixel and
-vertical-wall masks are not applied. The detailed debug JSON contains all
-detected peaks. Each peak uses a fixed `1.0 m` vertical band centered on its
-histogram bin.
+Phase 1 retains terrain-eligible candidates whose raw peak-bin count is at least
+`1000` and at least `5%` of the second-highest terrain-eligible raw count. Each
+phase-1 peak uses a fixed `1.0 m` vertical band and is rasterized at `0.5 m`
+resolution. Cells occupied by every lower phase-1 peak are then masked out.
+
+Phase 2 requires masked total area to be at least the greater of `4 m²` and
+`20%` of the polygon area. Selected peaks are ranked by masked largest contiguous
+area, then masked total area, then smoothed histogram count. All phase-1 peaks remain
+in diagnostic plots, including phase-2 rejections. All detected peaks remain in
+the detailed debug JSON; candidates rejected before rasterization have null area
+values. Vertical-wall masks are not applied.
 
 Configure the eligibility thresholds with `PEAK_MIN_RAW_COUNT`,
 `DISPLAY_PEAK_MIN_RELATIVE_RAW_COUNT`, `PEAK_MIN_MASK_AREA_M2`, and
@@ -22,14 +31,18 @@ Configure the eligibility thresholds with `PEAK_MIN_RAW_COUNT`,
 
 ## What The Script Produces
 
-- A histogram of Z values with raw bars, a smoothed curve, the Mapterhorn P90 terrain reference and ±2 m exclusion band, and one marker and fixed `1.0 m` band per displayed peak
-- A metrics table with one column per selected peak, ordered left-to-right by
-  elevation to match the histogram; its `Rank` row shows production area rank
-- One XY raster row showing the raw mask for each selected peak band
+- A histogram with the Mapterhorn terrain reference and every phase-1 peak
+- A metrics table with one column per phase-1 peak, ordered left-to-right by
+  elevation; its rows include the phase-2 production rank or `Not selected` and
+  the raw point count in the peak's full Z-band; area rows also show the area as
+  a percentage of polygon area
+- Two XY raster rows per phase-1 peak: the raw mask followed by the mask after
+  cells occupied by lower phase-1 peaks have been removed
+- A figure title containing the case identifier and polygon area
 - One PNG per BAG id, named `<bag_id>_peak_grids_overlay.png`
 - A CSV summary written to `underpass_heights.csv`, with the production field
   `underpass_candidate_elevations` containing only threshold-passing candidate elevations,
-  ordered by descending raw contiguous area, plus detailed
+  ordered by descending masked contiguous area, plus detailed
   `underpass_metadata` JSON for debugging
 - A Rerun visualization sent to the viewer by default
 
