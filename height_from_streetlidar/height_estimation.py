@@ -682,6 +682,9 @@ def estimate_underpass_height_from_points(
     rank_one_layer = ranked_output_layers[0] if ranked_output_layers else None
     underpass_metrics = {
         "identificatie": bag_id,
+        "underpass_terrain_elevation": (
+            None if terrain_elevation is None else float(terrain_elevation)
+        ),
         "underpass_candidate_elevations": (
             float(rank_one_layer["peak_center"])
             if rank_one_layer is not None

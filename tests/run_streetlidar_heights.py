@@ -81,6 +81,7 @@ DEFAULT_TERRAIN_REQUEST_TIMEOUT_S = 30.0
 DEFAULT_TERRAIN_PEAK_EXCLUSION_DISTANCE_M = 2.0
 
 RESULT_COLUMNS = {
+    "underpass_terrain_elevation": "double precision",
     "underpass_candidate_elevations": "double precision",
     "underpass_confidence": "double precision",
     "underpass_source": "text",
@@ -188,6 +189,7 @@ class HeightResult:
     status: str
     point_count: int
     laz_count: int
+    terrain_elevation: float | None = None
     candidate_elevation: float | None = None
     confidence: float | None = None
     candidate_peaks: list[dict[str, object]] | None = None
@@ -768,6 +770,7 @@ def run_height_estimation_task(task: HeightEstimationTask) -> HeightResult:
             identificatie=task.identificatie,
             underpass_id=task.underpass_id,
             status="success",
+            terrain_elevation=metrics["underpass_terrain_elevation"],
             candidate_elevation=metrics["underpass_candidate_elevations"],
             confidence=metrics["underpass_confidence"],
             candidate_peaks=metrics["underpass_metadata"]["candidate_peaks"],
@@ -805,6 +808,7 @@ def update_results(conn: psycopg.Connection, table_name: str, results: Iterable[
         (
             "streetlidar" if result.status == "success" else "fallback",
             result.status,
+            result.terrain_elevation,
             result.candidate_elevation,
             result.confidence,
             Jsonb(result_metadata(result)),
@@ -821,6 +825,7 @@ def update_results(conn: psycopg.Connection, table_name: str, results: Iterable[
         UPDATE {table}
         SET underpass_source = %s,
             underpass_status = %s,
+            underpass_terrain_elevation = %s,
             underpass_candidate_elevations = %s,
             underpass_confidence = %s,
             underpass_metadata = %s,

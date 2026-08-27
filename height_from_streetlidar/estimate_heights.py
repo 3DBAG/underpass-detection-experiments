@@ -15,6 +15,7 @@ def write_metrics_csv(rows, output_path):
             lineterminator="\n",
             fieldnames=[
                 "identificatie",
+                "underpass_terrain_elevation",
                 "underpass_candidate_elevations",
                 "underpass_confidence",
                 "underpass_metadata",

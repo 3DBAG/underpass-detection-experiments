@@ -8,6 +8,7 @@ CSV_PATH = Path("underpass_heights.csv")
 GPKG_PATH = Path("/Users/ravi/git/underpass-detection-experiments/modelling_3d/sample_data/demo_ams_underpasses.gpkg")
 FEATURE_TABLE = "offset_polygons"
 TARGET_COLUMN = "underpass_candidate_elevations"
+TERRAIN_ELEVATION_COLUMN = "underpass_terrain_elevation"
 CONFIDENCE_COLUMN = "underpass_confidence"
 DEBUG_COLUMN = "underpass_metadata"
 SOURCE_COLUMN = "underpass_source"
@@ -96,6 +97,12 @@ def load_underpass_values(csv_path):
             if not identificatie or not encoded_elevation:
                 continue
             elevation = float(encoded_elevation)
+            encoded_terrain_elevation = row.get("underpass_terrain_elevation")
+            terrain_elevation = (
+                float(encoded_terrain_elevation)
+                if encoded_terrain_elevation not in (None, "")
+                else None
+            )
             encoded_confidence = row.get("underpass_confidence")
             confidence = (
                 float(encoded_confidence)
@@ -105,6 +112,7 @@ def load_underpass_values(csv_path):
             encoded_metadata = row.get("underpass_metadata")
             values[identificatie] = (
                 elevation,
+                terrain_elevation,
                 confidence,
                 encoded_metadata or None,
             )
@@ -147,6 +155,7 @@ def ensure_real_column(con, table_name, column_name):
 def merge_underpass_values(gpkg_path, underpass_values):
     with connect_gpkg(gpkg_path) as con:
         ensure_real_column(con, FEATURE_TABLE, TARGET_COLUMN)
+        ensure_real_column(con, FEATURE_TABLE, TERRAIN_ELEVATION_COLUMN)
         ensure_real_column(con, FEATURE_TABLE, CONFIDENCE_COLUMN)
         ensure_text_column(con, FEATURE_TABLE, DEBUG_COLUMN)
         ensure_text_column(con, FEATURE_TABLE, SOURCE_COLUMN)
@@ -160,19 +169,20 @@ def merge_underpass_values(gpkg_path, underpass_values):
         fallback_rows = 0
         for fid, identificatie in rows:
             if identificatie in underpass_values:
-                value, confidence, debug_value = underpass_values[identificatie]
+                value, terrain_elevation, confidence, debug_value = underpass_values[identificatie]
                 source = "streetlidar"
                 matched_rows += 1
             else:
                 value = None
+                terrain_elevation = None
                 confidence = None
                 debug_value = None
                 source = "fallback"
                 fallback_rows += 1
-            updates.append((value, confidence, debug_value, source, fid))
+            updates.append((value, terrain_elevation, confidence, debug_value, source, fid))
 
         con.executemany(
-            f'update "{FEATURE_TABLE}" set "{TARGET_COLUMN}" = ?, "{CONFIDENCE_COLUMN}" = ?, "{DEBUG_COLUMN}" = ?, "{SOURCE_COLUMN}" = ? where fid = ?',
+            f'update "{FEATURE_TABLE}" set "{TARGET_COLUMN}" = ?, "{TERRAIN_ELEVATION_COLUMN}" = ?, "{CONFIDENCE_COLUMN}" = ?, "{DEBUG_COLUMN}" = ?, "{SOURCE_COLUMN}" = ? where fid = ?',
             updates,
         )
         con.commit()

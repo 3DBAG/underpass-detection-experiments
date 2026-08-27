@@ -108,6 +108,10 @@ class TerrainPeakFilterTests(unittest.TestCase):
         elevation = result["underpass_metrics"]["underpass_candidate_elevations"]
         self.assertAlmostEqual(elevation, 5.025)
         self.assertAlmostEqual(
+            result["underpass_metrics"]["underpass_terrain_elevation"],
+            1.0,
+        )
+        self.assertAlmostEqual(
             result["underpass_metrics"]["underpass_confidence"],
             0.25,
         )

@@ -41,6 +41,8 @@ Configure the eligibility thresholds with `PEAK_MIN_RAW_COUNT`,
 - A figure title containing the case identifier and polygon area
 - One PNG per BAG id, named `<bag_id>_peak_grids_overlay.png`
 - A CSV summary written to `underpass_heights.csv`, with the production field
+  `underpass_terrain_elevation` containing the Mapterhorn terrain reference in
+  m NAP,
   `underpass_candidate_elevations` containing the rank-1 selected peak as one
   absolute elevation (or empty when no peak passes phase 2), and
   `underpass_confidence`, defined as that peak's total lower-peak-masked area
