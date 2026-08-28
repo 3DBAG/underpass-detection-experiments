@@ -69,6 +69,7 @@
               py.shapely
               py3dtilesWithLas
               pkgs.proj
+              pkgs.gdal
               pkgs.uv
               pkgs.zig
               pkgs.zls
