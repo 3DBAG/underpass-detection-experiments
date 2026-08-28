@@ -82,6 +82,37 @@ struct SurfaceAttributeGroups {
     std::vector<uint32_t> offsets{0};
 };
 
+struct InputAttributeSelection {
+    bool copy_all = true;
+    std::unordered_set<std::string> names;
+
+    bool includes(std::string_view name) const {
+        return copy_all || names.contains(std::string(name));
+    }
+};
+
+static InputAttributeSelection parse_input_attribute_selection(std::string_view value) {
+    InputAttributeSelection result;
+    if (value == "all") {
+        return result;
+    }
+
+    result.copy_all = false;
+    size_t start = 0;
+    while (start <= value.size()) {
+        const size_t end = value.find(',', start);
+        const std::string_view name = value.substr(start, end == std::string_view::npos ? value.size() - start : end - start);
+        if (!name.empty() && name != "none") {
+            result.names.emplace(name);
+        }
+        if (end == std::string_view::npos) {
+            break;
+        }
+        start = end + 1;
+    }
+    return result;
+}
+
 static std::vector<uint32_t> semantic_surface_attribute_group_indices(
     const std::vector<int32_t>& underpass_indices,
     const SurfaceAttributeGroups& groups) {
@@ -190,21 +221,31 @@ static SourceAttributeBuffers source_attribute_buffers(
 
 static SurfaceAttributeGroups surface_attribute_groups(
     const std::vector<ogr::VectorReader::PolygonFeature>& polygon_features,
-    const std::vector<UnderpassSurfaceSource>& underpasses) {
+    const std::vector<UnderpassSurfaceSource>& underpasses,
+    const InputAttributeSelection& input_attribute_selection,
+    std::string_view underpass_source_attribute) {
     SurfaceAttributeGroups out;
     for (const auto& underpass : underpasses) {
         if (underpass.polygon_feature_index < polygon_features.size()) {
             for (const auto& attribute : polygon_features[underpass.polygon_feature_index].source_attributes) {
-                if (attribute.name.empty()) {
+                if (attribute.name.empty() || !input_attribute_selection.includes(attribute.name)) {
                     continue;
                 }
                 out.attributes.names.push_back(attribute.name.c_str());
                 out.attributes.name_lens.push_back(attribute.name.size());
-                out.attributes.types.push_back(static_cast<uint8_t>(attribute.type));
-                out.attributes.integer_values.push_back(attribute.integer_value);
-                out.attributes.real_values.push_back(attribute.real_value);
-                out.attributes.string_values.push_back(attribute.string_value.c_str());
-                out.attributes.string_value_lens.push_back(attribute.string_value.size());
+                if (underpass.used_fallback_height && attribute.name == underpass_source_attribute) {
+                    out.attributes.types.push_back(static_cast<uint8_t>(ogr::VectorReader::AttributeType::String));
+                    out.attributes.integer_values.push_back(0);
+                    out.attributes.real_values.push_back(0.0);
+                    out.attributes.string_values.push_back("heuristic");
+                    out.attributes.string_value_lens.push_back(sizeof("heuristic") - 1);
+                } else {
+                    out.attributes.types.push_back(static_cast<uint8_t>(attribute.type));
+                    out.attributes.integer_values.push_back(attribute.integer_value);
+                    out.attributes.real_values.push_back(attribute.real_value);
+                    out.attributes.string_values.push_back(attribute.string_value.c_str());
+                    out.attributes.string_value_lens.push_back(attribute.string_value.size());
+                }
             }
         }
         out.offsets.push_back(static_cast<uint32_t>(out.attributes.size()));
@@ -216,7 +257,7 @@ static SurfaceAttributeGroups surface_attribute_groups(
 // ground_z: building ground level (local coords).
 // underpass_z: underpass ceiling height (local coords).
 static constexpr double kMinimumPeakHeightAboveFloor = 2.0;
-static constexpr double kFallbackUnderpassHeightAboveFloor = 2.5;
+static constexpr double kFallbackUnderpassHeightAboveFloor = 2.4;
 static std::vector<uint8_t> classify_triangle_semantics(
     const manifold::MeshGL& mesh,
     double ground_z,
@@ -317,12 +358,14 @@ static FeatureCarveResult carve_underpasses_for_feature(
 
         auto t_conversion_start = Clock::now();
         // The candidate is the absolute elevation of the rank-1 peak.
+        bool used_fallback_height = true;
         double roof_height = result.house_min_z + kFallbackUnderpassHeightAboveFloor;
         if (feature.candidate_elevation.has_value()) {
             const double local_elevation = *feature.candidate_elevation - global_offset_z;
             if (std::isfinite(local_elevation) &&
                 local_elevation >= result.house_min_z + kMinimumPeakHeightAboveFloor) {
                 roof_height = local_elevation;
+                used_fallback_height = false;
             }
         }
         auto offset_polygon = make_offset_polygon(
@@ -365,6 +408,7 @@ static FeatureCarveResult carve_underpasses_for_feature(
             .polygon_feature_index = feature_idx,
             .polygon = &feature.polygon,
             .roof_z_local = roof_height,
+            .used_fallback_height = used_fallback_height,
         });
         ++merged_feature_count;
     }
@@ -458,6 +502,8 @@ struct StreamProcessingContext {
     const std::string& feature_source_filename;
     BooleanMethod method;
     SourceAttributeTarget source_attribute_target;
+    InputAttributeSelection input_attribute_selection;
+    std::string underpass_source_attribute;
     bool ignore_holes;
     bool& global_offset_set;
     double& global_offset_x;
@@ -1156,7 +1202,8 @@ static bool process_stream_features(Backend& backend, StreamProcessingContext& c
             const SurfaceAttributeGroups* grouped_surface_attributes_ptr = nullptr;
             if (ctx.source_attribute_target == SourceAttributeTarget::SemanticSurface) {
                 grouped_surface_attributes = surface_attribute_groups(
-                    ctx.polygon_features, carve_result.underpasses);
+                    ctx.polygon_features, carve_result.underpasses,
+                    ctx.input_attribute_selection, ctx.underpass_source_attribute);
                 grouped_surface_attributes_ptr = &grouped_surface_attributes;
             }
             auto t_output_write_start_local = Clock::now();
@@ -1293,10 +1340,10 @@ int main(int argc, char* argv[]) {
 
     if (argc < 5) {
         std::cerr << "Usage: " << argv[0]
-                  << " <ogr_source> <model_input> <model_output> <candidate_elevation_attribute> [id_attribute] [method] [copy_source_attributes] [boolean_obj_output]" << std::endl;
+                  << " <ogr_source> <model_input> <model_output> <candidate_elevation_attribute> [id_attribute] [method] [copy_source_attributes] [boolean_obj_output] [input_attributes] [underpass_source_attribute]" << std::endl;
         std::cerr << "  model formats: .fcb (FlatCityBuf) or .jsonl (CityJSONSeq)" << std::endl;
         std::cerr << "  id_attribute default: identificatie" << std::endl;
-        std::cerr << "  the rank-1 peak is used when at least 2 m above the floor; a missing or invalid value falls back to 2.5 m" << std::endl;
+        std::cerr << "  the rank-1 peak is used when at least 2 m above the floor; a missing or invalid value falls back to 2.4 m" << std::endl;
         std::cerr << "  method: pmp (default), manifold, nef"
 #ifdef ENABLE_GEOGRAM
                   << ", geogram"
@@ -1304,6 +1351,8 @@ int main(int argc, char* argv[]) {
                   << std::endl;
         std::cerr << "  copy_source_attributes: none (default), feature, parent, surface (CityJSONSeq only)" << std::endl;
         std::cerr << "  boolean_obj_output: optional OBJ file containing all meshes directly after boolean operations" << std::endl;
+        std::cerr << "  input_attributes: comma-separated OGR attributes to copy, all (default), or none" << std::endl;
+        std::cerr << "  underpass_source_attribute: source-marker attribute name (default: underpass_source); fallback heights write heuristic" << std::endl;
         std::cerr << "  use '-' as input to read FCB from stdin" << std::endl;
         std::cerr << "  use '-' as output to write FCB to stdout" << std::endl;
         std::cerr << "  CityJSONSeq stdin/stdout piping is not supported yet" << std::endl;
@@ -1318,6 +1367,9 @@ int main(int argc, char* argv[]) {
     std::string method_str = argc > 6 ? argv[6] : "pmp";
     std::string copy_source_attributes_str = argc > 7 ? argv[7] : "none";
     std::string boolean_obj_output = argc > 8 ? argv[8] : "";
+    std::string input_attributes_str = argc > 9 ? argv[9] : "all";
+    std::string underpass_source_attribute = argc > 10 ? argv[10] : "underpass_source";
+    InputAttributeSelection input_attribute_selection = parse_input_attribute_selection(input_attributes_str);
     const bool model_from_stdin = std::string_view(model_path) == "-";
     const bool output_to_stdout = std::string_view(output_path) == "-";
     std::ostream& log_out = output_to_stdout ? static_cast<std::ostream&>(std::cerr) : static_cast<std::ostream&>(std::cout);
@@ -1497,6 +1549,8 @@ int main(int argc, char* argv[]) {
         .feature_source_filename = feature_source_filename,
         .method = method,
         .source_attribute_target = source_attribute_target,
+        .input_attribute_selection = std::move(input_attribute_selection),
+        .underpass_source_attribute = std::move(underpass_source_attribute),
         .ignore_holes = ignore_holes,
         .global_offset_set = global_offset_set,
         .global_offset_x = global_offset_x,

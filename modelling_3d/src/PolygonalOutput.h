@@ -14,6 +14,7 @@ struct UnderpassSurfaceSource {
     size_t polygon_feature_index = 0;
     const ogr::LinearRing* polygon = nullptr;
     double roof_z_local = 0.0;
+    bool used_fallback_height = false;
 };
 
 struct PolygonalOutput {

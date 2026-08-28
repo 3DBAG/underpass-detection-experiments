@@ -86,7 +86,7 @@ With PostgreSQL/PostGIS as OGR source:
   underpass_candidate_elevations identificatie manifold
 ```
 
-Arguments: `<ogr_source> <model_input> <model_output> <candidate_elevation_attr> [id_attr] [method] [copy_source_attributes] [boolean_obj_output]`
+Arguments: `<ogr_source> <model_input> <model_output> <candidate_elevation_attr> [id_attr] [method] [copy_source_attributes] [boolean_obj_output] [input_attributes] [underpass_source_attribute]`
 
 | Argument | Default | Description |
 |----------|---------|-------------|
@@ -96,8 +96,10 @@ Arguments: `<ogr_source> <model_input> <model_output> <candidate_elevation_attr>
 | `candidate_elevation_attr` | — | Nullable OGR numeric attribute containing the rank-1 peak's absolute elevation |
 | `id_attr` | `identificatie` | OGR Feature ID attribute name. This is used to match with ID of the building models. |
 | `method` | `pmp` | Boolean method: `manifold`, `nef`, `pmp`, or `geogram` |
-| `copy_source_attributes` | `none` | Copy OGR attributes to `feature`, `parent`, or `none`; use `surface` with CityJSONSeq to attach each OGR feature's attributes and the generated `OuterCeilingSurface` geometry's computed `underpass_area` |
+| `copy_source_attributes` | `none` | Copy OGR attributes to `feature`, `parent`, or `none`; use `surface` with CityJSONSeq to attach selected OGR attributes and the generated `OuterCeilingSurface` geometry's computed `underpass_area` |
 | `boolean_obj_output` | disabled | Write all feature meshes directly after the boolean operation to one OBJ file in local coordinates |
+| `input_attributes` | `all` | Comma-separated OGR attribute names to attach to generated `OuterCeilingSurface` records when `copy_source_attributes=surface`; use `none` to omit all input attributes |
+| `underpass_source_attribute` | `underpass_source` | Name of the source-marker input attribute. When the fallback height is used, its output value is set to `heuristic`; otherwise its input value is retained |
 
 For example, append `none sample_data/after_boolean.obj` to write the boolean results while keeping source attribute copying disabled. Each feature is stored as a named object in the same OBJ file.
 The local origin is the first vertex of the first matched LoD 2.2 feature and is shared by every object in the OBJ.

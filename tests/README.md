@@ -6,8 +6,33 @@ RAYON_NUM_THREADS=3 python run_streetlidar_heights.py --within-index-extent     
 
 Mapterhorn terrain filtering is enabled by default. The runner uses zoom 14, the polygon pixel P90 and a ±2 m peak exclusion distance, with a persistent tile cache at `/data2/rypeters/amsterdam_data/terrain/mapterhorn`. Use `--no-terrain` only for an intentional legacy run; terrain sampling failures otherwise fail the affected row rather than emitting unfiltered peaks.
 
+Plot the selected underpass elevation above its sampled terrain reference and the
+corresponding polygon areas:
+
+```bash
+python plot_streetlidar_underpass_estimates.py
+```
+
+Add `--include-area-histogram` to include polygon areas up to 100 m² and a
+count of larger polygons.
+
 
 ## add_underpasses run results
+
+## Build a CityJSON tile extent index
+
+Create a FlatGeobuf with one extent polygon per CityJSONSeq tile. It records
+the filename's `x-y-z` suffix as `tile_id` and the file path relative to the
+input directory as `filepath`:
+
+```bash
+python build_cityjson_tile_index.py
+python build_cityjson_tile_index.py /path/to/tiles /path/to/tile_index.fgb
+```
+
+The default input directory is
+`/data2/rypeters/ams-run-08-24-rf/seq_underpasses_manifold`, and the default
+output path is `<input_dir>/tile_index.fgb`.
 
 ```
 ADD_UNDERPASS=/home/rypeters/git/underpass-detection-experiments/modelling_3d/result/bin/add_underpass ./run_add_underpass.sh
